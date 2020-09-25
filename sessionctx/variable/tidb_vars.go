@@ -306,6 +306,9 @@ const (
 	// tidb_enable_parallel_apply is used for parallel apply.
 	TiDBEnableParallelApply = "tidb_enable_parallel_apply"
 
+	// tidb_enable_cura_exec is used for cura exec.
+	TiDBEnableCuraExec = "tidb_enable_cura_exec"
+
 	// tidb_backoff_lock_fast is used for tikv backoff base time in milliseconds.
 	TiDBBackoffLockFast = "tidb_backoff_lock_fast"
 
@@ -551,6 +554,7 @@ const (
 	DefTiDBShardAllocateStep           = math.MaxInt64
 	DefTiDBEnableTelemetry             = true
 	DefTiDBEnableParallelApply         = false
+	DefTiDBEnableCuraExec              = false
 	DefTiDBEnableAmendPessimisticTxn   = true
 )
 

@@ -255,6 +255,12 @@ type PhysicalPlan interface {
 
 	// Clone clones this physical plan.
 	Clone() (PhysicalPlan, error)
+
+	// SetSupportCura
+	SetSupportCura(bool)
+
+	// SupportCura
+	SupportCura() bool
 }
 
 type baseLogicalPlan struct {
@@ -285,6 +291,15 @@ type basePhysicalPlan struct {
 	childrenReqProps []*property.PhysicalProperty
 	self             PhysicalPlan
 	children         []PhysicalPlan
+	supportCura bool
+}
+
+func (p *basePhysicalPlan) SetSupportCura(supportCura bool) {
+	p.supportCura = supportCura
+}
+
+func (p *basePhysicalPlan) SupportCura() bool {
+	return p.supportCura
 }
 
 func (p *basePhysicalPlan) cloneWithSelf(newSelf PhysicalPlan) (*basePhysicalPlan, error) {

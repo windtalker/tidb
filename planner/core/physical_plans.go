@@ -829,6 +829,14 @@ type PhysicalMergeJoin struct {
 	Desc bool
 }
 
+/*
+type CuraPlan struct {
+	basePhysicalPlan
+	originalPlan       PhysicalPlan
+	idToChildPlans map[int]PhysicalPlan
+}
+ */
+
 // PhysicalBroadCastJoin only works for TiFlash Engine, which broadcast the small table to every replica of probe side of tables.
 type PhysicalBroadCastJoin struct {
 	basePhysicalJoin

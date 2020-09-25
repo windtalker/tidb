@@ -149,6 +149,57 @@ func postOptimize(sctx sessionctx.Context, plan PhysicalPlan) PhysicalPlan {
 	plan = injectExtraProjection(plan)
 	plan = eliminateUnionScanAndLock(sctx, plan)
 	plan = enableParallelApply(sctx, plan)
+	plan = checkCuraExec(sctx, plan)
+	return plan
+}
+
+func checkCuraSupport(plan PhysicalPlan) {
+	supportCura := false
+	switch plan.(type) {
+	case *PhysicalHashJoin:
+		supportCura = true
+	case *PhysicalSelection:
+		supportCura = true
+	}
+	plan.SetSupportCura(supportCura)
+	for _, child := range plan.Children() {
+		checkCuraSupport(child)
+	}
+}
+
+/*
+func genCuraPlan(plan PhysicalPlan) *CuraPlan {
+	return &CuraPlan{}
+}
+
+func convertToCuraPlan(plan PhysicalPlan) {
+	for idx := 0; idx < len(plan.Children()); idx++ {
+		if plan.Children()[idx].SupportCura() {
+			curaPlan := genCuraPlan(plan.Children()[idx])
+			plan.Children()[idx] = curaPlan
+			for _, p := range curaPlan.idToChildPlans {
+				convertToCuraPlan(p)
+			}
+		} else {
+			convertToCuraPlan(plan.Children()[idx])
+		}
+	}
+}
+ */
+
+func checkCuraExec(sctx sessionctx.Context, plan PhysicalPlan) PhysicalPlan {
+	if !sctx.GetSessionVars().EnableCuraExec {
+		return plan
+	}
+	checkCuraSupport(plan)
+
+	/*
+	if plan.SupportCura() {
+		return genCuraPlan(plan)
+	}
+	convertToCuraPlan(plan)
+	return plan
+	 */
 	return plan
 }
 
