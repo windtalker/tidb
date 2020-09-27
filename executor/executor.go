@@ -1530,10 +1530,55 @@ func (e *UnionExec) Close() error {
 	return e.baseExecutor.Close()
 }
 
+type curaResult struct {
+	chk *chunk.Chunk
+	err error
+}
+
 type CuraExec struct {
 	baseExecutor
 	jsonPlan      []byte
 	idToExecutors map[int64]Executor
+
+	curaResultChan chan *curaResult
+	curaRunStarted bool
+}
+
+func (e *CuraExec) Open(ctx context.Context) error {
+	if err := e.baseExecutor.Open(ctx); err != nil {
+		return err
+	}
+	e.curaRunStarted = false
+	// todo avoid hard code
+	e.curaResultChan = make(chan *curaResult, 10)
+	return nil
+}
+
+func (e *CuraExec) Next(ctx context.Context, req *chunk.Chunk) error {
+	req.GrowAndReset(e.maxChunkSize)
+	if e.curaRunStarted {
+		// run cura exec in another thread
+	}
+	result, ok := <-e.curaResultChan
+	if !ok {
+		return nil
+	}
+	if result.err != nil {
+		return errors.Trace(result.err)
+	}
+
+	req.SwapColumns(result.chk)
+	// result.src <- result.chk
+	return nil
+}
+
+func (e *CuraExec) Close() error {
+	if e.curaResultChan != nil {
+		for range e.curaResultChan {
+		}
+	}
+	// todo close cura run thread
+	return e.baseExecutor.Close()
 }
 
 // ResetContextOfStmt resets the StmtContext and session variables.

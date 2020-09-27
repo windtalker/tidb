@@ -16,6 +16,7 @@ package executor
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"sort"
 	"strings"
 	"sync"
@@ -3622,36 +3623,42 @@ func (b *executorBuilder) buildBatchPointGet(plan *plannercore.BatchPointGetPlan
 }
 
 type CuraPlan struct {
-	json          []byte
-	childrenPlans map[int64]plannercore.PhysicalPlan
+	plans []plannercore.PhysicalPlan
 }
 
-func (b *executorBuilder) buildCuraJsonPlanAndChildrenPlans(p plannercore.PhysicalPlan, curaPlan *CuraPlan) {
-	// step 1 gen json plan
-	// step 2 check children plan
+func (b *executorBuilder) getCuraRelatedPlans(p plannercore.PhysicalPlan, curaPlan *CuraPlan) {
 	for _, child := range p.Children() {
 		if child.SupportCura() {
-			b.buildCuraJsonPlanAndChildrenPlans(child, curaPlan)
+			b.getCuraRelatedPlans(child, curaPlan)
 		} else {
-			curaPlan.childrenPlans[b.curaID] = child
-			b.curaID = b.curaID + 1
+			curaPlan.plans = append(curaPlan.plans, child)
 		}
 	}
+	curaPlan.plans = append(curaPlan.plans, p)
 }
 
 func (b *executorBuilder) buildCuraExec(p plannercore.PhysicalPlan) Executor {
 	idToChildrenExecutors := make(map[int64]Executor)
-	curaPlan := CuraPlan{json: make([]byte, 5, 5), childrenPlans: make(map[int64]plannercore.PhysicalPlan)}
-	b.buildCuraJsonPlanAndChildrenPlans(p, &curaPlan)
+	curaPlan := CuraPlan{plans: make([]plannercore.PhysicalPlan, 0, 5)}
+	b.getCuraRelatedPlans(p, &curaPlan)
 	var allExecs []Executor
-	for id, plan := range curaPlan.childrenPlans {
-		executor := b.build(plan)
-		idToChildrenExecutors[id] = executor
-		allExecs = append(allExecs, executor)
+	id := int64(1)
+	for _, plan := range curaPlan.plans {
+		if plan.SupportCura() {
+			// generate json
+		} else {
+			executor := b.build(plan)
+			idToChildrenExecutors[id] = executor
+			allExecs = append(allExecs, executor)
+			id++
+			// generate json
+			json.Marshal()
+		}
 	}
 	e := &CuraExec{idToExecutors: idToChildrenExecutors,
-		jsonPlan:     curaPlan.json,
-		baseExecutor: newBaseExecutor(b.ctx, p.Schema(), p.ID(), allExecs...)}
+		jsonPlan:       make([]byte, 0, 10),
+		baseExecutor:   newBaseExecutor(b.ctx, p.Schema(), p.ID(), allExecs...),
+		curaRunStarted: false}
 	return e
 }
 
