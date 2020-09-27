@@ -185,7 +185,7 @@ func convertToCuraPlan(plan PhysicalPlan) {
 		}
 	}
 }
- */
+*/
 
 func checkCuraExec(sctx sessionctx.Context, plan PhysicalPlan) PhysicalPlan {
 	if !sctx.GetSessionVars().EnableCuraExec {
@@ -194,12 +194,12 @@ func checkCuraExec(sctx sessionctx.Context, plan PhysicalPlan) PhysicalPlan {
 	checkCuraSupport(plan)
 
 	/*
-	if plan.SupportCura() {
-		return genCuraPlan(plan)
-	}
-	convertToCuraPlan(plan)
-	return plan
-	 */
+		if plan.SupportCura() {
+			return genCuraPlan(plan)
+		}
+		convertToCuraPlan(plan)
+		return plan
+	*/
 	return plan
 }
 

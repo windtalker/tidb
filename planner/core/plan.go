@@ -291,7 +291,7 @@ type basePhysicalPlan struct {
 	childrenReqProps []*property.PhysicalProperty
 	self             PhysicalPlan
 	children         []PhysicalPlan
-	supportCura bool
+	supportCura      bool
 }
 
 func (p *basePhysicalPlan) SetSupportCura(supportCura bool) {

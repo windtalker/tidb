@@ -1100,7 +1100,7 @@ func init() {
 			ctx = opentracing.ContextWithSpan(ctx, span1)
 		}
 
-		e := &executorBuilder{is: is, ctx: sctx}
+		e := &executorBuilder{is: is, ctx: sctx, curaID: 1}
 		exec := e.build(p)
 		if e.err != nil {
 			return nil, e.err
@@ -1528,6 +1528,12 @@ func (e *UnionExec) Close() error {
 		}
 	}
 	return e.baseExecutor.Close()
+}
+
+type CuraExec struct {
+	baseExecutor
+	jsonPlan      []byte
+	idToExecutors map[int64]Executor
 }
 
 // ResetContextOfStmt resets the StmtContext and session variables.
