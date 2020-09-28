@@ -1556,8 +1556,9 @@ func (e *CuraExec) Open(ctx context.Context) error {
 
 func (e *CuraExec) Next(ctx context.Context, req *chunk.Chunk) error {
 	req.GrowAndReset(e.maxChunkSize)
-	if e.curaRunStarted {
+	if !e.curaRunStarted {
 		// run cura exec in another thread
+		e.curaRunStarted = true
 	}
 	result, ok := <-e.curaResultChan
 	if !ok {
