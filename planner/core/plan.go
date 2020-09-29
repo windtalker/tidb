@@ -261,6 +261,8 @@ type PhysicalPlan interface {
 
 	// SupportCura
 	SupportCura() bool
+
+	ToCuraJson([]byte) ([]byte, error)
 }
 
 type baseLogicalPlan struct {
@@ -300,6 +302,10 @@ func (p *basePhysicalPlan) SetSupportCura(supportCura bool) {
 
 func (p *basePhysicalPlan) SupportCura() bool {
 	return p.supportCura
+}
+
+func (p *basePhysicalPlan) ToCuraJson(in []byte) ([]byte, error) {
+	return in, errors.New("ToCuraJson: Not supported")
 }
 
 func (p *basePhysicalPlan) cloneWithSelf(newSelf PhysicalPlan) (*basePhysicalPlan, error) {

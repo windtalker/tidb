@@ -16,7 +16,6 @@ package executor
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"sort"
 	"strings"
 	"sync"
@@ -3643,16 +3642,22 @@ func (b *executorBuilder) buildCuraExec(p plannercore.PhysicalPlan) Executor {
 	b.getCuraRelatedPlans(p, &curaPlan)
 	var allExecs []Executor
 	id := int64(1)
+	jsonPlan := make([]byte, 0, 5)
+	var err error = nil
 	for _, plan := range curaPlan.plans {
 		if plan.SupportCura() {
 			// generate json
+			jsonPlan, err = plan.ToCuraJson(jsonPlan)
+			if err != nil {
+				b.err = err
+				return nil
+			}
 		} else {
 			executor := b.build(plan)
 			idToChildrenExecutors[id] = executor
 			allExecs = append(allExecs, executor)
 			id++
 			// generate json
-			json.Marshal()
 		}
 	}
 	e := &CuraExec{idToExecutors: idToChildrenExecutors,
