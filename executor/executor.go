@@ -1537,7 +1537,7 @@ type curaResult struct {
 
 type CuraExec struct {
 	baseExecutor
-	jsonPlan      []byte
+	jsonPlan      string
 	idToExecutors map[int64]Executor
 
 	curaResultChan chan *curaResult

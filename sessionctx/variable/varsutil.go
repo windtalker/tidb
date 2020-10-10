@@ -729,7 +729,7 @@ func ValidateSetSystemVar(vars *SessionVars, name string, value string, scope Sc
 		if !PartitionPruneMode(value).Valid() {
 			return value, ErrWrongTypeForVar.GenWithStackByArgs(name)
 		}
-	case TiDBAllowRemoveAutoInc, TiDBUsePlanBaselines, TiDBEvolvePlanBaselines, TiDBEnableParallelApply:
+	case TiDBAllowRemoveAutoInc, TiDBUsePlanBaselines, TiDBEvolvePlanBaselines, TiDBEnableParallelApply, TiDBEnableCuraExec:
 		switch {
 		case strings.EqualFold(value, "ON") || value == "1":
 			return "on", nil

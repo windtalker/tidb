@@ -17,6 +17,7 @@ import (
 	"bytes"
 	"context"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -3859,7 +3860,11 @@ func (b *executorBuilder) buildCuraExec(p plannercore.PhysicalPlan) Executor {
 	id := int64(1)
 	jsonPlan := make([]byte, 0, 5)
 	var err error = nil
-	for _, plan := range curaPlan.plans {
+	jsonPlan = append(jsonPlan, []byte("{\"rels\": [")...)
+	for idx, plan := range curaPlan.plans {
+		if idx != 0 {
+			jsonPlan = append(jsonPlan, ',')
+		}
 		if plan.SupportCura() {
 			// generate json
 			jsonPlan, err = plan.ToCuraJson(jsonPlan)
@@ -3871,12 +3876,27 @@ func (b *executorBuilder) buildCuraExec(p plannercore.PhysicalPlan) Executor {
 			executor := b.build(plan)
 			idToChildrenExecutors[id] = executor
 			allExecs = append(allExecs, executor)
-			id++
 			// generate json
+			jsonPlan = append(jsonPlan, []byte("{\"rel_op\": \"InputSource\",\"source_id\":")...)
+			jsonPlan = append(jsonPlan, []byte(strconv.FormatInt(id, 10))...)
+			jsonPlan = append(jsonPlan, []byte(", \"schema\": [")...)
+			for sIdx, col := range plan.Schema().Columns {
+				if sIdx != 0 {
+					jsonPlan = append(jsonPlan, ',')
+				}
+				jsonPlan, err = plannercore.TypeToCuraJson(col.RetType, jsonPlan)
+				if err != nil {
+					b.err = err
+					return nil
+				}
+			}
+			jsonPlan = append(jsonPlan, []byte("]}")...)
+			id++
 		}
 	}
+	jsonPlan = append(jsonPlan, []byte("]}")...)
 	e := &CuraExec{idToExecutors: idToChildrenExecutors,
-		jsonPlan:       make([]byte, 0, 10),
+		jsonPlan:       string(jsonPlan),
 		baseExecutor:   newBaseExecutor(b.ctx, p.Schema(), p.ID(), allExecs...),
 		curaRunStarted: false}
 	return e
