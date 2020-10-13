@@ -3896,9 +3896,9 @@ func (b *executorBuilder) buildCuraExec(p plannercore.PhysicalPlan) Executor {
 	}
 	jsonPlan = append(jsonPlan, []byte("]}")...)
 	e := &CuraExec{idToExecutors: idToChildrenExecutors,
-		jsonPlan:       string(jsonPlan),
-		baseExecutor:   newBaseExecutor(b.ctx, p.Schema(), p.ID(), allExecs...),
-		curaRunStarted: false}
+		jsonPlan:     string(jsonPlan),
+		baseExecutor: newBaseExecutor(b.ctx, p.Schema(), p.ID(), allExecs...),
+		prepared:     false}
 	return e
 }
 

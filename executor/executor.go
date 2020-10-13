@@ -58,6 +58,7 @@ import (
 	"github.com/pingcap/tidb/util/execdetails"
 	"github.com/pingcap/tidb/util/logutil"
 	"github.com/pingcap/tidb/util/memory"
+	"github.com/zanmato1984/cura/go/cura"
 	"go.uber.org/zap"
 )
 
@@ -1541,24 +1542,56 @@ type CuraExec struct {
 	idToExecutors map[int64]Executor
 
 	curaResultChan chan *curaResult
-	curaRunStarted bool
+	prepared       bool
+	runner         *CuraRunner
+	wg             sync.WaitGroup
+}
+
+type CuraRunner struct {
+	curaExec *CuraExec
+}
+
+func (f *CuraRunner) run(ctx context.Context) {
+	defer func() {
+		f.curaExec.wg.Done()
+	}()
+	driver := cura.NewDriver()
+	err, explained := driver.Explain(f.curaExec.jsonPlan, true)
+	if err <= 0 {
+		fmt.Println("Explain cura failed")
+	} else {
+		for _, line := range explained {
+			fmt.Println(line)
+		}
+	}
+
+	err = driver.Compile(f.curaExec.jsonPlan)
+	if err != 0 {
+		fmt.Println("Compile cura failed")
+	}
 }
 
 func (e *CuraExec) Open(ctx context.Context) error {
 	if err := e.baseExecutor.Open(ctx); err != nil {
 		return err
 	}
-	e.curaRunStarted = false
+	e.prepared = false
+	return nil
+}
+
+func (e *CuraExec) prepare(ctx context.Context) {
 	// todo avoid hard code
 	e.curaResultChan = make(chan *curaResult, 10)
-	return nil
+	e.runner = &CuraRunner{curaExec: e}
+	e.wg.Add(1)
+	go e.runner.run(ctx)
 }
 
 func (e *CuraExec) Next(ctx context.Context, req *chunk.Chunk) error {
 	req.GrowAndReset(e.maxChunkSize)
-	if !e.curaRunStarted {
-		// run cura exec in another thread
-		e.curaRunStarted = true
+	if !e.prepared {
+		e.prepare(ctx)
+		e.prepared = true
 	}
 	result, ok := <-e.curaResultChan
 	if !ok {
@@ -1574,11 +1607,11 @@ func (e *CuraExec) Next(ctx context.Context, req *chunk.Chunk) error {
 }
 
 func (e *CuraExec) Close() error {
-	if e.curaResultChan != nil {
+	if e.prepared {
+		e.wg.Wait()
 		for range e.curaResultChan {
 		}
 	}
-	// todo close cura run thread
 	return e.baseExecutor.Close()
 }
 

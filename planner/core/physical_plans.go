@@ -14,13 +14,13 @@
 package core
 
 import (
-	"github.com/pingcap/parser/mysql"
 	"strconv"
 	"unsafe"
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/parser/ast"
 	"github.com/pingcap/parser/model"
+	"github.com/pingcap/parser/mysql"
 	"github.com/pingcap/tidb/expression"
 	"github.com/pingcap/tidb/expression/aggregation"
 	"github.com/pingcap/tidb/kv"
@@ -870,16 +870,25 @@ func ExprToCuraJson(expr expression.Expression, jsonPlan []byte) ([]byte, error)
 	return jsonPlan, nil
 }
 
-func joinEqualConditionToCuraJson(leftKey *expression.Column, rightKey *expression.Column, jsonPlan []byte) ([]byte, bool, error) {
+func joinEqualConditionToCuraJson(leftKey *expression.Column, rightKey *expression.Column, leftOffset int, jsonPlan []byte) ([]byte, bool, error) {
 	jsonPlan = append(jsonPlan, []byte("{\"binary_op\": \"EQUAL\", \"operands\": ")...)
 	operands := make([]expression.Expression, 2, 2)
 	operands[0] = leftKey
 	operands[1] = rightKey
 	var err error = nil
-	jsonPlan, err = ExprsToCuraJson(operands, jsonPlan)
+
+	jsonPlan = append(jsonPlan, '[')
+	jsonPlan, err = ExprToCuraJson(leftKey, jsonPlan)
 	if err != nil {
 		return jsonPlan, false, err
 	}
+	jsonPlan = append(jsonPlan, ',')
+	jsonPlan = append(jsonPlan, '{')
+	jsonPlan = append(jsonPlan, []byte("\"col_ref\": ")...)
+	jsonPlan = append(jsonPlan, []byte(strconv.Itoa(rightKey.Index+leftOffset))...)
+	jsonPlan = append(jsonPlan, '}')
+	jsonPlan = append(jsonPlan, ']')
+
 	jsonPlan = append(jsonPlan, []byte(", \"type\": ")...)
 	jsonPlan = append(jsonPlan, []byte("{\"type\": ")...)
 	jsonPlan = append(jsonPlan, []byte("\"INT64\"")...)
@@ -896,7 +905,7 @@ func joinEqualConditionToCuraJson(leftKey *expression.Column, rightKey *expressi
 	return jsonPlan, nullable, nil
 }
 
-func joinEqualConditionsToCuraJson(leftKeys []*expression.Column, rightKeys []*expression.Column, index int, jsonPlan []byte) ([]byte, bool, error) {
+func joinEqualConditionsToCuraJson(leftKeys []*expression.Column, rightKeys []*expression.Column, index, leftOffset int, jsonPlan []byte) ([]byte, bool, error) {
 	var err error = nil
 	var nullable bool = false
 	if index == len(rightKeys)-2 {
@@ -904,12 +913,12 @@ func joinEqualConditionsToCuraJson(leftKeys []*expression.Column, rightKeys []*e
 		jsonPlan = append(jsonPlan, []byte("{\"binary_op\": \"LOGICAL_AND\", \"operands\": [")...)
 		var leftNullable bool = false
 		var rightNullable bool = false
-		jsonPlan, leftNullable, err = joinEqualConditionToCuraJson(leftKeys[index], rightKeys[index], jsonPlan)
+		jsonPlan, leftNullable, err = joinEqualConditionToCuraJson(leftKeys[index], rightKeys[index], leftOffset, jsonPlan)
 		if err != nil {
 			return jsonPlan, false, err
 		}
 		jsonPlan = append(jsonPlan, ',')
-		jsonPlan, rightNullable, err = joinEqualConditionToCuraJson(leftKeys[index+1], rightKeys[index+1], jsonPlan)
+		jsonPlan, rightNullable, err = joinEqualConditionToCuraJson(leftKeys[index+1], rightKeys[index+1], leftOffset, jsonPlan)
 		if err != nil {
 			return jsonPlan, false, err
 		}
@@ -926,12 +935,12 @@ func joinEqualConditionsToCuraJson(leftKeys []*expression.Column, rightKeys []*e
 		jsonPlan = append(jsonPlan, []byte("{\"binary_op\": \"LOGICAL_AND\", \"operands\": [")...)
 		var leftNullable bool = false
 		var rightNullable bool = false
-		jsonPlan, leftNullable, err = joinEqualConditionToCuraJson(leftKeys[index], rightKeys[index], jsonPlan)
+		jsonPlan, leftNullable, err = joinEqualConditionToCuraJson(leftKeys[index], rightKeys[index], leftOffset, jsonPlan)
 		if err != nil {
 			return jsonPlan, false, err
 		}
 		jsonPlan = append(jsonPlan, ',')
-		jsonPlan, rightNullable, err = joinEqualConditionsToCuraJson(leftKeys, rightKeys, index+1, jsonPlan)
+		jsonPlan, rightNullable, err = joinEqualConditionsToCuraJson(leftKeys, rightKeys, index+1, leftOffset, jsonPlan)
 		if err != nil {
 			return jsonPlan, false, err
 		}
@@ -958,12 +967,12 @@ func (p *PhysicalHashJoin) ToCuraJson(jsonPlan []byte) ([]byte, error) {
 	jsonPlan = append(jsonPlan, []byte("{\"rel_op\": \"HashJoin\",\"type\": \"INNER\", \"condition\":")...)
 	var err error = nil
 	if len(p.LeftJoinKeys) == 1 {
-		jsonPlan, _, err = joinEqualConditionToCuraJson(p.LeftJoinKeys[0], p.RightJoinKeys[0], jsonPlan)
+		jsonPlan, _, err = joinEqualConditionToCuraJson(p.LeftJoinKeys[0], p.RightJoinKeys[0], len(p.children[0].Schema().Columns), jsonPlan)
 		if err != nil {
 			return jsonPlan, err
 		}
 	} else {
-		jsonPlan, _, err = joinEqualConditionsToCuraJson(p.LeftJoinKeys, p.RightJoinKeys, 0, jsonPlan)
+		jsonPlan, _, err = joinEqualConditionsToCuraJson(p.LeftJoinKeys, p.RightJoinKeys, 0, len(p.children[0].Schema().Columns), jsonPlan)
 		if err != nil {
 			return jsonPlan, err
 		}
