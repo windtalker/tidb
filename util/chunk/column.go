@@ -56,6 +56,16 @@ func (c *Column) AppendSet(set types.Set) {
 	c.appendNameValue(set.Name, set.Value)
 }
 
+// GetNullBitMap appends a Set value into this Column.
+func (c *Column) GetNullBitMap() []byte {
+	return c.nullBitmap
+}
+
+// GetRawData appends a Set value into this Column.
+func (c *Column) GetRawData() []byte {
+	return c.data
+}
+
 // Column stores one column of data in Apache Arrow format.
 // See https://arrow.apache.org/docs/memory_layout.html
 type Column struct {

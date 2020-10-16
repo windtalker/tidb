@@ -25,6 +25,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/apache/arrow/go/arrow"
+	"github.com/apache/arrow/go/arrow/array"
+	arrowmemory "github.com/apache/arrow/go/arrow/memory"
 	"github.com/cznic/mathutil"
 	"github.com/opentracing/opentracing-go"
 	"github.com/pingcap/errors"
@@ -1551,6 +1554,144 @@ type CuraRunner struct {
 	curaExec *CuraExec
 }
 
+/*
+func fromTiDBSchema(schema *expression.Schema) *C.ArrowSchema {
+	if schema == nil {
+		return nil
+	}
+
+	children := make([]*C.ArrowSchema, len(schema.Columns))
+	for i, col := range schema.Columns {
+		var format string
+		switch col.RetType.Tp {
+		//case arrow.BOOL:
+		//	format = "b"
+		//case arrow.INT8:
+		//	format = "c"
+		//case arrow.UINT8:
+		//	format = "C"
+		//case arrow.INT16:
+		//	format = "s"
+		//case arrow.UINT16:
+		//	format = "S"
+		//case arrow.INT32:
+		//	format = "i"
+		//case arrow.UINT32:
+		//	format = "I"
+		//case arrow.INT64:
+		//	format = "l"
+		//case arrow.UINT64:
+		//	format = "L"
+		//case arrow.FLOAT32:
+		//	format = "f"
+		//case arrow.FLOAT64:
+		//	format = "g"
+		//case arrow.STRING:
+		//	format = "u"
+		case mysql.TypeLonglong:
+			if col.RetType.Flag & mysql.UnsignedFlag == mysql.UnsignedFlag {
+				format = "L"
+			} else {
+				format = "l"
+			}
+		default:
+			return nil
+		}
+		var flags int64 = 0
+		if col.RetType.Flag & mysql.NotNullFlag != mysql.NotNullFlag {
+			flags |= 1
+		}
+		children[i] = cura.NewCSchema(format, col.OrigName, flags, make([]*C.ArrowSchema, 0))
+	}
+	return cura.NewCSchema("+s", "", 0, children)
+}
+
+func getBufferPointer(buffer []byte) uintptr {
+	if len(buffer) == 0 {
+		return uintptr(unsafe.Pointer(nil))
+	}
+	return uintptr(unsafe.Pointer(&buffer[0]))
+}
+*/
+
+func toGoArray(schema *expression.Column, column *chunk.Column, length int) (arrow.Field, array.Interface, error) {
+	var dataType arrow.DataType
+	var buffers []*arrowmemory.Buffer
+	switch schema.RetType.Tp {
+	case mysql.TypeLonglong, mysql.TypeLong:
+		if schema.RetType.Flag&mysql.UnsignedFlag == mysql.UnsignedFlag {
+			dataType = arrow.PrimitiveTypes.Uint64
+		} else {
+			dataType = arrow.PrimitiveTypes.Int64
+		}
+		bufferSize := 2
+		buffers = make([]*arrowmemory.Buffer, bufferSize)
+		if column.GetNullBitMap() == nil {
+			buffers[0] = nil
+		} else {
+			buffers[0] = arrowmemory.NewBufferBytes(column.GetNullBitMap())
+			buffers[0].Retain()
+		}
+		buffers[1] = arrowmemory.NewBufferBytes(column.GetRawData())
+		buffers[1].Retain()
+	default:
+		return arrow.Field{}, nil, errors.New("Unsupported type")
+	}
+	data := array.NewData(dataType, length, buffers, make([]*array.Data, 0), -1, 0)
+	return arrow.Field{Name: schema.OrigName, Type: dataType, Nullable: schema.RetType.Flag&mysql.NotNullFlag != mysql.NotNullFlag}, array.MakeFromData(data), nil
+}
+
+func tidbChunkToArrowRecord(chk *chunk.Chunk, schema *expression.Schema) (array.Record, error) {
+	nColumn := chk.NumCols()
+	fields := make([]arrow.Field, nColumn)
+	children := make([]array.Interface, nColumn)
+	for i := 0; i < nColumn; i++ {
+		field, child, err := toGoArray(schema.Columns[i], chk.Column(i), chk.NumRows())
+		if err != nil {
+			return nil, err
+		}
+		fields[i] = field
+		children[i] = child
+	}
+	s := arrow.NewSchema(fields, nil)
+	record := array.NewRecord(s, children, int64(chk.NumRows()))
+	return record, nil
+}
+
+/*
+func FromTiDBChunk(chk *chunk.Chunk, schema *expression.Schema) *cura.InputRecord {
+	if chk.NumRows() == 0 {
+		return &cura.InputRecord{nil, nil, nil}
+	}
+
+	children := make([]*C.ArrowArray, chk.NumCols())
+	for i := 0; i < chk.NumCols(); i++ {
+		column := chk.Column(i)
+		cType := schema.Columns[i].RetType
+		var buffers []uintptr
+		switch cType.Tp {
+		case mysql.TypeLonglong, mysql.TypeLong:
+			buffers = make([]uintptr, 2)
+			buffers[0] = getBufferPointer(column.GetNullBitMap())
+			buffers[1] = getBufferPointer(column.GetRawData())
+		//case mysql.TypeString:
+		//	buffers := make([]uintptr, 3)
+		default:
+			// todo failed
+		}
+		children[i] = cura.NewCArray(int64(chk.NumRows()), -1, int64(0), buffers, make([]*C.ArrowArray, 0))
+	}
+	buffers := make([]uintptr, 1)
+	buffers[0] = uintptr(unsafe.Pointer(nil))
+
+	cSchema, cArray := fromTiDBSchema(schema), cura.NewCArray(int64(chk.NumRows()), -1, 0, buffers, children)
+	inputRecord := &cura.InputRecord{OrgData: chk, CSchema: cSchema, CArray: cArray}
+	//inputRecord := &InputRecord{*record, cSchema, cArray}
+	runtime.SetFinalizer(inputRecord, cura.ReleaseInputRecord)
+	return inputRecord
+}
+*/
+
 func (f *CuraRunner) run(ctx context.Context) {
 	defer func() {
 		f.curaExec.wg.Done()
@@ -1568,6 +1709,79 @@ func (f *CuraRunner) run(ctx context.Context) {
 	err = driver.Compile(f.curaExec.jsonPlan)
 	if err != 0 {
 		fmt.Println("Compile cura failed")
+	}
+	for driver.HasNextPipeline() {
+		inputRecords := make([][]*cura.InputRecord, 0)
+		final := driver.IsPipelineFinal()
+		if final {
+			for driver.PipelineHasNextSource() {
+				sourceId := driver.PipelineNextSource()
+				if driver.IsHeapSource(sourceId) {
+					var res, outRecord = driver.PipelineStream(sourceId, nil, 100)
+					if res < 0 {
+						// todo failed
+						break
+					}
+					for outRecord != nil {
+						// send out record to tidb
+						res, outRecord = driver.PipelineStream(sourceId, nil, 100)
+						if res < 0 {
+							// todo
+							break
+						}
+					}
+				} else {
+					child := f.curaExec.idToExecutors[sourceId]
+					chk := newFirstChunk(child)
+					Next(ctx, child, chk)
+					if chk.NumRows() > 0 {
+						input, err := tidbChunkToArrowRecord(chk, child.Schema())
+						if err != nil {
+							// todo failed
+						}
+						res, _ := driver.PipelineStream(sourceId, &input, 0)
+						if res < 0 {
+							// todo fail
+						}
+						// send out record to tidb
+						Next(ctx, child, chk)
+					}
+				}
+			}
+		} else {
+			for driver.PipelineHasNextSource() {
+				sourceId := driver.PipelineNextSource()
+				if driver.IsHeapSource(sourceId) {
+					res, _ := driver.PipelinePush(sourceId, nil)
+					if res < 0 {
+						// todo failed
+					}
+				} else {
+					n := len(inputRecords)
+					inputRecords = append(inputRecords, make([]*cura.InputRecord, 0))
+					child := f.curaExec.idToExecutors[sourceId]
+					chk := newFirstChunk(child)
+					Next(ctx, child, chk)
+					if chk.NumRows() > 0 {
+						input, err := tidbChunkToArrowRecord(chk, child.Schema())
+						if err != nil {
+							// todo failed
+						}
+						res, inputRecord := driver.PipelinePush(sourceId, &input)
+						inputRecords[n] = append(inputRecords[n], inputRecord)
+						if res < 0 {
+							// todo failed
+						}
+						chk = newFirstChunk(child)
+						Next(ctx, child, chk)
+					}
+				}
+			}
+		}
+	}
+	err = driver.FinishPipeline()
+	if err != 0 {
+		// todo failed
 	}
 }
 
