@@ -81,6 +81,17 @@ func NewColumn(ft *types.FieldType, cap int) *Column {
 	return newColumn(getFixedLen(ft), cap)
 }
 
+// NewColumnZeroCopy creates a new column with the specific length and capacity.
+func NewColumnZeroCopy(length int, nullBitMap []byte, offsets []int64, data, elemBuf []byte) *Column {
+	return &Column{
+		length:     length,
+		nullBitmap: nullBitMap,
+		offsets:    offsets,
+		data:       data,
+		elemBuf:    elemBuf,
+	}
+}
+
 func newColumn(typeSize, cap int) *Column {
 	var col *Column
 	if typeSize == varElemLen {

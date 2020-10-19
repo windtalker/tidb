@@ -1546,6 +1546,7 @@ type CuraExec struct {
 
 	curaResultChan chan *curaResult
 	prepared       bool
+	meetError      atomic.Value
 	runner         *CuraRunner
 	wg             sync.WaitGroup
 }
@@ -1553,66 +1554,6 @@ type CuraExec struct {
 type CuraRunner struct {
 	curaExec *CuraExec
 }
-
-/*
-func fromTiDBSchema(schema *expression.Schema) *C.ArrowSchema {
-	if schema == nil {
-		return nil
-	}
-
-	children := make([]*C.ArrowSchema, len(schema.Columns))
-	for i, col := range schema.Columns {
-		var format string
-		switch col.RetType.Tp {
-		//case arrow.BOOL:
-		//	format = "b"
-		//case arrow.INT8:
-		//	format = "c"
-		//case arrow.UINT8:
-		//	format = "C"
-		//case arrow.INT16:
-		//	format = "s"
-		//case arrow.UINT16:
-		//	format = "S"
-		//case arrow.INT32:
-		//	format = "i"
-		//case arrow.UINT32:
-		//	format = "I"
-		//case arrow.INT64:
-		//	format = "l"
-		//case arrow.UINT64:
-		//	format = "L"
-		//case arrow.FLOAT32:
-		//	format = "f"
-		//case arrow.FLOAT64:
-		//	format = "g"
-		//case arrow.STRING:
-		//	format = "u"
-		case mysql.TypeLonglong:
-			if col.RetType.Flag & mysql.UnsignedFlag == mysql.UnsignedFlag {
-				format = "L"
-			} else {
-				format = "l"
-			}
-		default:
-			return nil
-		}
-		var flags int64 = 0
-		if col.RetType.Flag & mysql.NotNullFlag != mysql.NotNullFlag {
-			flags |= 1
-		}
-		children[i] = cura.NewCSchema(format, col.OrigName, flags, make([]*C.ArrowSchema, 0))
-	}
-	return cura.NewCSchema("+s", "", 0, children)
-}
-
-func getBufferPointer(buffer []byte) uintptr {
-	if len(buffer) == 0 {
-		return uintptr(unsafe.Pointer(nil))
-	}
-	return uintptr(unsafe.Pointer(&buffer[0]))
-}
-*/
 
 func toGoArray(schema *expression.Column, column *chunk.Column, length int) (arrow.Field, array.Interface, error) {
 	var dataType arrow.DataType
@@ -1658,39 +1599,26 @@ func tidbChunkToArrowRecord(chk *chunk.Chunk, schema *expression.Schema) (array.
 	return record, nil
 }
 
-/*
-func FromTiDBChunk(chk *chunk.Chunk, schema *expression.Schema) *cura.InputRecord {
-	if chk.NumRows() == 0 {
-		return &cura.InputRecord{nil, nil, nil}
-	}
-
-	children := make([]*C.ArrowArray, chk.NumCols())
-	for i := 0; i < chk.NumCols(); i++ {
-		column := chk.Column(i)
-		cType := schema.Columns[i].RetType
-		var buffers []uintptr
-		switch cType.Tp {
-		case mysql.TypeLonglong, mysql.TypeLong:
-			buffers = make([]uintptr, 2)
-			buffers[0] = getBufferPointer(column.GetNullBitMap())
-			buffers[1] = getBufferPointer(column.GetRawData())
-		//case mysql.TypeString:
-		//	buffers := make([]uintptr, 3)
-		default:
-			// todo failed
+func arrowRecordToTiDBChunk(record array.Record, chk *chunk.Chunk) error {
+	for idx, col := range record.Columns() {
+		// todo check type
+		if col.Data().Offset() != 0 {
+			return errors.New("Not supported type")
 		}
-		children[i] = cura.NewCArray(int64(chk.NumRows()), -1, int64(0), buffers, make([]*C.ArrowArray, 0))
+		switch record.Schema().Field(idx).Type.ID() {
+		case arrow.UINT64, arrow.INT64:
+			var nullBitMap []byte = nil
+			if col.Data().Buffers()[0] != nil {
+				nullBitMap = col.Data().Buffers()[0].Buf()
+			}
+			newCol := chunk.NewColumnZeroCopy(col.Data().Len(), nullBitMap, nil, col.Data().Buffers()[1].Buf(), nil)
+			chk.SetCol(idx, newCol)
+		default:
+			return errors.New("Not supported type")
+		}
 	}
-	buffers := make([]uintptr, 1)
-	buffers[0] = uintptr(unsafe.Pointer(nil))
-
-	cSchema, cArray := fromTiDBSchema(schema), cura.NewCArray(int64(chk.NumRows()), -1, 0, buffers, children)
-	inputRecord := &cura.InputRecord{OrgData: chk, CSchema: cSchema, CArray: cArray}
-	//inputRecord := &InputRecord{*record, cSchema, cArray}
-	runtime.SetFinalizer(inputRecord, cura.ReleaseInputRecord)
-	return inputRecord
+	return nil
 }
-*/
 
 func (f *CuraRunner) run(ctx context.Context) {
 	defer func() {
@@ -1709,6 +1637,8 @@ func (f *CuraRunner) run(ctx context.Context) {
 	err = driver.Compile(f.curaExec.jsonPlan)
 	if err != 0 {
 		fmt.Println("Compile cura failed")
+		f.curaExec.meetError.Store(true)
+		return
 	}
 	for driver.HasNextPipeline() {
 		inputRecords := make([][]*cura.InputRecord, 0)
@@ -1719,15 +1649,15 @@ func (f *CuraRunner) run(ctx context.Context) {
 				if driver.IsHeapSource(sourceId) {
 					var res, outRecord = driver.PipelineStream(sourceId, nil, 100)
 					if res < 0 {
-						// todo failed
-						break
+						f.curaExec.meetError.Store(true)
+						return
 					}
 					for outRecord != nil {
 						// send out record to tidb
 						res, outRecord = driver.PipelineStream(sourceId, nil, 100)
 						if res < 0 {
-							// todo
-							break
+							f.curaExec.meetError.Store(true)
+							return
 						}
 					}
 				} else {
@@ -1737,13 +1667,25 @@ func (f *CuraRunner) run(ctx context.Context) {
 					if chk.NumRows() > 0 {
 						input, err := tidbChunkToArrowRecord(chk, child.Schema())
 						if err != nil {
-							// todo failed
+							f.curaExec.meetError.Store(true)
+							return
 						}
-						res, _ := driver.PipelineStream(sourceId, &input, 0)
+						res, arrowOutput := driver.PipelineStream(sourceId, &input, 0)
 						if res < 0 {
-							// todo fail
+							f.curaExec.meetError.Store(true)
+							return
 						}
-						// send out record to tidb
+						// set cap to 0 because we convert arrowOutput to chunk using zeroCopy
+						retChk := chunk.New(f.curaExec.retFieldTypes, 0, int(arrowOutput.Record.NumRows()))
+						if arrowRecordToTiDBChunk(arrowOutput.Record, retChk) != nil {
+							f.curaExec.meetError.Store(true)
+							return
+						} else {
+							// send out record to tidb
+							// todo delete resource in arrowOutput
+							res := &curaResult{chk: retChk, err: nil}
+							f.curaExec.curaResultChan <- res
+						}
 						Next(ctx, child, chk)
 					}
 				}
@@ -1754,7 +1696,8 @@ func (f *CuraRunner) run(ctx context.Context) {
 				if driver.IsHeapSource(sourceId) {
 					res, _ := driver.PipelinePush(sourceId, nil)
 					if res < 0 {
-						// todo failed
+						f.curaExec.meetError.Store(true)
+						return
 					}
 				} else {
 					n := len(inputRecords)
@@ -1765,12 +1708,14 @@ func (f *CuraRunner) run(ctx context.Context) {
 					if chk.NumRows() > 0 {
 						input, err := tidbChunkToArrowRecord(chk, child.Schema())
 						if err != nil {
-							// todo failed
+							f.curaExec.meetError.Store(true)
+							return
 						}
 						res, inputRecord := driver.PipelinePush(sourceId, &input)
 						inputRecords[n] = append(inputRecords[n], inputRecord)
 						if res < 0 {
-							// todo failed
+							f.curaExec.meetError.Store(true)
+							return
 						}
 						chk = newFirstChunk(child)
 						Next(ctx, child, chk)
@@ -1778,11 +1723,13 @@ func (f *CuraRunner) run(ctx context.Context) {
 				}
 			}
 		}
+		err = driver.FinishPipeline()
+		if err != 0 {
+			f.curaExec.meetError.Store(true)
+			return
+		}
 	}
-	err = driver.FinishPipeline()
-	if err != 0 {
-		// todo failed
-	}
+	f.curaExec.curaResultChan <- nil
 }
 
 func (e *CuraExec) Open(ctx context.Context) error {
@@ -1790,6 +1737,7 @@ func (e *CuraExec) Open(ctx context.Context) error {
 		return err
 	}
 	e.prepared = false
+	e.meetError.Store(false)
 	return nil
 }
 
@@ -1807,8 +1755,11 @@ func (e *CuraExec) Next(ctx context.Context, req *chunk.Chunk) error {
 		e.prepare(ctx)
 		e.prepared = true
 	}
+	if e.meetError.Load().(bool) {
+		return errors.New("Meet error during cura exec")
+	}
 	result, ok := <-e.curaResultChan
-	if !ok {
+	if !ok || result == nil {
 		return nil
 	}
 	if result.err != nil {
@@ -1816,7 +1767,6 @@ func (e *CuraExec) Next(ctx context.Context, req *chunk.Chunk) error {
 	}
 
 	req.SwapColumns(result.chk)
-	// result.src <- result.chk
 	return nil
 }
 
