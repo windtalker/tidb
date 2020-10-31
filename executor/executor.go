@@ -1634,6 +1634,7 @@ func (f *CuraRunner) run(ctx context.Context) {
 		close(f.curaExec.curaResultChan)
 		f.curaExec.wg.Done()
 	}()
+	logutil.Logger(ctx).Info("Cura executor running")
 	driver := cura.NewDriver()
 	err, explained := driver.Explain(f.curaExec.jsonPlan, true)
 	if err <= 0 {
