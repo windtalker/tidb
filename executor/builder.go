@@ -3854,7 +3854,7 @@ func (b *executorBuilder) getCuraRelatedPlans(p plannercore.PhysicalPlan, curaPl
 
 func (b *executorBuilder) buildCuraExec(p plannercore.PhysicalPlan) Executor {
 	idToChildrenExecutors := make(map[int64]Executor)
-	selectedColumns := make([]int64, len(p.Schema().Columns))
+	selectedColumns := make([]int64, 0, len(p.Schema().Columns))
 	curaPlan := CuraPlan{plans: make([]plannercore.PhysicalPlan, 0, 5)}
 	b.getCuraRelatedPlans(p, &curaPlan)
 	var allExecs []Executor
@@ -3899,12 +3899,18 @@ func (b *executorBuilder) buildCuraExec(p plannercore.PhysicalPlan) Executor {
 	if p.(*plannercore.PhysicalHashJoin) != nil {
 		for _, col := range p.Schema().Columns {
 			index := int64(0)
+			found := false
 			for _, child := range p.Children() {
 				for _, childCol := range child.Schema().Columns {
 					if col.UniqueID == childCol.UniqueID {
 						selectedColumns = append(selectedColumns, index)
+						found = true
+						break
 					}
 					index++
+				}
+				if found {
+					break
 				}
 			}
 		}
