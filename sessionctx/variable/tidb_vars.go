@@ -309,6 +309,8 @@ const (
 	// tidb_enable_cura_exec is used for cura exec.
 	TiDBEnableCuraExec = "tidb_enable_cura_exec"
 
+	TiDBCuraStreamConcurrency = "tidb_cura_stream_concurrency"
+
 	// tidb_backoff_lock_fast is used for tikv backoff base time in milliseconds.
 	TiDBBackoffLockFast = "tidb_backoff_lock_fast"
 
@@ -555,6 +557,7 @@ const (
 	DefTiDBEnableTelemetry             = true
 	DefTiDBEnableParallelApply         = false
 	DefTiDBEnableCuraExec              = false
+	DefTiDBCuraStreamConcurrency       = 10
 	DefTiDBEnableAmendPessimisticTxn   = true
 )
 

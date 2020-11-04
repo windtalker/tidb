@@ -1696,7 +1696,7 @@ func (f *CuraRunner) run(ctx context.Context) {
 						close(resultChannel)
 						return
 					}()
-					concurrency := 20
+					concurrency := int(f.curaExec.ctx.GetSessionVars().CuraStreamConcurrency)
 					wg.Add(concurrency)
 					for i := 0; i < concurrency; i++ {
 						go func() {
