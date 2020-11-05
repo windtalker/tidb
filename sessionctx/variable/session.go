@@ -709,6 +709,9 @@ type SessionVars struct {
 	// CuraStreamConcurrency indicates that thether to use cura
 	CuraStreamConcurrency uint64
 
+	// CuraChunkSize indicates that thether to use cura
+	CuraChunkSize uint64
+
 	// ShardAllocateStep indicates the max size of continuous rowid shard in one transaction.
 	ShardAllocateStep int64
 
@@ -842,6 +845,7 @@ func NewSessionVars() *SessionVars {
 		EnableParallelApply:         DefTiDBEnableParallelApply,
 		EnableCuraExec:              DefTiDBEnableCuraExec,
 		CuraStreamConcurrency:       DefTiDBCuraStreamConcurrency,
+		CuraChunkSize:               DefTiDBCuraChunkSize,
 		ShardAllocateStep:           DefTiDBShardAllocateStep,
 		EnableChangeColumnType:      DefTiDBChangeColumnType,
 		EnableAmendPessimisticTxn:   DefTiDBEnableAmendPessimisticTxn,
@@ -1472,6 +1476,12 @@ func (s *SessionVars) SetSystemVar(name string, val string) error {
 			return errors.Trace(err)
 		}
 		s.CuraStreamConcurrency = result
+	case TiDBCuraChunkSize:
+		result, err := strconv.ParseUint(val, 10, 64)
+		if err != nil {
+			return errors.Trace(err)
+		}
+		s.CuraChunkSize = result
 	case TiDBSlowLogMasking, TiDBRedactLog:
 		config.SetRedactLog(TiDBOptOn(val))
 	case TiDBShardAllocateStep:

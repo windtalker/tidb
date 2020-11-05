@@ -1697,10 +1697,16 @@ func (f *CuraRunner) run(ctx context.Context) {
 						return
 					}()
 					concurrency := int(f.curaExec.ctx.GetSessionVars().CuraStreamConcurrency)
+					curaChunkSize := int(f.curaExec.ctx.GetSessionVars().CuraChunkSize)
 					wg.Add(concurrency)
 					for i := 0; i < concurrency; i++ {
 						go func() {
-							defer wg.Done()
+							pipelineStreamTime := 0
+							defer func() {
+								fmt.Println("build prepare pipeline stream time: ", pipelineStreamTime)
+								wg.Done()
+							}()
+							var currentChunk *chunk.Chunk = nil
 							for true {
 								if f.curaExec.meetError.Load() == true {
 									return
@@ -1708,6 +1714,34 @@ func (f *CuraRunner) run(ctx context.Context) {
 								select {
 								case childResult := <-resultChannel:
 									if childResult == nil {
+										if currentChunk != nil && currentChunk.NumRows() > 0 {
+											input, err := tidbChunkToArrowRecord(currentChunk, child.Schema())
+											if err != nil {
+												f.curaExec.meetError.Store(true)
+												return
+											}
+											res, arrowOutput := driver.PipelineStream(sourceId, &input, 0)
+											pipelineStreamTime++
+											if arrowOutput.Record.NumRows() == 0 {
+												continue
+											}
+
+											if res < 0 {
+												f.curaExec.meetError.Store(true)
+												return
+											}
+											// set cap to 0 because we convert arrowOutput to chunk using zeroCopy
+											retChk := chunk.New(f.curaExec.retFieldTypes, 0, int(arrowOutput.Record.NumRows()))
+											if arrowRecordToTiDBChunk(arrowOutput.Record, retChk, f.curaExec.selectedColumns) != nil {
+												f.curaExec.meetError.Store(true)
+												return
+											} else {
+												// send out record to tidb
+												res := &curaResult{chk: retChk, err: nil}
+												f.curaExec.curaResultChan <- res
+											}
+											currentChunk = nil
+										}
 										return
 									}
 									if childResult.err != nil {
@@ -1715,29 +1749,38 @@ func (f *CuraRunner) run(ctx context.Context) {
 										return
 									}
 									if childResult.chk.NumRows() > 0 {
-										input, err := tidbChunkToArrowRecord(childResult.chk, child.Schema())
-										if err != nil {
-											f.curaExec.meetError.Store(true)
-											return
-										}
-										res, arrowOutput := driver.PipelineStream(sourceId, &input, 0)
-										if arrowOutput.Record.NumRows() == 0 {
-											continue
-										}
-
-										if res < 0 {
-											f.curaExec.meetError.Store(true)
-											return
-										}
-										// set cap to 0 because we convert arrowOutput to chunk using zeroCopy
-										retChk := chunk.New(f.curaExec.retFieldTypes, 0, int(arrowOutput.Record.NumRows()))
-										if arrowRecordToTiDBChunk(arrowOutput.Record, retChk, f.curaExec.selectedColumns) != nil {
-											f.curaExec.meetError.Store(true)
-											return
+										if currentChunk == nil {
+											currentChunk = childResult.chk
 										} else {
-											// send out record to tidb
-											res := &curaResult{chk: retChk, err: nil}
-											f.curaExec.curaResultChan <- res
+											currentChunk.Append(childResult.chk, 0, childResult.chk.NumRows())
+										}
+										if currentChunk.NumRows() >= curaChunkSize {
+											input, err := tidbChunkToArrowRecord(currentChunk, child.Schema())
+											if err != nil {
+												f.curaExec.meetError.Store(true)
+												return
+											}
+											res, arrowOutput := driver.PipelineStream(sourceId, &input, 0)
+											pipelineStreamTime++
+											if arrowOutput.Record.NumRows() == 0 {
+												continue
+											}
+
+											if res < 0 {
+												f.curaExec.meetError.Store(true)
+												return
+											}
+											// set cap to 0 because we convert arrowOutput to chunk using zeroCopy
+											retChk := chunk.New(f.curaExec.retFieldTypes, 0, int(arrowOutput.Record.NumRows()))
+											if arrowRecordToTiDBChunk(arrowOutput.Record, retChk, f.curaExec.selectedColumns) != nil {
+												f.curaExec.meetError.Store(true)
+												return
+											} else {
+												// send out record to tidb
+												res := &curaResult{chk: retChk, err: nil}
+												f.curaExec.curaResultChan <- res
+											}
+											currentChunk = nil
 										}
 									}
 								}
@@ -1787,29 +1830,63 @@ func (f *CuraRunner) run(ctx context.Context) {
 						return
 					}
 				} else {
+					pipelinePushTime := 0
 					startTime := time.Now()
 					n := len(inputRecords)
 					inputRecords = append(inputRecords, make([]*cura.InputRecord, 0))
 					child := f.curaExec.idToExecutors[sourceId]
+					var currentChunk *chunk.Chunk = nil
+					curaChunkSize := int(f.curaExec.ctx.GetSessionVars().CuraChunkSize)
 					chk := newFirstChunk(child)
 					Next(ctx, child, chk)
 					for chk.NumRows() > 0 {
-						input, err := tidbChunkToArrowRecord(chk, child.Schema())
+						if currentChunk == nil {
+							currentChunk = chk
+						} else {
+							currentChunk.Append(chk, 0, chk.NumRows())
+						}
+						if currentChunk.NumRows() >= curaChunkSize {
+							startTime1 := time.Now()
+							input, err := tidbChunkToArrowRecord(currentChunk, child.Schema())
+							if err != nil {
+								f.curaExec.meetError.Store(true)
+								return
+							}
+							res, inputRecord := driver.PipelinePush(sourceId, &input)
+							pipelinePushTime++
+							inputRecords[n] = append(inputRecords[n], inputRecord)
+							if res < 0 {
+								f.curaExec.meetError.Store(true)
+								return
+							}
+							elapsed1 := time.Since(startTime1)
+							fmt.Println("build prepare chunk elapsed: ", elapsed1)
+							currentChunk = nil
+						}
+						chk = newFirstChunk(child)
+						Next(ctx, child, chk)
+					}
+					if currentChunk != nil && currentChunk.NumRows() > 0 {
+						startTime1 := time.Now()
+						input, err := tidbChunkToArrowRecord(currentChunk, child.Schema())
 						if err != nil {
 							f.curaExec.meetError.Store(true)
 							return
 						}
 						res, inputRecord := driver.PipelinePush(sourceId, &input)
+						pipelinePushTime++
 						inputRecords[n] = append(inputRecords[n], inputRecord)
 						if res < 0 {
 							f.curaExec.meetError.Store(true)
 							return
 						}
-						chk = newFirstChunk(child)
-						Next(ctx, child, chk)
+						elapsed1 := time.Since(startTime1)
+						fmt.Println("build prepare chunk elapsed: ", elapsed1)
+						currentChunk = nil
 					}
 					elapsed := time.Since(startTime)
 					fmt.Println("build prepare elapsed: ", elapsed)
+					fmt.Println("build prepare pipeline push time: ", pipelinePushTime)
 				}
 			}
 		}
