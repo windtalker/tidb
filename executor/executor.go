@@ -1750,10 +1750,10 @@ func (f *CuraRunner) run(ctx context.Context) {
 									}
 									if childResult.chk.NumRows() > 0 {
 										if currentChunk == nil {
-											currentChunk = childResult.chk
-										} else {
-											currentChunk.Append(childResult.chk, 0, childResult.chk.NumRows())
+											currentChunk = chunk.New(child.base().retFieldTypes, curaChunkSize, curaChunkSize)
 										}
+										currentChunk.Append(childResult.chk, 0, childResult.chk.NumRows())
+
 										if currentChunk.NumRows() >= curaChunkSize {
 											input, err := tidbChunkToArrowRecord(currentChunk, child.Schema())
 											if err != nil {
@@ -1841,10 +1841,9 @@ func (f *CuraRunner) run(ctx context.Context) {
 					Next(ctx, child, chk)
 					for chk.NumRows() > 0 {
 						if currentChunk == nil {
-							currentChunk = chk
-						} else {
-							currentChunk.Append(chk, 0, chk.NumRows())
+							currentChunk = chunk.New(child.base().retFieldTypes, curaChunkSize, curaChunkSize)
 						}
+						currentChunk.Append(chk, 0, chk.NumRows())
 						if currentChunk.NumRows() >= curaChunkSize {
 							startTime1 := time.Now()
 							input, err := tidbChunkToArrowRecord(currentChunk, child.Schema())
