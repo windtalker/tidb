@@ -1700,8 +1700,10 @@ func (f *CuraRunner) run(ctx context.Context) {
 					for i := 0; i < concurrency; i++ {
 						go func() {
 							pipelineStreamTime := 0
+							totalRows := 0
+							totalBytes := int64(0)
 							defer func() {
-								fmt.Println("build prepare pipeline stream time: ", pipelineStreamTime)
+								fmt.Printf("build prepare pipeline stream time: %v, rows %v, mem %v", pipelineStreamTime, totalRows, totalBytes)
 								wg.Done()
 							}()
 							var currentChunk *chunk.Chunk = nil
@@ -1713,6 +1715,8 @@ func (f *CuraRunner) run(ctx context.Context) {
 								case childResult := <-resultChannel:
 									if childResult == nil {
 										if currentChunk != nil && currentChunk.NumRows() > 0 {
+											totalRows += currentChunk.NumRows()
+											totalBytes += currentChunk.MemoryUsage()
 											input, err := tidbChunkToArrowRecord(currentChunk, child.Schema())
 											if err != nil {
 												f.curaExec.meetError.Store(true)
@@ -1753,6 +1757,8 @@ func (f *CuraRunner) run(ctx context.Context) {
 										currentChunk.Append(childResult.chk, 0, childResult.chk.NumRows())
 
 										if currentChunk.NumRows() >= curaChunkSize {
+											totalRows += currentChunk.NumRows()
+											totalBytes += currentChunk.MemoryUsage()
 											input, err := tidbChunkToArrowRecord(currentChunk, child.Schema())
 											if err != nil {
 												f.curaExec.meetError.Store(true)
@@ -1859,10 +1865,12 @@ func (f *CuraRunner) run(ctx context.Context) {
 					for i := 0; i < concurrency; i++ {
 						go func() {
 							//pipelinePushTime := 0
+							totalRows := 0
+							totalBytes := int64(0)
 							startTime2 := time.Now()
 							defer func() {
 								elapsed2 := time.Since(startTime2)
-								fmt.Println("pipe push thread elapsed: ", elapsed2)
+								fmt.Printf("pipe push thread elapsed: %v, rows: %v, mem: %v", elapsed2, totalRows, totalBytes)
 								//fmt.Println("pipeline push time: ", pipelinePushTime)
 								wg.Done()
 							}()
@@ -1876,6 +1884,8 @@ func (f *CuraRunner) run(ctx context.Context) {
 									if childResult == nil {
 										if currentChunk != nil && currentChunk.NumRows() > 0 {
 											startTime1 := time.Now()
+											totalRows += currentChunk.NumRows()
+											totalBytes += currentChunk.MemoryUsage()
 											input, err := tidbChunkToArrowRecord(currentChunk, child.Schema())
 											if err != nil {
 												f.curaExec.meetError.Store(true)
@@ -1888,7 +1898,7 @@ func (f *CuraRunner) run(ctx context.Context) {
 												return
 											}
 											elapsed1 := time.Since(startTime1)
-											fmt.Println("pipe push chunk elapsed: ", elapsed1)
+											fmt.Printf("pipeline push chunk elapsed %v, rows %v, mem %v\n", elapsed1, currentChunk.NumRows(), currentChunk.MemoryUsage())
 											currentChunk = nil
 										}
 										return
@@ -1910,6 +1920,8 @@ func (f *CuraRunner) run(ctx context.Context) {
 										}
 
 										if currentChunk.NumRows() >= curaChunkSize {
+											totalRows += currentChunk.NumRows()
+											totalBytes += currentChunk.MemoryUsage()
 											startTime1 := time.Now()
 											input, err := tidbChunkToArrowRecord(currentChunk, child.Schema())
 											if err != nil {
@@ -1918,7 +1930,7 @@ func (f *CuraRunner) run(ctx context.Context) {
 											}
 											res, _ := driver.PipelinePush(sourceId, &input)
 											elapsed1 := time.Since(startTime1)
-											fmt.Println("pipe push chunk elapsed: ", elapsed1)
+											fmt.Printf("pipeline push chunk elapsed %v, rows %v, mem %v\n", elapsed1, currentChunk.NumRows(), currentChunk.MemoryUsage())
 											//pipelinePushTime++
 											if res < 0 {
 												f.curaExec.meetError.Store(true)
