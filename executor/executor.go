@@ -1604,8 +1604,6 @@ func tidbChunkToArrowRecord(chk *chunk.Chunk, schema *expression.Schema) (array.
 func arrowRecordToTiDBChunk(record array.Record, chk *chunk.Chunk, selectedColumns []int64) error {
 	for tidbIndex, arrowIndex := range selectedColumns {
 		col := record.Column(int(arrowIndex))
-		//}
-		//for idx, col := range record.Columns() {
 		// todo check type
 		if col.Data().Offset() != 0 {
 			return errors.New("Not supported type")
@@ -1653,7 +1651,7 @@ func (f *CuraRunner) run(ctx context.Context) {
 	}
 	pipelineIndex := 0
 	for driver.HasNextPipeline() {
-		inputRecords := make([][]*cura.InputRecord, 0)
+		//inputRecords := make([][]*cura.InputRecord, 0)
 		final := driver.IsPipelineFinal()
 		if f.curaExec.meetError.Load() == true {
 			return
@@ -1679,7 +1677,9 @@ func (f *CuraRunner) run(ctx context.Context) {
 				} else {
 					child := f.curaExec.idToExecutors[sourceId]
 					var wg sync.WaitGroup
-					resultChannel := make(chan *curaResult, 10)
+					concurrency := int(f.curaExec.ctx.GetSessionVars().CuraStreamConcurrency)
+					curaChunkSize := int(f.curaExec.ctx.GetSessionVars().CuraChunkSize)
+					resultChannel := make(chan *curaResult, concurrency)
 					go func() {
 						index := 0
 						chk := newFirstChunk(child)
@@ -1696,8 +1696,6 @@ func (f *CuraRunner) run(ctx context.Context) {
 						close(resultChannel)
 						return
 					}()
-					concurrency := int(f.curaExec.ctx.GetSessionVars().CuraStreamConcurrency)
-					curaChunkSize := int(f.curaExec.ctx.GetSessionVars().CuraChunkSize)
 					wg.Add(concurrency)
 					for i := 0; i < concurrency; i++ {
 						go func() {
@@ -1830,30 +1828,147 @@ func (f *CuraRunner) run(ctx context.Context) {
 						return
 					}
 				} else {
-					pipelinePushTime := 0
+					//pipelinePushTime := 0
 					startTime := time.Now()
-					n := len(inputRecords)
-					inputRecords = append(inputRecords, make([]*cura.InputRecord, 0))
+					//n := len(inputRecords)
+					//inputRecords = append(inputRecords, make([]*cura.InputRecord, 0))
 					child := f.curaExec.idToExecutors[sourceId]
-					var currentChunk *chunk.Chunk = nil
+					var wg sync.WaitGroup
+					concurrency := int(f.curaExec.ctx.GetSessionVars().CuraStreamConcurrency)
 					curaChunkSize := int(f.curaExec.ctx.GetSessionVars().CuraChunkSize)
-					chk := newFirstChunk(child)
-					Next(ctx, child, chk)
-					for chk.NumRows() > 0 {
-						if currentChunk == nil {
-							currentChunk = chunk.New(child.base().retFieldTypes, curaChunkSize, curaChunkSize)
+					resultChannel := make(chan *curaResult, concurrency)
+
+					go func() {
+						index := 0
+						chk := newFirstChunk(child)
+						err := Next(ctx, child, chk)
+						for err == nil && chk.NumRows() > 0 {
+							index++
+							resultChannel <- &curaResult{chk: chk, err: nil}
+							chk = newFirstChunk(child)
+							err = Next(ctx, child, chk)
 						}
-						currentChunk.Append(chk, 0, chk.NumRows())
-						if currentChunk.NumRows() >= curaChunkSize {
+						if err != nil {
+							resultChannel <- &curaResult{chk: nil, err: err}
+						}
+						close(resultChannel)
+						return
+					}()
+					wg.Add(concurrency)
+
+					for i := 0; i < concurrency; i++ {
+						go func() {
+							//pipelinePushTime := 0
+							startTime2 := time.Now()
+							defer func() {
+								elapsed2 := time.Since(startTime2)
+								fmt.Println("pipe push thread elapsed: ", elapsed2)
+								//fmt.Println("pipeline push time: ", pipelinePushTime)
+								wg.Done()
+							}()
+							var currentChunk *chunk.Chunk = nil
+							for true {
+								if f.curaExec.meetError.Load() == true {
+									return
+								}
+								select {
+								case childResult := <-resultChannel:
+									if childResult == nil {
+										if currentChunk != nil && currentChunk.NumRows() > 0 {
+											startTime1 := time.Now()
+											input, err := tidbChunkToArrowRecord(currentChunk, child.Schema())
+											if err != nil {
+												f.curaExec.meetError.Store(true)
+												return
+											}
+											res, _ := driver.PipelinePush(sourceId, &input)
+											//pipelinePushTime++
+											if res < 0 {
+												f.curaExec.meetError.Store(true)
+												return
+											}
+											elapsed1 := time.Since(startTime1)
+											fmt.Println("pipe push chunk elapsed: ", elapsed1)
+											currentChunk = nil
+										}
+										return
+									}
+									if childResult.err != nil {
+										f.curaExec.meetError.Store(true)
+										return
+									}
+									if childResult.chk.NumRows() > 0 {
+										if currentChunk == nil {
+											if childResult.chk.NumRows() >= curaChunkSize {
+												currentChunk = childResult.chk
+											} else {
+												currentChunk = chunk.New(child.base().retFieldTypes, curaChunkSize, curaChunkSize)
+												currentChunk.Append(childResult.chk, 0, childResult.chk.NumRows())
+											}
+										} else {
+											currentChunk.Append(childResult.chk, 0, childResult.chk.NumRows())
+										}
+
+										if currentChunk.NumRows() >= curaChunkSize {
+											input, err := tidbChunkToArrowRecord(currentChunk, child.Schema())
+											if err != nil {
+												f.curaExec.meetError.Store(true)
+												return
+											}
+											res, _ := driver.PipelinePush(sourceId, &input)
+											//pipelinePushTime++
+											if res < 0 {
+												f.curaExec.meetError.Store(true)
+												return
+											}
+											currentChunk = nil
+										}
+									}
+								}
+							}
+						}()
+					}
+					wg.Wait()
+					/*
+						var currentChunk *chunk.Chunk = nil
+						chk := newFirstChunk(child)
+						Next(ctx, child, chk)
+						for chk.NumRows() > 0 {
+							if currentChunk == nil {
+								currentChunk = chunk.New(child.base().retFieldTypes, curaChunkSize, curaChunkSize)
+							}
+							currentChunk.Append(chk, 0, chk.NumRows())
+							if currentChunk.NumRows() >= curaChunkSize {
+								startTime1 := time.Now()
+								input, err := tidbChunkToArrowRecord(currentChunk, child.Schema())
+								if err != nil {
+									f.curaExec.meetError.Store(true)
+									return
+								}
+								res, _ := driver.PipelinePush(sourceId, &input)
+								pipelinePushTime++
+								//inputRecords[n] = append(inputRecords[n], inputRecord)
+								if res < 0 {
+									f.curaExec.meetError.Store(true)
+									return
+								}
+								elapsed1 := time.Since(startTime1)
+								fmt.Println("build prepare chunk elapsed: ", elapsed1)
+								currentChunk = nil
+							}
+							chk = newFirstChunk(child)
+							Next(ctx, child, chk)
+						}
+						if currentChunk != nil && currentChunk.NumRows() > 0 {
 							startTime1 := time.Now()
 							input, err := tidbChunkToArrowRecord(currentChunk, child.Schema())
 							if err != nil {
 								f.curaExec.meetError.Store(true)
 								return
 							}
-							res, inputRecord := driver.PipelinePush(sourceId, &input)
+							res, _ := driver.PipelinePush(sourceId, &input)
 							pipelinePushTime++
-							inputRecords[n] = append(inputRecords[n], inputRecord)
+							//inputRecords[n] = append(inputRecords[n], inputRecord)
 							if res < 0 {
 								f.curaExec.meetError.Store(true)
 								return
@@ -1862,30 +1977,10 @@ func (f *CuraRunner) run(ctx context.Context) {
 							fmt.Println("build prepare chunk elapsed: ", elapsed1)
 							currentChunk = nil
 						}
-						chk = newFirstChunk(child)
-						Next(ctx, child, chk)
-					}
-					if currentChunk != nil && currentChunk.NumRows() > 0 {
-						startTime1 := time.Now()
-						input, err := tidbChunkToArrowRecord(currentChunk, child.Schema())
-						if err != nil {
-							f.curaExec.meetError.Store(true)
-							return
-						}
-						res, inputRecord := driver.PipelinePush(sourceId, &input)
-						pipelinePushTime++
-						inputRecords[n] = append(inputRecords[n], inputRecord)
-						if res < 0 {
-							f.curaExec.meetError.Store(true)
-							return
-						}
-						elapsed1 := time.Since(startTime1)
-						fmt.Println("build prepare chunk elapsed: ", elapsed1)
-						currentChunk = nil
-					}
+						fmt.Println("build prepare pipeline push time: ", pipelinePushTime)
+					*/
 					elapsed := time.Since(startTime)
 					fmt.Println("build prepare elapsed: ", elapsed)
-					fmt.Println("build prepare pipeline push time: ", pipelinePushTime)
 				}
 			}
 		}
