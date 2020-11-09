@@ -1703,7 +1703,7 @@ func (f *CuraRunner) run(ctx context.Context) {
 							totalRows := 0
 							totalBytes := int64(0)
 							defer func() {
-								fmt.Printf("build prepare pipeline stream time: %v, rows %v, mem %v", pipelineStreamTime, totalRows, totalBytes)
+								fmt.Printf("build prepare pipeline stream time: %v, rows %v, mem %v\n", pipelineStreamTime, totalRows, totalBytes)
 								wg.Done()
 							}()
 							var currentChunk *chunk.Chunk = nil
@@ -1870,7 +1870,7 @@ func (f *CuraRunner) run(ctx context.Context) {
 							startTime2 := time.Now()
 							defer func() {
 								elapsed2 := time.Since(startTime2)
-								fmt.Printf("pipe push thread elapsed: %v, rows: %v, mem: %v", elapsed2, totalRows, totalBytes)
+								fmt.Printf("pipe push thread elapsed: %v, rows: %v, mem: %v\n", elapsed2, totalRows, totalBytes)
 								//fmt.Println("pipeline push time: ", pipelinePushTime)
 								wg.Done()
 							}()
