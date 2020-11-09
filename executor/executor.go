@@ -1910,12 +1910,15 @@ func (f *CuraRunner) run(ctx context.Context) {
 										}
 
 										if currentChunk.NumRows() >= curaChunkSize {
+											startTime1 := time.Now()
 											input, err := tidbChunkToArrowRecord(currentChunk, child.Schema())
 											if err != nil {
 												f.curaExec.meetError.Store(true)
 												return
 											}
 											res, _ := driver.PipelinePush(sourceId, &input)
+											elapsed1 := time.Since(startTime1)
+											fmt.Println("pipe push chunk elapsed: ", elapsed1)
 											//pipelinePushTime++
 											if res < 0 {
 												f.curaExec.meetError.Store(true)
