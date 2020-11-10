@@ -15,6 +15,7 @@ package core
 
 import (
 	"strconv"
+	"strings"
 	"unsafe"
 
 	"github.com/pingcap/errors"
@@ -1214,6 +1215,51 @@ func (p *PhysicalHashAgg) Clone() (PhysicalPlan, error) {
 	}
 	cloned.basePhysicalAgg = *base
 	return cloned, nil
+}
+
+func (p *PhysicalHashAgg) ToCuraJson(jsonPlan []byte) ([]byte, error) {
+	var err error = nil
+	jsonPlan = append(jsonPlan, []byte("{\"rel_op\": \"Aggregate\", \"groups\": ")...)
+	if len(p.GroupByItems) == 0 {
+		jsonPlan = append(jsonPlan, []byte("[]")...)
+	} else if len(p.GroupByItems) == 1 {
+		jsonPlan = append(jsonPlan, '[')
+		jsonPlan, err = ExprToCuraJson(p.GroupByItems[0], jsonPlan)
+		jsonPlan = append(jsonPlan, ']')
+	} else {
+		jsonPlan, err = ExprsToCuraJson(p.GroupByItems, jsonPlan)
+	}
+	if err != nil {
+		return jsonPlan, err
+	}
+	jsonPlan = append(jsonPlan, []byte(", \"aggs\":[")...)
+	for idx, agg := range p.AggFuncs {
+		if idx != 0 {
+			jsonPlan = append(jsonPlan, ',')
+		}
+		jsonPlan = append(jsonPlan, []byte("{\"agg\":")...)
+		switch strings.ToLower(agg.Name) {
+		case "count":
+			jsonPlan = append(jsonPlan, []byte("\"COUNT_ALL\", \"operands\":")...)
+			if len(agg.Args) == 1 {
+				jsonPlan = append(jsonPlan, '[')
+				jsonPlan, err = ExprToCuraJson(agg.Args[0], jsonPlan)
+				jsonPlan = append(jsonPlan, ']')
+			} else {
+				jsonPlan, err = ExprsToCuraJson(agg.Args, jsonPlan)
+			}
+			if err != nil {
+				return jsonPlan, err
+			}
+			jsonPlan = append(jsonPlan, []byte(",\"type\":")...)
+			jsonPlan, err = TypeToCuraJson(agg.RetTp, jsonPlan)
+		default:
+			return jsonPlan, errors.New("Cura not supported agg")
+		}
+		jsonPlan = append(jsonPlan, '}')
+	}
+	jsonPlan = append(jsonPlan, []byte("]}")...)
+	return jsonPlan, err
 }
 
 // NewPhysicalHashAgg creates a new PhysicalHashAgg from a LogicalAggregation.

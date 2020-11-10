@@ -158,8 +158,8 @@ func checkCuraSupport(plan PhysicalPlan) {
 	switch plan.(type) {
 	case *PhysicalHashJoin:
 		supportCura = true
-		//case *PhysicalSelection:
-		//	supportCura = true
+	case *PhysicalHashAgg:
+		supportCura = true
 	}
 	plan.SetSupportCura(supportCura)
 	for _, child := range plan.Children() {

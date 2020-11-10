@@ -3896,7 +3896,7 @@ func (b *executorBuilder) buildCuraExec(p plannercore.PhysicalPlan) Executor {
 		}
 	}
 	jsonPlan = append(jsonPlan, []byte("]}")...)
-	if p.(*plannercore.PhysicalHashJoin) != nil {
+	if _, ok := p.(*plannercore.PhysicalHashJoin); ok {
 		for _, col := range p.Schema().Columns {
 			index := int64(0)
 			found := false
