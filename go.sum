@@ -687,6 +687,8 @@ github.com/yuin/goldmark v1.1.27/go.mod h1:3hX8gzYuyVAZsxl0MRgGTJEmQBFcNTphYh9de
 github.com/yuin/goldmark v1.1.32/go.mod h1:3hX8gzYuyVAZsxl0MRgGTJEmQBFcNTphYh9decYSb74=
 github.com/zanmato1984/cura/go/cura v0.0.0-20201013085906-1b13fe3a90d7 h1:lrjB9OZl4iCyISbFIk2lKjLmEjKAI8VeRqn2UGzwmaw=
 github.com/zanmato1984/cura/go/cura v0.0.0-20201013085906-1b13fe3a90d7/go.mod h1:pmTAWuCrIsT/qCXKGZxjbNTuFp/wF9x8nJMKpKDn/Do=
+github.com/zanmato1984/cura/go/cura v0.0.0-20201113091606-93dd5bc3bd2f h1:C14qCYH16o+Tr1goUt0asMJnpfn8ds/9OjjxJjS+9i0=
+github.com/zanmato1984/cura/go/cura v0.0.0-20201113091606-93dd5bc3bd2f/go.mod h1:pmTAWuCrIsT/qCXKGZxjbNTuFp/wF9x8nJMKpKDn/Do=
 github.com/zhangjinpeng1987/raft v0.0.0-20190624145930-deeb32d6553d/go.mod h1:1KDQ09J8MRHEtHze4at7BJZDW/doUAgkJ8w9KjEUhSo=
 github.com/zhangjinpeng1987/raft v0.0.0-20200819064223-df31bb68a018 h1:T3OrqVdcH6z6SakR7WkECvGpdkfB0MAur/6zf66GPxQ=
 github.com/zhangjinpeng1987/raft v0.0.0-20200819064223-df31bb68a018/go.mod h1:rTSjwgeYU2on64W50csWDlhyy0x9UYVYJUovHlYdt5s=
