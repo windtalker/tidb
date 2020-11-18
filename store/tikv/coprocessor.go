@@ -38,6 +38,8 @@ import (
 	"github.com/pingcap/tidb/kv"
 	"github.com/pingcap/tidb/metrics"
 	"github.com/pingcap/tidb/store/tikv/tikvrpc"
+	"github.com/pingcap/tidb/types"
+	"github.com/pingcap/tidb/util/chunk"
 	"github.com/pingcap/tidb/util/execdetails"
 	"github.com/pingcap/tidb/util/logutil"
 	"github.com/pingcap/tidb/util/memory"
@@ -116,10 +118,12 @@ type copTask struct {
 	region RegionVerID
 	ranges *copRanges
 
-	respChan  chan *copResponse
-	storeAddr string
-	cmdType   tikvrpc.CmdType
-	storeType kv.StoreType
+	respChan      chan *copResponse
+	storeAddr     string
+	cmdType       tikvrpc.CmdType
+	storeType     kv.StoreType
+	resultTypes   []*types.FieldType
+	curaChunkSize uint64
 }
 
 func (r *copTask) String() string {
@@ -264,9 +268,11 @@ func buildCopTasks(bo *Backoffer, cache *RegionCache, ranges *copRanges, req *kv
 				ranges: ranges.slice(i, nextI),
 				// Channel buffer is 2 for handling region split.
 				// In a common case, two region split tasks will not be blocked.
-				respChan:  make(chan *copResponse, 2),
-				cmdType:   cmdType,
-				storeType: req.StoreType,
+				respChan:      make(chan *copResponse, 2),
+				cmdType:       cmdType,
+				storeType:     req.StoreType,
+				resultTypes:   req.ResultTypes,
+				curaChunkSize: req.CuraChunkSize,
 			})
 			i = nextI
 		}
@@ -1128,16 +1134,70 @@ func (worker *copIteratorWorker) handleCopResponse(bo *Backoffer, rpcCtx *RPCCon
 		// Cache not hit or cache hit but not valid: update the cache if the response can be cached.
 		if cacheKey != nil && resp.pbResp.CanBeCached && resp.pbResp.CacheLastVersion > 0 {
 			if worker.store.coprCache.CheckAdmission(resp.pbResp.Data.Size(), resp.detail.ProcessTime) {
-				data := make([]byte, len(resp.pbResp.Data))
-				copy(data, resp.pbResp.Data)
+				if task.resultTypes != nil {
+					rowsPerChunk := int(task.curaChunkSize)
+					selectResponse := new(tipb.SelectResponse)
+					if selectResponse.Unmarshal(resp.pbResp.Data) != nil && selectResponse.EncodeType == tipb.EncodeType_TypeChunk {
+						updatedChunks := make([]*chunk.Chunk, 0, 1)
+						currentChunk := chunk.New(task.resultTypes, 0, rowsPerChunk)
+						tmpChunk := chunk.New(task.resultTypes, 0, 0)
+						respChunkDecoder := chunk.NewDecoder(
+							chunk.NewChunkWithCapacity(task.resultTypes, 0),
+							task.resultTypes,
+						)
+						pbChunkIndex := 0
+						for true {
+							if respChunkDecoder.IsFinished() {
+								if pbChunkIndex >= len(selectResponse.Chunks) {
+									break
+								}
+								respChunkDecoder.Reset(selectResponse.Chunks[pbChunkIndex].RowsData)
+								pbChunkIndex++
+							}
+							tmpChunk.SetRequiredRows(respChunkDecoder.RemainedRows(), respChunkDecoder.RemainedRows())
+							respChunkDecoder.Decode(tmpChunk)
+							currentChunk.Append(tmpChunk, 0, tmpChunk.NumRows())
+							tmpChunk.Reset()
+							if currentChunk.NumRows() >= rowsPerChunk {
+								updatedChunks = append(updatedChunks, currentChunk)
+								currentChunk = chunk.New(task.resultTypes, 0, rowsPerChunk)
+							}
+						}
+						if currentChunk.NumRows() > 0 {
+							updatedChunks = append(updatedChunks, currentChunk)
+						}
+						pbChunks := make([]tipb.Chunk, 0, len(updatedChunks))
+						for _, tichunk := range updatedChunks {
+							encoder := chunk.NewCodec(task.resultTypes)
+							cur := tipb.Chunk{}
+							cur.RowsData = append(cur.RowsData, encoder.Encode(tichunk)...)
+							pbChunks = append(pbChunks, cur)
+						}
+						selectResponse.Chunks = pbChunks
+						data, err := selectResponse.Marshal()
+						if err != nil {
+							newCacheValue := coprCacheValue{
+								Data:              data,
+								TimeStamp:         worker.req.StartTs,
+								RegionID:          task.region.id,
+								RegionDataVersion: resp.pbResp.CacheLastVersion,
+							}
+							worker.store.coprCache.Set(cacheKey, &newCacheValue)
+						}
 
-				newCacheValue := coprCacheValue{
-					Data:              data,
-					TimeStamp:         worker.req.StartTs,
-					RegionID:          task.region.id,
-					RegionDataVersion: resp.pbResp.CacheLastVersion,
+					}
+				} else {
+					data := make([]byte, len(resp.pbResp.Data))
+					copy(data, resp.pbResp.Data)
+
+					newCacheValue := coprCacheValue{
+						Data:              data,
+						TimeStamp:         worker.req.StartTs,
+						RegionID:          task.region.id,
+						RegionDataVersion: resp.pbResp.CacheLastVersion,
+					}
+					worker.store.coprCache.Set(cacheKey, &newCacheValue)
 				}
-				worker.store.coprCache.Set(cacheKey, &newCacheValue)
 			}
 		}
 	}

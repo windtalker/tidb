@@ -45,6 +45,12 @@ func Select(ctx context.Context, sctx sessionctx.Context, kvReq *kv.Request, fie
 	if !sctx.GetSessionVars().EnableStreaming {
 		kvReq.Streaming = false
 	}
+
+	if sctx.GetSessionVars().CuraChunkSize > 0 {
+		kvReq.ResultTypes = fieldTypes
+		kvReq.CuraChunkSize = sctx.GetSessionVars().CuraChunkSize
+	}
+
 	resp := sctx.GetClient().Send(ctx, kvReq, sctx.GetSessionVars().KVVars, sctx.GetSessionVars().StmtCtx.MemTracker)
 	if resp == nil {
 		err := errors.New("client returns nil response")
