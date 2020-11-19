@@ -1137,7 +1137,7 @@ func (worker *copIteratorWorker) handleCopResponse(bo *Backoffer, rpcCtx *RPCCon
 				if task.resultTypes != nil {
 					rowsPerChunk := int(task.curaChunkSize)
 					selectResponse := new(tipb.SelectResponse)
-					if selectResponse.Unmarshal(resp.pbResp.Data) != nil && selectResponse.EncodeType == tipb.EncodeType_TypeChunk {
+					if selectResponse.Unmarshal(resp.pbResp.Data) == nil && selectResponse.EncodeType == tipb.EncodeType_TypeChunk {
 						updatedChunks := make([]*chunk.Chunk, 0, 1)
 						currentChunk := chunk.New(task.resultTypes, 0, rowsPerChunk)
 						tmpChunk := chunk.New(task.resultTypes, 0, 0)
@@ -1175,7 +1175,7 @@ func (worker *copIteratorWorker) handleCopResponse(bo *Backoffer, rpcCtx *RPCCon
 						}
 						selectResponse.Chunks = pbChunks
 						data, err := selectResponse.Marshal()
-						if err != nil {
+						if err == nil {
 							newCacheValue := coprCacheValue{
 								Data:              data,
 								TimeStamp:         worker.req.StartTs,
