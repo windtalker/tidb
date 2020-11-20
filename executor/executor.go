@@ -210,10 +210,6 @@ func (e *baseExecutor) Next(ctx context.Context, req *chunk.Chunk) error {
 func newBaseExecutor(ctx sessionctx.Context, schema *expression.Schema, id int, children ...Executor) baseExecutor {
 	maxChunkSize := ctx.GetSessionVars().MaxChunkSize
 	initCap := ctx.GetSessionVars().InitChunkSize
-	if ctx.GetSessionVars().EnableCuraExec && ctx.GetSessionVars().CuraChunkSize > 0 {
-		maxChunkSize = int(ctx.GetSessionVars().CuraChunkSize)
-		initCap = maxChunkSize / 2
-	}
 	e := baseExecutor{
 		children:     children,
 		ctx:          ctx,

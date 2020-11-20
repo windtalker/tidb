@@ -562,7 +562,7 @@ const (
 	DefTiDBEnableParallelApply         = false
 	DefTiDBEnableCuraExec              = false
 	DefTiDBCuraStreamConcurrency       = 10
-	DefTiDBCuraChunkSize               = 1024 * 1024
+	DefTiDBCuraChunkSize               = 2 * 1024 * 1024
 	DefTiDBCuraSupportAgg              = false
 	DefTiDBEnableAmendPessimisticTxn   = true
 )
