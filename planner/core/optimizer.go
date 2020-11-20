@@ -153,17 +153,17 @@ func postOptimize(sctx sessionctx.Context, plan PhysicalPlan) PhysicalPlan {
 	return plan
 }
 
-func checkCuraSupport(plan PhysicalPlan) {
+func checkCuraSupport(sctx sessionctx.Context, plan PhysicalPlan) {
 	supportCura := false
 	switch plan.(type) {
 	case *PhysicalHashJoin:
 		supportCura = true
 	case *PhysicalHashAgg:
-		supportCura = false
+		supportCura = sctx.GetSessionVars().CuraSupportAgg
 	}
 	plan.SetSupportCura(supportCura)
 	for _, child := range plan.Children() {
-		checkCuraSupport(child)
+		checkCuraSupport(sctx, child)
 	}
 }
 
@@ -191,7 +191,7 @@ func checkCuraExec(sctx sessionctx.Context, plan PhysicalPlan) PhysicalPlan {
 	if !sctx.GetSessionVars().EnableCuraExec {
 		return plan
 	}
-	checkCuraSupport(plan)
+	checkCuraSupport(sctx, plan)
 
 	/*
 		if plan.SupportCura() {

@@ -1672,8 +1672,17 @@ func (f *CuraRunner) run(ctx context.Context) {
 						f.curaExec.meetError.Store(true)
 						return
 					}
-					for outRecord != nil {
+					for res != 0 {
 						// send out record to tidb
+						retChk := chunk.New(f.curaExec.retFieldTypes, 0, int(outRecord.Record.NumRows()))
+						if arrowRecordToTiDBChunk(outRecord.Record, retChk, f.curaExec.selectedColumns) != nil {
+							f.curaExec.meetError.Store(true)
+							return
+						} else {
+							// send out record to tidb
+							res := &curaResult{chk: retChk, err: nil}
+							f.curaExec.curaResultChan <- res
+						}
 						res, outRecord = driver.PipelineStream(sourceId, nil, 100)
 						if res < 0 {
 							f.curaExec.meetError.Store(true)

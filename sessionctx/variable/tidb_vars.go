@@ -313,6 +313,8 @@ const (
 
 	TiDBCuraChunkSize = "tidb_cura_chunk_size"
 
+	TiDBCuraSupportAgg = "tidb_cura_support_agg"
+
 	// tidb_backoff_lock_fast is used for tikv backoff base time in milliseconds.
 	TiDBBackoffLockFast = "tidb_backoff_lock_fast"
 
@@ -561,6 +563,7 @@ const (
 	DefTiDBEnableCuraExec              = false
 	DefTiDBCuraStreamConcurrency       = 10
 	DefTiDBCuraChunkSize               = 1024 * 1024
+	DefTiDBCuraSupportAgg              = false
 	DefTiDBEnableAmendPessimisticTxn   = true
 )
 

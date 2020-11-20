@@ -149,6 +149,9 @@ func (c *Column) reset() {
 
 // IsNull returns if this row is null.
 func (c *Column) IsNull(rowIdx int) bool {
+	if c.nullBitmap == nil {
+		return false
+	}
 	nullByte := c.nullBitmap[rowIdx/8]
 	return nullByte&(1<<(uint(rowIdx)&7)) == 0
 }
