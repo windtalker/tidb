@@ -1291,7 +1291,7 @@ func (p *PhysicalHashAgg) ToCuraJson(jsonPlan []byte) ([]byte, error) {
 			jsonPlan = append(jsonPlan, '}')
 		}
 		if len(p.children[0].Schema().Columns) > 0 {
-			jsonPlan = append(jsonPlan, '}')
+			jsonPlan = append(jsonPlan, ',')
 		}
 		jsonPlan = append(jsonPlan, []byte("{\"type\": \"UINT64\", \"literal\": ")...)
 		jsonPlan = append(jsonPlan, []byte(strconv.Itoa(18))...)
