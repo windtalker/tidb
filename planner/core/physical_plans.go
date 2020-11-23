@@ -979,6 +979,45 @@ func (p *PhysicalHashJoin) ToCuraJson(jsonPlan []byte) ([]byte, error) {
 		}
 	}
 	jsonPlan = append(jsonPlan, '}')
+	if len(p.schema.Columns) != len(p.children[0].Schema().Columns)+len(p.children[1].Schema().Columns) {
+		// need to add extra projection
+		jsonPlan = append(jsonPlan, []byte(", {\"rel_op\": \"Project\", \"exprs\": [")...)
+		for i, col := range p.schema.Columns {
+			index := 0
+			found := false
+			for idx, leftCol := range p.children[0].Schema().Columns {
+				if leftCol.UniqueID == col.UniqueID {
+					found = true
+					index = index + idx
+				}
+			}
+			if !found {
+				index = len(p.children[0].Schema().Columns)
+				for idx, rightCol := range p.children[1].Schema().Columns {
+					if rightCol.UniqueID == col.UniqueID {
+						found = true
+						index = index + idx
+					}
+				}
+			}
+			if !found {
+				return nil, errors.New("Could not found join output column from input columns")
+			}
+			if i != 0 {
+				jsonPlan = append(jsonPlan, ',')
+			}
+			jsonPlan = append(jsonPlan, []byte("{\"col_ref\": ")...)
+			jsonPlan = append(jsonPlan, []byte(strconv.Itoa(index))...)
+			jsonPlan = append(jsonPlan, '}')
+		}
+		if len(p.schema.Columns) == 0 {
+			// make at least one column is selected
+			jsonPlan = append(jsonPlan, []byte("{\"col_ref\": ")...)
+			jsonPlan = append(jsonPlan, []byte(strconv.Itoa(0))...)
+			jsonPlan = append(jsonPlan, '}')
+		}
+		jsonPlan = append(jsonPlan, []byte("]}")...)
+	}
 	return jsonPlan, nil
 }
 
@@ -1219,6 +1258,47 @@ func (p *PhysicalHashAgg) Clone() (PhysicalPlan, error) {
 
 func (p *PhysicalHashAgg) ToCuraJson(jsonPlan []byte) ([]byte, error) {
 	var err error = nil
+	hasConstantColumnInAggFunc := false
+	for _, agg := range p.AggFuncs {
+		for _, expr := range agg.Args {
+			if _, isConst := expr.(*expression.Constant); isConst {
+				if strings.ToLower(agg.Name) != "count" {
+					return nil, errors.New("const args for non-count agg func")
+				}
+				hasConstantColumnInAggFunc = true
+				break
+			}
+		}
+	}
+	constColumnIndex := -1
+	if hasConstantColumnInAggFunc {
+		for idx, col := range p.children[0].Schema().Columns {
+			if col.RetType.Flag&mysql.NotNullFlag == mysql.NotNullFlag {
+				constColumnIndex = idx
+				break
+			}
+		}
+	}
+	if constColumnIndex == -1 {
+		// add extra project
+		jsonPlan = append(jsonPlan, []byte("{\"rel_op\": \"Project\", \"exprs\": [")...)
+		for i := range p.children[0].Schema().Columns {
+			if i != 0 {
+				jsonPlan = append(jsonPlan, ',')
+			}
+			jsonPlan = append(jsonPlan, []byte("{\"col_ref\": ")...)
+			jsonPlan = append(jsonPlan, []byte(strconv.Itoa(i))...)
+			jsonPlan = append(jsonPlan, '}')
+		}
+		if len(p.children[0].Schema().Columns) > 0 {
+			jsonPlan = append(jsonPlan, '}')
+		}
+		jsonPlan = append(jsonPlan, []byte("{\"type\": \"UINT64\", \"literal\": ")...)
+		jsonPlan = append(jsonPlan, []byte(strconv.Itoa(18))...)
+		jsonPlan = append(jsonPlan, '}')
+		jsonPlan = append(jsonPlan, []byte("]}, ")...)
+		constColumnIndex = len(p.children[0].Schema().Columns)
+	}
 	jsonPlan = append(jsonPlan, []byte("{\"rel_op\": \"Aggregate\", \"groups\": ")...)
 	if len(p.GroupByItems) == 0 {
 		jsonPlan = append(jsonPlan, []byte("[]")...)
@@ -1243,7 +1323,13 @@ func (p *PhysicalHashAgg) ToCuraJson(jsonPlan []byte) ([]byte, error) {
 			jsonPlan = append(jsonPlan, []byte("\"COUNT_ALL\", \"operands\":")...)
 			if len(agg.Args) == 1 {
 				jsonPlan = append(jsonPlan, '[')
-				jsonPlan, err = ExprToCuraJson(agg.Args[0], jsonPlan)
+				if _, isConst := agg.Args[0].(*expression.Constant); isConst {
+					jsonPlan = append(jsonPlan, []byte("{\"col_ref\": ")...)
+					jsonPlan = append(jsonPlan, []byte(strconv.Itoa(constColumnIndex))...)
+					jsonPlan = append(jsonPlan, '}')
+				} else {
+					jsonPlan, err = ExprToCuraJson(agg.Args[0], jsonPlan)
+				}
 				jsonPlan = append(jsonPlan, ']')
 			} else {
 				jsonPlan, err = ExprsToCuraJson(agg.Args, jsonPlan)
