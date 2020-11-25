@@ -759,9 +759,17 @@ func TypeToCuraJson(t *types.FieldType, jsonPlan []byte) ([]byte, error) {
 	jsonPlan = append(jsonPlan, []byte("{\"type\": ")...)
 	switch t.Tp {
 	case mysql.TypeLong, mysql.TypeLonglong:
-		jsonPlan = append(jsonPlan, []byte("\"INT64\"")...)
+		if t.Flag&mysql.UnsignedFlag == mysql.UnsignedFlag {
+			jsonPlan = append(jsonPlan, []byte("\"UINT64\"")...)
+		} else {
+			jsonPlan = append(jsonPlan, []byte("\"INT64\"")...)
+		}
 	case mysql.TypeString:
 		jsonPlan = append(jsonPlan, []byte("\"STRING\"")...)
+	case mysql.TypeFloat, mysql.TypeDouble:
+		jsonPlan = append(jsonPlan, []byte("\"FLOAT64\"")...)
+	case mysql.TypeDate, mysql.TypeDatetime, mysql.TypeTimestamp:
+		jsonPlan = append(jsonPlan, []byte("\"UINT64\"")...)
 	default:
 		return jsonPlan, errors.New("Type not supported by Cura")
 	}
@@ -976,6 +984,13 @@ func (p *PhysicalHashJoin) ToCuraJson(jsonPlan []byte) ([]byte, error) {
 		jsonPlan, _, err = joinEqualConditionsToCuraJson(p.LeftJoinKeys, p.RightJoinKeys, 0, len(p.children[0].Schema().Columns), jsonPlan)
 		if err != nil {
 			return jsonPlan, err
+		}
+	}
+	if p.JoinType == InnerJoin {
+		if p.InnerChildIdx == 0 {
+			jsonPlan = append(jsonPlan, []byte(",\"build_side\": \"LEFT\"")...)
+		} else {
+			jsonPlan = append(jsonPlan, []byte(",\"build_side\": \"RIGHT\"")...)
 		}
 	}
 	jsonPlan = append(jsonPlan, '}')
@@ -1294,7 +1309,7 @@ func (p *PhysicalHashAgg) ToCuraJson(jsonPlan []byte) ([]byte, error) {
 			jsonPlan = append(jsonPlan, ',')
 		}
 		jsonPlan = append(jsonPlan, []byte("{\"type\": \"UINT64\", \"literal\": ")...)
-		jsonPlan = append(jsonPlan, []byte(strconv.Itoa(18))...)
+		jsonPlan = append(jsonPlan, []byte(strconv.Itoa(42))...)
 		jsonPlan = append(jsonPlan, '}')
 		jsonPlan = append(jsonPlan, []byte("]}, ")...)
 		constColumnIndex = len(p.children[0].Schema().Columns)

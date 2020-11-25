@@ -1579,6 +1579,30 @@ func toGoArray(schema *expression.Column, column *chunk.Column, length int) (arr
 		}
 		buffers[1] = arrowmemory.NewBufferBytes(column.GetRawData())
 		buffers[1].Retain()
+	case mysql.TypeDatetime, mysql.TypeDate, mysql.TypeTimestamp:
+		dataType = arrow.PrimitiveTypes.Uint64
+		bufferSize := 2
+		buffers = make([]*arrowmemory.Buffer, bufferSize)
+		if column.GetNullBitMap() == nil {
+			buffers[0] = nil
+		} else {
+			buffers[0] = arrowmemory.NewBufferBytes(column.GetNullBitMap())
+			buffers[0].Retain()
+		}
+		buffers[1] = arrowmemory.NewBufferBytes(column.GetRawData())
+		buffers[1].Retain()
+	case mysql.TypeFloat, mysql.TypeDouble:
+		dataType = arrow.PrimitiveTypes.Float64
+		bufferSize := 2
+		buffers = make([]*arrowmemory.Buffer, bufferSize)
+		if column.GetNullBitMap() == nil {
+			buffers[0] = nil
+		} else {
+			buffers[0] = arrowmemory.NewBufferBytes(column.GetNullBitMap())
+			buffers[0].Retain()
+		}
+		buffers[1] = arrowmemory.NewBufferBytes(column.GetRawData())
+		buffers[1].Retain()
 	default:
 		return arrow.Field{}, nil, errors.New("Unsupported type")
 	}
@@ -1611,7 +1635,7 @@ func arrowRecordToTiDBChunk(record array.Record, chk *chunk.Chunk, selectedColum
 			return errors.New("Not supported type")
 		}
 		switch record.Schema().Field(int(arrowIndex)).Type.ID() {
-		case arrow.UINT64, arrow.INT64:
+		case arrow.UINT64, arrow.INT64, arrow.FLOAT64:
 			var nullBitMap []byte = nil
 			if col.Data().Buffers()[0] != nil {
 				nullBitMap = col.Data().Buffers()[0].Buf()
