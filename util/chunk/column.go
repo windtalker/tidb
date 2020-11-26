@@ -66,6 +66,11 @@ func (c *Column) GetRawData() []byte {
 	return c.data
 }
 
+// GetOffsets appends a Set value into this Column.
+func (c *Column) GetOffsets() []int64 {
+	return c.offsets
+}
+
 // Column stores one column of data in Apache Arrow format.
 // See https://arrow.apache.org/docs/memory_layout.html
 type Column struct {

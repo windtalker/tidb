@@ -17,6 +17,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"reflect"
 	"runtime"
 	"runtime/trace"
 	"strconv"
@@ -24,6 +25,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unsafe"
 
 	"github.com/apache/arrow/go/arrow"
 	"github.com/apache/arrow/go/arrow/array"
@@ -1559,6 +1561,17 @@ type CuraRunner struct {
 	curaExec *CuraExec
 }
 
+func i64SliceToBytes(i64s []int64) (b []byte) {
+	if len(i64s) == 0 {
+		return nil
+	}
+	hdr := (*reflect.SliceHeader)(unsafe.Pointer(&b))
+	hdr.Len = len(i64s) * 8
+	hdr.Cap = hdr.Len
+	hdr.Data = uintptr(unsafe.Pointer(&i64s[0]))
+	return b
+}
+
 func toGoArray(schema *expression.Column, column *chunk.Column, length int) (arrow.Field, array.Interface, error) {
 	var dataType arrow.DataType
 	var buffers []*arrowmemory.Buffer
@@ -1603,6 +1616,20 @@ func toGoArray(schema *expression.Column, column *chunk.Column, length int) (arr
 		}
 		buffers[1] = arrowmemory.NewBufferBytes(column.GetRawData())
 		buffers[1].Retain()
+	case mysql.TypeString:
+		dataType = &arrow.StringType{}
+		bufferSize := 3
+		buffers = make([]*arrowmemory.Buffer, bufferSize)
+		if column.GetNullBitMap() == nil {
+			buffers[0] = nil
+		} else {
+			buffers[0] = arrowmemory.NewBufferBytes(column.GetNullBitMap())
+			buffers[0].Retain()
+		}
+		buffers[1] = arrowmemory.NewBufferBytes(i64SliceToBytes(column.GetOffsets()))
+		buffers[1].Retain()
+		buffers[2] = arrowmemory.NewBufferBytes(column.GetRawData())
+		buffers[2].Retain()
 	default:
 		return arrow.Field{}, nil, errors.New("Unsupported type")
 	}
@@ -1627,6 +1654,17 @@ func tidbChunkToArrowRecord(chk *chunk.Chunk, schema *expression.Schema) (array.
 	return record, nil
 }
 
+func bytesToI64Slice(b []byte) (i64s []int64) {
+	if len(b) == 0 {
+		return nil
+	}
+	hdr := (*reflect.SliceHeader)(unsafe.Pointer(&i64s))
+	hdr.Len = len(b) / 8
+	hdr.Cap = hdr.Len
+	hdr.Data = uintptr(unsafe.Pointer(&b[0]))
+	return i64s
+}
+
 func arrowRecordToTiDBChunk(record array.Record, chk *chunk.Chunk, selectedColumns []int64) error {
 	for tidbIndex, arrowIndex := range selectedColumns {
 		col := record.Column(int(arrowIndex))
@@ -1641,6 +1679,17 @@ func arrowRecordToTiDBChunk(record array.Record, chk *chunk.Chunk, selectedColum
 				nullBitMap = col.Data().Buffers()[0].Buf()
 			}
 			newCol := chunk.NewColumnZeroCopy(col.Data().Len(), nullBitMap, nil, col.Data().Buffers()[1].Buf(), nil)
+			chk.SetCol(tidbIndex, newCol)
+		case arrow.STRING:
+			var nullBitMap []byte = nil
+			if col.Data().Buffers()[0] != nil {
+				nullBitMap = col.Data().Buffers()[0].Buf()
+			}
+			var offsets []int64 = nil
+			if col.Data().Buffers()[1] != nil {
+				offsets = bytesToI64Slice(col.Data().Buffers()[1].Buf())
+			}
+			newCol := chunk.NewColumnZeroCopy(col.Data().Len(), nullBitMap, offsets, col.Data().Buffers()[2].Buf(), nil)
 			chk.SetCol(tidbIndex, newCol)
 		default:
 			return errors.New("Not supported type")
