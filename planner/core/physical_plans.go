@@ -1328,6 +1328,7 @@ func (p *PhysicalHashAgg) ToCuraJson(jsonPlan []byte) ([]byte, error) {
 		return jsonPlan, err
 	}
 	jsonPlan = append(jsonPlan, []byte(", \"aggs\":[")...)
+	curaFunName := ""
 	for idx, agg := range p.AggFuncs {
 		if idx != 0 {
 			jsonPlan = append(jsonPlan, ',')
@@ -1345,6 +1346,43 @@ func (p *PhysicalHashAgg) ToCuraJson(jsonPlan []byte) ([]byte, error) {
 				} else {
 					jsonPlan, err = ExprToCuraJson(agg.Args[0], jsonPlan)
 				}
+				jsonPlan = append(jsonPlan, ']')
+			} else {
+				jsonPlan, err = ExprsToCuraJson(agg.Args, jsonPlan)
+			}
+			if err != nil {
+				return jsonPlan, err
+			}
+			jsonPlan = append(jsonPlan, []byte(",\"type\":")...)
+			jsonPlan, err = TypeToCuraJson(agg.RetTp, jsonPlan)
+		case "avg":
+			if len(curaFunName) == 0 {
+				curaFunName = "MEAN"
+			}
+			fallthrough
+		case "sum":
+			if len(curaFunName) == 0 {
+				curaFunName = "SUM"
+			}
+			fallthrough
+		case "firstrow":
+			if len(curaFunName) == 0 {
+				curaFunName = "MIN"
+			}
+			fallthrough
+		case "min":
+			if len(curaFunName) == 0 {
+				curaFunName = "MIN"
+			}
+			fallthrough
+		case "max":
+			if len(curaFunName) == 0 {
+				curaFunName = "MAX"
+			}
+			jsonPlan = append(jsonPlan, []byte("\""+curaFunName+"\", \"operands\":")...)
+			if len(agg.Args) == 1 {
+				jsonPlan = append(jsonPlan, '[')
+				jsonPlan, err = ExprToCuraJson(agg.Args[0], jsonPlan)
 				jsonPlan = append(jsonPlan, ']')
 			} else {
 				jsonPlan, err = ExprsToCuraJson(agg.Args, jsonPlan)

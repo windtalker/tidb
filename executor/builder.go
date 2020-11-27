@@ -3896,29 +3896,13 @@ func (b *executorBuilder) buildCuraExec(p plannercore.PhysicalPlan) Executor {
 		}
 	}
 	jsonPlan = append(jsonPlan, []byte("]}")...)
-	//if _, ok := p.(*plannercore.PhysicalHashJoin); ok {
-	//	for _, col := range p.Schema().Columns {
-	//		index := int64(0)
-	//		found := false
-	//		for _, child := range p.Children() {
-	//			for _, childCol := range child.Schema().Columns {
-	//				if col.UniqueID == childCol.UniqueID {
-	//					selectedColumns = append(selectedColumns, index)
-	//					found = true
-	//					break
-	//				}
-	//				index++
-	//			}
-	//			if found {
-	//				break
-	//			}
-	//		}
-	//	}
-	//} else {
-	for idx := range p.Schema().Columns {
-		selectedColumns = append(selectedColumns, int64(idx))
+	offset := 0
+	if agg, ok := p.(*plannercore.PhysicalHashAgg); ok {
+		offset = len(agg.GroupByItems)
 	}
-	//}
+	for idx := range p.Schema().Columns {
+		selectedColumns = append(selectedColumns, int64(idx+offset))
+	}
 	e := &CuraExec{idToExecutors: idToChildrenExecutors,
 		jsonPlan:        string(jsonPlan),
 		selectedColumns: selectedColumns,
