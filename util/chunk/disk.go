@@ -346,7 +346,7 @@ func (format *diskFormatRow) toMutRow(fields []*types.FieldType) MutRow {
 		if size == -1 { // isNull
 			col.nullBitmap = []byte{0}
 			if elemSize == varElemLen {
-				col.offsets = []int64{0, 0}
+				col.offsets = []int32{0, 0}
 			} else {
 				buf := make([]byte, elemSize)
 				col.data = buf
@@ -357,7 +357,7 @@ func (format *diskFormatRow) toMutRow(fields []*types.FieldType) MutRow {
 			col.data = format.cells[cellOff]
 			cellOff++
 			if elemSize == varElemLen {
-				col.offsets = []int64{0, int64(len(col.data))}
+				col.offsets = []int32{0, int32(len(col.data))}
 			} else {
 				col.elemBuf = col.data
 			}

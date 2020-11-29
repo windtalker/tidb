@@ -1561,14 +1561,14 @@ type CuraRunner struct {
 	curaExec *CuraExec
 }
 
-func i64SliceToBytes(i64s []int64) (b []byte) {
-	if len(i64s) == 0 {
+func i32SliceToBytes(i32s []int32) (b []byte) {
+	if len(i32s) == 0 {
 		return nil
 	}
 	hdr := (*reflect.SliceHeader)(unsafe.Pointer(&b))
-	hdr.Len = len(i64s) * 8
+	hdr.Len = len(i32s) * 4
 	hdr.Cap = hdr.Len
-	hdr.Data = uintptr(unsafe.Pointer(&i64s[0]))
+	hdr.Data = uintptr(unsafe.Pointer(&i32s[0]))
 	return b
 }
 
@@ -1626,7 +1626,7 @@ func toGoArray(schema *expression.Column, column *chunk.Column, length int) (arr
 			buffers[0] = arrowmemory.NewBufferBytes(column.GetNullBitMap())
 			buffers[0].Retain()
 		}
-		buffers[1] = arrowmemory.NewBufferBytes(i64SliceToBytes(column.GetOffsets()))
+		buffers[1] = arrowmemory.NewBufferBytes(i32SliceToBytes(column.GetOffsets()))
 		buffers[1].Retain()
 		buffers[2] = arrowmemory.NewBufferBytes(column.GetRawData())
 		buffers[2].Retain()
@@ -1654,15 +1654,15 @@ func tidbChunkToArrowRecord(chk *chunk.Chunk, schema *expression.Schema) (array.
 	return record, nil
 }
 
-func bytesToI64Slice(b []byte) (i64s []int64) {
+func bytesToI32Slice(b []byte) (i32s []int32) {
 	if len(b) == 0 {
 		return nil
 	}
-	hdr := (*reflect.SliceHeader)(unsafe.Pointer(&i64s))
-	hdr.Len = len(b) / 8
+	hdr := (*reflect.SliceHeader)(unsafe.Pointer(&i32s))
+	hdr.Len = len(b) / 4
 	hdr.Cap = hdr.Len
 	hdr.Data = uintptr(unsafe.Pointer(&b[0]))
-	return i64s
+	return i32s
 }
 
 func arrowRecordToTiDBChunk(record array.Record, chk *chunk.Chunk, selectedColumns []int64) error {
@@ -1685,9 +1685,9 @@ func arrowRecordToTiDBChunk(record array.Record, chk *chunk.Chunk, selectedColum
 			if col.Data().Buffers()[0] != nil {
 				nullBitMap = col.Data().Buffers()[0].Buf()
 			}
-			var offsets []int64 = nil
+			var offsets []int32 = nil
 			if col.Data().Buffers()[1] != nil {
-				offsets = bytesToI64Slice(col.Data().Buffers()[1].Buf())
+				offsets = bytesToI32Slice(col.Data().Buffers()[1].Buf())
 			}
 			newCol := chunk.NewColumnZeroCopy(col.Data().Len(), nullBitMap, offsets, col.Data().Buffers()[2].Buf(), nil)
 			chk.SetCol(tidbIndex, newCol)

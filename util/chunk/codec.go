@@ -65,8 +65,8 @@ func (c *Codec) encodeColumn(buffer []byte, col *Column) []byte {
 
 	// encode offsets.
 	if !col.isFixed() {
-		numOffsetBytes := (col.length + 1) * 8
-		offsetBytes := i64SliceToBytes(col.offsets)
+		numOffsetBytes := (col.length + 1) * 4
+		offsetBytes := i32SliceToBytes(col.offsets)
 		buffer = append(buffer, offsetBytes[:numOffsetBytes]...)
 	}
 
@@ -83,6 +83,17 @@ func i64SliceToBytes(i64s []int64) (b []byte) {
 	hdr.Len = len(i64s) * 8
 	hdr.Cap = hdr.Len
 	hdr.Data = uintptr(unsafe.Pointer(&i64s[0]))
+	return b
+}
+
+func i32SliceToBytes(i32s []int32) (b []byte) {
+	if len(i32s) == 0 {
+		return nil
+	}
+	hdr := (*reflect.SliceHeader)(unsafe.Pointer(&b))
+	hdr.Len = len(i32s) * 4
+	hdr.Cap = hdr.Len
+	hdr.Data = uintptr(unsafe.Pointer(&i32s[0]))
 	return b
 }
 
@@ -129,10 +140,10 @@ func (c *Codec) decodeColumn(buffer []byte, col *Column, ordinal int) (remained 
 	numFixedBytes := getFixedLen(c.colTypes[ordinal])
 	numDataBytes := int64(numFixedBytes * col.length)
 	if numFixedBytes == -1 {
-		numOffsetBytes := (col.length + 1) * 8
-		col.offsets = bytesToI64Slice(buffer[:numOffsetBytes:numOffsetBytes])
+		numOffsetBytes := (col.length + 1) * 4
+		col.offsets = bytesToI32Slice(buffer[:numOffsetBytes:numOffsetBytes])
 		buffer = buffer[numOffsetBytes:]
-		numDataBytes = col.offsets[col.length]
+		numDataBytes = int64(col.offsets[col.length])
 	} else if cap(col.elemBuf) < numFixedBytes {
 		col.elemBuf = make([]byte, numFixedBytes)
 	}
@@ -163,6 +174,17 @@ func bytesToI64Slice(b []byte) (i64s []int64) {
 	hdr.Cap = hdr.Len
 	hdr.Data = uintptr(unsafe.Pointer(&b[0]))
 	return i64s
+}
+
+func bytesToI32Slice(b []byte) (i32s []int32) {
+	if len(b) == 0 {
+		return nil
+	}
+	hdr := (*reflect.SliceHeader)(unsafe.Pointer(&i32s))
+	hdr.Len = len(b) / 4
+	hdr.Cap = hdr.Len
+	hdr.Data = uintptr(unsafe.Pointer(&b[0]))
+	return i32s
 }
 
 // varElemLen indicates this Column is a variable length Column.
@@ -311,7 +333,7 @@ func (c *Decoder) decodeColumn(chk *Chunk, ordinal int, requiredRows int) {
 
 	if elemLen == varElemLen {
 		// For var-length types, we need to adjust the offsets after appending to destCol.
-		numDataBytes = srcCol.offsets[requiredRows] - srcCol.offsets[0]
+		numDataBytes = int64(srcCol.offsets[requiredRows] - srcCol.offsets[0])
 		deltaOffset := destCol.offsets[destCol.length] - srcCol.offsets[0]
 		destCol.offsets = append(destCol.offsets, srcCol.offsets[1:requiredRows+1]...)
 		for i := destCol.length + 1; i <= destCol.length+requiredRows; i++ {
