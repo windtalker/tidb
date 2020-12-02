@@ -1102,15 +1102,22 @@ func (e *Explain) prepareOperatorInfo(p Plan, taskType, driverSide, indent strin
 	id := texttree.PrettyIdentifier(p.ExplainID().String()+driverSide, indent, isLastChild)
 	estRows, accessObject, operatorInfo := e.getOperatorInfo(p, id)
 
+	updatedTaskType := taskType
+	if physicalPlan, ok := p.(PhysicalPlan); ok {
+		if physicalPlan.SupportCura() {
+			updatedTaskType = taskType + "(cura)"
+		}
+	}
+
 	var row []string
 	if e.Analyze {
 		actRows, analyzeInfo, memoryInfo, diskInfo := getRuntimeInfo(e.ctx, p, nil)
-		row = []string{id, estRows, actRows, taskType, accessObject, analyzeInfo, operatorInfo, memoryInfo, diskInfo}
+		row = []string{id, estRows, actRows, updatedTaskType, accessObject, analyzeInfo, operatorInfo, memoryInfo, diskInfo}
 	} else if e.RuntimeStatsColl != nil {
 		actRows, analyzeInfo, memoryInfo, diskInfo := getRuntimeInfo(e.ctx, p, e.RuntimeStatsColl)
-		row = []string{id, estRows, actRows, taskType, accessObject, analyzeInfo, operatorInfo, memoryInfo, diskInfo}
+		row = []string{id, estRows, actRows, updatedTaskType, accessObject, analyzeInfo, operatorInfo, memoryInfo, diskInfo}
 	} else {
-		row = []string{id, estRows, taskType, accessObject, operatorInfo}
+		row = []string{id, estRows, updatedTaskType, accessObject, operatorInfo}
 	}
 	e.Rows = append(e.Rows, row)
 }
