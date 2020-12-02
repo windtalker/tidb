@@ -3896,12 +3896,8 @@ func (b *executorBuilder) buildCuraExec(p plannercore.PhysicalPlan) Executor {
 		}
 	}
 	jsonPlan = append(jsonPlan, []byte("]}")...)
-	offset := 0
-	if agg, ok := p.(*plannercore.PhysicalHashAgg); ok {
-		offset = len(agg.GroupByItems)
-	}
 	for idx := range p.Schema().Columns {
-		selectedColumns = append(selectedColumns, int64(idx+offset))
+		selectedColumns = append(selectedColumns, int64(idx))
 	}
 	e := &CuraExec{idToExecutors: idToChildrenExecutors,
 		jsonPlan:        string(jsonPlan),

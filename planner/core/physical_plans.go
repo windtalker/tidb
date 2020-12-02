@@ -583,6 +583,18 @@ func (p *PhysicalProjection) ExtractCorrelatedCols() []*expression.CorrelatedCol
 	return corCols
 }
 
+// ToCuraJson implements PhysicalPlan interface.
+func (p *PhysicalProjection) ToCuraJson(jsonPlan []byte) ([]byte, error) {
+	jsonPlan = append(jsonPlan, []byte("{\"rel_op\": \"Project\", \"exprs\": ")...)
+	var err error = nil
+	jsonPlan, err = ExprsToCuraJson(p.Exprs, jsonPlan)
+	if err != nil {
+		return jsonPlan, err
+	}
+	jsonPlan = append(jsonPlan, '}')
+	return jsonPlan, nil
+}
+
 // PhysicalTopN is the physical operator of topN.
 type PhysicalTopN struct {
 	basePhysicalPlan
@@ -812,12 +824,16 @@ func ExprToCuraJson(expr expression.Expression, jsonPlan []byte) ([]byte, error)
 		} else if len(x.GetArgs()) == 2 {
 			jsonPlan = append(jsonPlan, []byte("\"binary_op\": ")...)
 			name := x.FuncName
-			switch name.L {
+			switch strings.ToLower(name.L) {
 			case "+":
 				jsonPlan = append(jsonPlan, []byte("\"ADD\"")...)
 			case "-":
 				jsonPlan = append(jsonPlan, []byte("\"SUB\"")...)
+			case "minus":
+				jsonPlan = append(jsonPlan, []byte("\"SUB\"")...)
 			case "*":
+				jsonPlan = append(jsonPlan, []byte("\"MUL\"")...)
+			case "mul":
 				jsonPlan = append(jsonPlan, []byte("\"MUL\"")...)
 			case "/":
 				jsonPlan = append(jsonPlan, []byte("\"DIV\"")...)
@@ -866,6 +882,9 @@ func ExprToCuraJson(expr expression.Expression, jsonPlan []byte) ([]byte, error)
 		case mysql.TypeLonglong:
 			jsonPlan = append(jsonPlan, []byte("\"INT64\", \"literal\": ")...)
 			jsonPlan = append(jsonPlan, []byte(strconv.FormatInt(x.Value.GetInt64(), 10))...)
+		case mysql.TypeDouble, mysql.TypeFloat:
+			jsonPlan = append(jsonPlan, []byte("\"FLOAT64\", \"literal\": ")...)
+			jsonPlan = append(jsonPlan, []byte(strconv.FormatFloat(x.Value.GetFloat64(), 'f', -1, 64))...)
 		case mysql.TypeString:
 			jsonPlan = append(jsonPlan, []byte("\"STRING\", \"literal\": ")...)
 			jsonPlan = append(jsonPlan, []byte(x.Value.GetString())...)
@@ -1274,6 +1293,7 @@ func (p *PhysicalHashAgg) Clone() (PhysicalPlan, error) {
 func (p *PhysicalHashAgg) ToCuraJson(jsonPlan []byte) ([]byte, error) {
 	var err error = nil
 	hasConstantColumnInAggFunc := false
+	//hasNonColumnExprInAggFunc := false
 	for _, agg := range p.AggFuncs {
 		for _, expr := range agg.Args {
 			if _, isConst := expr.(*expression.Constant); isConst {
@@ -1294,7 +1314,7 @@ func (p *PhysicalHashAgg) ToCuraJson(jsonPlan []byte) ([]byte, error) {
 			}
 		}
 	}
-	if constColumnIndex == -1 {
+	if constColumnIndex == -1 && hasConstantColumnInAggFunc {
 		// add extra project
 		jsonPlan = append(jsonPlan, []byte("{\"rel_op\": \"Project\", \"exprs\": [")...)
 		for i := range p.children[0].Schema().Columns {
@@ -1328,15 +1348,15 @@ func (p *PhysicalHashAgg) ToCuraJson(jsonPlan []byte) ([]byte, error) {
 		return jsonPlan, err
 	}
 	jsonPlan = append(jsonPlan, []byte(", \"aggs\":[")...)
-	curaFunName := ""
 	for idx, agg := range p.AggFuncs {
 		if idx != 0 {
 			jsonPlan = append(jsonPlan, ',')
 		}
+		curaFunName := ""
 		jsonPlan = append(jsonPlan, []byte("{\"agg\":")...)
 		switch strings.ToLower(agg.Name) {
 		case "count":
-			jsonPlan = append(jsonPlan, []byte("\"COUNT_ALL\", \"operands\":")...)
+			jsonPlan = append(jsonPlan, []byte("\"COUNT_VALID\", \"operands\":")...)
 			if len(agg.Args) == 1 {
 				jsonPlan = append(jsonPlan, '[')
 				if _, isConst := agg.Args[0].(*expression.Constant); isConst {
@@ -1367,7 +1387,7 @@ func (p *PhysicalHashAgg) ToCuraJson(jsonPlan []byte) ([]byte, error) {
 			fallthrough
 		case "firstrow":
 			if len(curaFunName) == 0 {
-				curaFunName = "MIN"
+				curaFunName = "ANY"
 			}
 			fallthrough
 		case "min":
@@ -1395,6 +1415,19 @@ func (p *PhysicalHashAgg) ToCuraJson(jsonPlan []byte) ([]byte, error) {
 		default:
 			return jsonPlan, errors.New("Cura not supported agg")
 		}
+		jsonPlan = append(jsonPlan, '}')
+	}
+	jsonPlan = append(jsonPlan, []byte("]}, ")...)
+	// add extra project since the output schema for aggregation in cura and tidb is different
+	jsonPlan = append(jsonPlan, []byte("{\"rel_op\": \"Project\", \"exprs\": [")...)
+	aggFuncNum := len(p.AggFuncs)
+	gbyColNum := len(p.GroupByItems)
+	for i := 0; i < aggFuncNum; i++ {
+		if i != 0 {
+			jsonPlan = append(jsonPlan, ',')
+		}
+		jsonPlan = append(jsonPlan, []byte("{\"col_ref\": ")...)
+		jsonPlan = append(jsonPlan, []byte(strconv.Itoa(i+gbyColNum))...)
 		jsonPlan = append(jsonPlan, '}')
 	}
 	jsonPlan = append(jsonPlan, []byte("]}")...)
@@ -1454,6 +1487,29 @@ func (ls *PhysicalSort) ExtractCorrelatedCols() []*expression.CorrelatedColumn {
 		corCols = append(corCols, expression.ExtractCorColumns(item.Expr)...)
 	}
 	return corCols
+}
+
+func (ls *PhysicalSort) ToCuraJson(jsonPlan []byte) ([]byte, error) {
+	jsonPlan = append(jsonPlan, []byte("{\"rel_op\": \"Sort\", \"sort_infos\": [")...)
+	var err error = nil
+	for idx, o := range ls.ByItems {
+		if idx != 0 {
+			jsonPlan = append(jsonPlan, ',')
+		}
+		jsonPlan = append(jsonPlan, []byte("{\"expr\": ")...)
+		jsonPlan, err = ExprToCuraJson(o.Expr, jsonPlan)
+		if err != nil {
+			return nil, err
+		}
+		jsonPlan = append(jsonPlan, []byte(", \"order\": ")...)
+		if o.Desc {
+			jsonPlan = append(jsonPlan, []byte("\"DESC\", \"null_order\": \"NULL_FIRST\"}")...)
+		} else {
+			jsonPlan = append(jsonPlan, []byte("\"ASC\", \"null_order\": \"NULL_FIRST\"}")...)
+		}
+	}
+	jsonPlan = append(jsonPlan, []byte("]}")...)
+	return jsonPlan, nil
 }
 
 // NominalSort asks sort properties for its child. It is a fake operator that will not

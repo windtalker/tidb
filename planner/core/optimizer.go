@@ -153,13 +153,26 @@ func postOptimize(sctx sessionctx.Context, plan PhysicalPlan) PhysicalPlan {
 	return plan
 }
 
+type CuraSupportType uint64
+
+const (
+	HASHJOIN CuraSupportType = 1 << iota
+	HASHAGG
+	PROJECT
+	SORT
+)
+
 func checkCuraSupport(sctx sessionctx.Context, plan PhysicalPlan) {
 	supportCura := false
 	switch plan.(type) {
 	case *PhysicalHashJoin:
-		supportCura = true
+		supportCura = (sctx.GetSessionVars().CuraSupport & uint64(HASHJOIN)) == uint64(HASHJOIN)
 	case *PhysicalHashAgg:
-		supportCura = sctx.GetSessionVars().CuraSupportAgg
+		supportCura = (sctx.GetSessionVars().CuraSupport & uint64(HASHAGG)) == uint64(HASHAGG)
+	case *PhysicalProjection:
+		supportCura = (sctx.GetSessionVars().CuraSupport & uint64(PROJECT)) == uint64(PROJECT)
+	case *PhysicalSort:
+		supportCura = (sctx.GetSessionVars().CuraSupport & uint64(SORT)) == uint64(SORT)
 	}
 	plan.SetSupportCura(supportCura)
 	for _, child := range plan.Children() {

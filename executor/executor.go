@@ -1672,24 +1672,26 @@ func arrowRecordToTiDBChunk(record array.Record, chk *chunk.Chunk, selectedColum
 		if col.Data().Offset() != 0 {
 			return errors.New("Not supported type")
 		}
+		length := col.Data().Len()
 		switch record.Schema().Field(int(arrowIndex)).Type.ID() {
 		case arrow.UINT64, arrow.INT64, arrow.FLOAT64:
 			var nullBitMap []byte = nil
 			if col.Data().Buffers()[0] != nil {
-				nullBitMap = col.Data().Buffers()[0].Buf()
+				nullBitMap = col.Data().Buffers()[0].Buf()[:(length+7)>>3]
 			}
-			newCol := chunk.NewColumnZeroCopy(col.Data().Len(), nullBitMap, nil, col.Data().Buffers()[1].Buf(), nil)
+			newCol := chunk.NewColumnZeroCopy(length, nullBitMap, nil, col.Data().Buffers()[1].Buf()[0:length*8], make([]byte, 8))
 			chk.SetCol(tidbIndex, newCol)
 		case arrow.STRING:
 			var nullBitMap []byte = nil
 			if col.Data().Buffers()[0] != nil {
-				nullBitMap = col.Data().Buffers()[0].Buf()
+				nullBitMap = col.Data().Buffers()[0].Buf()[:(length+7)>>3]
 			}
 			var offsets []int32 = nil
 			if col.Data().Buffers()[1] != nil {
-				offsets = bytesToI32Slice(col.Data().Buffers()[1].Buf())
+				offsets = bytesToI32Slice(col.Data().Buffers()[1].Buf())[:length+1]
 			}
-			newCol := chunk.NewColumnZeroCopy(col.Data().Len(), nullBitMap, offsets, col.Data().Buffers()[2].Buf(), nil)
+			newCol := chunk.NewColumnZeroCopy(length, nullBitMap, offsets, col.Data().Buffers()[2].Buf()[:offsets[len(offsets)-1]], nil)
+			//newCol := chunk.NewColumnZeroCopy(col.Data().Len(), nullBitMap, offsets, col.Data().Buffers()[2].Buf(), nil)
 			chk.SetCol(tidbIndex, newCol)
 		default:
 			return errors.New("Not supported type")
