@@ -1680,6 +1680,9 @@ func arrowRecordToTiDBChunk(record array.Record, chk *chunk.Chunk, selectedColum
 				nullBitMap = col.Data().Buffers()[0].Buf()[:(length+7)>>3]
 			} else {
 				nullBitMap = make([]byte, (length+7)>>3)
+				for i := range nullBitMap {
+					nullBitMap[i] = 0xff
+				}
 			}
 			newCol := chunk.NewColumnZeroCopy(length, nullBitMap, nil, col.Data().Buffers()[1].Buf()[0:length*8], make([]byte, 8))
 			chk.SetCol(tidbIndex, newCol)
@@ -1689,6 +1692,9 @@ func arrowRecordToTiDBChunk(record array.Record, chk *chunk.Chunk, selectedColum
 				nullBitMap = col.Data().Buffers()[0].Buf()[:(length+7)>>3]
 			} else {
 				nullBitMap = make([]byte, (length+7)>>3)
+				for i := range nullBitMap {
+					nullBitMap[i] = 0xff
+				}
 			}
 			var offsets []int32 = nil
 			if col.Data().Buffers()[1] != nil {
@@ -1761,7 +1767,7 @@ func (f *CuraRunner) run(ctx context.Context) {
 								res := &curaResult{chk: retChk, err: nil}
 								f.curaExec.curaResultChan <- res
 							}
-							res, outRecord = driver.PipelineStream(sourceId, nil, 100)
+							res, outRecord = driver.PipelineStream(sourceId, nil, 2*1024*1024)
 							if res < 0 {
 								f.curaExec.meetError.Store(true)
 								return
@@ -2009,6 +2015,7 @@ func (e *CuraExec) Next(ctx context.Context, req *chunk.Chunk) error {
 
 func (e *CuraExec) Close() error {
 	if e.prepared {
+		e.meetError.Store(true)
 		for range e.curaResultChan {
 		}
 		e.wg.Wait()
