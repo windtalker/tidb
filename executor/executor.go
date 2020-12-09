@@ -1745,7 +1745,7 @@ func (f *CuraRunner) run(ctx context.Context) {
 				go func(sourceId int64) {
 					defer pipelineSourceWG.Done()
 					if driver.IsHeapSource(sourceId) {
-						var res, outRecord = driver.PipelineStream(sourceId, nil, 2 * 1024 * 1024)
+						var res, outRecord = driver.PipelineStream(sourceId, nil, 2*1024*1024)
 						if res < 0 {
 							f.curaExec.meetError.Store(true)
 							return
@@ -1827,13 +1827,13 @@ func (f *CuraRunner) run(ctx context.Context) {
 											}
 											res, arrowOutput := driver.PipelineStream(sourceId, &input, 0)
 											pipelineStreamTime++
-											if arrowOutput.Record.NumRows() == 0 {
-												continue
-											}
-
 											if res < 0 {
 												f.curaExec.meetError.Store(true)
 												return
+											}
+
+											if arrowOutput == nil || arrowOutput.Record == nil || arrowOutput.Record.NumRows() == 0 {
+												continue
 											}
 											// set cap to 0 because we convert arrowOutput to chunk using zeroCopy
 											retChk := chunk.New(f.curaExec.retFieldTypes, 0, int(arrowOutput.Record.NumRows()))

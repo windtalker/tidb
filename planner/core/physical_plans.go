@@ -815,8 +815,12 @@ func ExprsToCuraJson(exprs expression.CNFExprs, jsonPlan []byte) ([]byte, error)
 }
 
 func ExprToCuraJson(expr expression.Expression, jsonPlan []byte) ([]byte, error) {
+	return ExprToCuraJsonInternal(expr, jsonPlan, false)
+}
+func ExprToCuraJsonInternal(expr expression.Expression, jsonPlan []byte, forSelection bool) ([]byte, error) {
 	jsonPlan = append(jsonPlan, '{')
 	var err error = nil
+	returnBool := false
 	switch x := expr.(type) {
 	case *expression.ScalarFunction:
 		if len(x.GetArgs()) == 1 {
@@ -835,22 +839,46 @@ func ExprToCuraJson(expr expression.Expression, jsonPlan []byte) ([]byte, error)
 				jsonPlan = append(jsonPlan, []byte("\"DIV\"")...)
 			case "=":
 				jsonPlan = append(jsonPlan, []byte("\"EQUAL\"")...)
+				if forSelection {
+					returnBool = true
+				}
 			case "!=":
 				jsonPlan = append(jsonPlan, []byte("\"NOT_EQUAL\"")...)
+				if forSelection {
+					returnBool = true
+				}
 			case "<", "lt":
 				jsonPlan = append(jsonPlan, []byte("\"LESS\"")...)
+				if forSelection {
+					returnBool = true
+				}
 			case ">", "gt":
 				jsonPlan = append(jsonPlan, []byte("\"GREATER\"")...)
+				if forSelection {
+					returnBool = true
+				}
 			case "<=", "le":
 				jsonPlan = append(jsonPlan, []byte("\"LESS_EQUAL\"")...)
+				if forSelection {
+					returnBool = true
+				}
 			case ">=", "ge":
 				jsonPlan = append(jsonPlan, []byte("\"CREATER_EQUAL\"")...)
+				if forSelection {
+					returnBool = true
+				}
 			case "%":
 				jsonPlan = append(jsonPlan, []byte("\"PMOD\"")...)
 			case "and":
 				jsonPlan = append(jsonPlan, []byte("\"LOGICAL_AND\"")...)
+				if forSelection {
+					returnBool = true
+				}
 			case "or":
 				jsonPlan = append(jsonPlan, []byte("\"LOGICAL_OR\"")...)
+				if forSelection {
+					returnBool = true
+				}
 			default:
 				return jsonPlan, errors.New("Cura not supported expr")
 			}
@@ -860,11 +888,23 @@ func ExprToCuraJson(expr expression.Expression, jsonPlan []byte) ([]byte, error)
 				return jsonPlan, err
 			}
 			jsonPlan = append(jsonPlan, []byte(", \"type\": ")...)
-			jsonPlan, err = TypeToCuraJson(x.RetType, jsonPlan)
-			if err != nil {
-				return jsonPlan, err
+			if returnBool {
+				jsonPlan = append(jsonPlan, []byte("{\"type\": ")...)
+				jsonPlan = append(jsonPlan, []byte("\"BOOL8\"")...)
+				jsonPlan = append(jsonPlan, []byte(", \"nullable\": ")...)
+				if x.RetType.Flag&mysql.NotNullFlag == mysql.NotNullFlag {
+					jsonPlan = append(jsonPlan, []byte("false")...)
+				} else {
+					jsonPlan = append(jsonPlan, []byte("true")...)
+				}
+				jsonPlan = append(jsonPlan, []byte("}}")...)
+			} else {
+				jsonPlan, err = TypeToCuraJson(x.RetType, jsonPlan)
+				if err != nil {
+					return jsonPlan, err
+				}
+				jsonPlan = append(jsonPlan, '}')
 			}
-			jsonPlan = append(jsonPlan, '}')
 			return jsonPlan, nil
 		} else {
 			return jsonPlan, errors.New("Cura not supported expr")
@@ -1587,16 +1627,16 @@ func selectionConditionsToJsonPlan(conditions []expression.Expression, index int
 		jsonPlan = append(jsonPlan, []byte("{\"binary_op\": \"LOGICAL_AND\", \"operands\": [")...)
 		leftNullable := conditions[index].GetType().Flag&mysql.NotNullFlag != mysql.NotNullFlag
 		rightNullable := conditions[index+1].GetType().Flag&mysql.NotNullFlag != mysql.NotNullFlag
-		jsonPlan, err = ExprToCuraJson(conditions[index], jsonPlan)
+		jsonPlan, err = ExprToCuraJsonInternal(conditions[index], jsonPlan, true)
 		if err != nil {
 			return nil, false, err
 		}
 		jsonPlan = append(jsonPlan, ',')
-		jsonPlan, err = ExprToCuraJson(conditions[index+1], jsonPlan)
+		jsonPlan, err = ExprToCuraJsonInternal(conditions[index+1], jsonPlan, true)
 		if err != nil {
 			return nil, false, err
 		}
-		jsonPlan = append(jsonPlan, []byte("], \"type\": {\"type\": \"INT64\", \"nullable\": ")...)
+		jsonPlan = append(jsonPlan, []byte("], \"type\": {\"type\": \"BOOL8\", \"nullable\": ")...)
 		if leftNullable || rightNullable {
 			jsonPlan = append(jsonPlan, []byte("false")...)
 			nullable = false
@@ -1608,7 +1648,7 @@ func selectionConditionsToJsonPlan(conditions []expression.Expression, index int
 		jsonPlan = append(jsonPlan, []byte("{\"binary_op\": \"LOGICAL_AND\", \"operands\": [")...)
 		leftNullable := conditions[index].GetType().Flag&mysql.NotNullFlag != mysql.NotNullFlag
 		rightNullable := false
-		jsonPlan, err = ExprToCuraJson(conditions[index], jsonPlan)
+		jsonPlan, err = ExprToCuraJsonInternal(conditions[index], jsonPlan, true)
 		if err != nil {
 			return nil, false, err
 		}
@@ -1617,7 +1657,7 @@ func selectionConditionsToJsonPlan(conditions []expression.Expression, index int
 		if err != nil {
 			return jsonPlan, false, err
 		}
-		jsonPlan = append(jsonPlan, []byte("], \"type\": {\"type\": \"INT64\", \"nullable\": ")...)
+		jsonPlan = append(jsonPlan, []byte("], \"type\": {\"type\": \"BOOL8\", \"nullable\": ")...)
 		if leftNullable || rightNullable {
 			jsonPlan = append(jsonPlan, []byte("false")...)
 			nullable = false
@@ -1635,7 +1675,7 @@ func (p *PhysicalSelection) ToCuraJson(jsonPlan []byte) ([]byte, error) {
 	jsonPlan = append(jsonPlan, []byte("{\"rel_op\": \"Filter\", \"condition\": ")...)
 	var err error = nil
 	if len(p.Conditions) == 1 {
-		jsonPlan, err = ExprToCuraJson(p.Conditions[0], jsonPlan)
+		jsonPlan, err = ExprToCuraJsonInternal(p.Conditions[0], jsonPlan, true)
 		if err != nil {
 			return nil, err
 		}
