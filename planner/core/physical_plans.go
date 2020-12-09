@@ -776,7 +776,7 @@ func TypeToCuraJson(t *types.FieldType, jsonPlan []byte) ([]byte, error) {
 		} else {
 			jsonPlan = append(jsonPlan, []byte("\"INT64\"")...)
 		}
-	case mysql.TypeString:
+	case mysql.TypeString, mysql.TypeVarchar:
 		jsonPlan = append(jsonPlan, []byte("\"STRING\"")...)
 	case mysql.TypeFloat, mysql.TypeDouble:
 		jsonPlan = append(jsonPlan, []byte("\"FLOAT64\"")...)
@@ -827,13 +827,9 @@ func ExprToCuraJson(expr expression.Expression, jsonPlan []byte) ([]byte, error)
 			switch strings.ToLower(name.L) {
 			case "+":
 				jsonPlan = append(jsonPlan, []byte("\"ADD\"")...)
-			case "-":
+			case "-", "minus":
 				jsonPlan = append(jsonPlan, []byte("\"SUB\"")...)
-			case "minus":
-				jsonPlan = append(jsonPlan, []byte("\"SUB\"")...)
-			case "*":
-				jsonPlan = append(jsonPlan, []byte("\"MUL\"")...)
-			case "mul":
+			case "*", "mul":
 				jsonPlan = append(jsonPlan, []byte("\"MUL\"")...)
 			case "/":
 				jsonPlan = append(jsonPlan, []byte("\"DIV\"")...)
@@ -841,13 +837,13 @@ func ExprToCuraJson(expr expression.Expression, jsonPlan []byte) ([]byte, error)
 				jsonPlan = append(jsonPlan, []byte("\"EQUAL\"")...)
 			case "!=":
 				jsonPlan = append(jsonPlan, []byte("\"NOT_EQUAL\"")...)
-			case "<":
+			case "<", "lt":
 				jsonPlan = append(jsonPlan, []byte("\"LESS\"")...)
-			case ">":
+			case ">", "gt":
 				jsonPlan = append(jsonPlan, []byte("\"GREATER\"")...)
-			case "<=":
+			case "<=", "le":
 				jsonPlan = append(jsonPlan, []byte("\"LESS_EQUAL\"")...)
-			case ">=":
+			case ">=", "ge":
 				jsonPlan = append(jsonPlan, []byte("\"CREATER_EQUAL\"")...)
 			case "%":
 				jsonPlan = append(jsonPlan, []byte("\"PMOD\"")...)
@@ -1387,7 +1383,7 @@ func (p *PhysicalHashAgg) ToCuraJson(jsonPlan []byte) ([]byte, error) {
 			fallthrough
 		case "firstrow":
 			if len(curaFunName) == 0 {
-				curaFunName = "ANY"
+				curaFunName = "MIN"
 			}
 			fallthrough
 		case "min":
@@ -1581,6 +1577,76 @@ func (p *PhysicalSelection) ExtractCorrelatedCols() []*expression.CorrelatedColu
 		corCols = append(corCols, expression.ExtractCorColumns(cond)...)
 	}
 	return corCols
+}
+
+func selectionConditionsToJsonPlan(conditions []expression.Expression, index int, jsonPlan []byte) ([]byte, bool, error) {
+	var err error = nil
+	nullable := false
+	if index == len(conditions)-2 {
+		// last one
+		jsonPlan = append(jsonPlan, []byte("{\"binary_op\": \"LOGICAL_AND\", \"operands\": [")...)
+		leftNullable := conditions[index].GetType().Flag&mysql.NotNullFlag != mysql.NotNullFlag
+		rightNullable := conditions[index+1].GetType().Flag&mysql.NotNullFlag != mysql.NotNullFlag
+		jsonPlan, err = ExprToCuraJson(conditions[index], jsonPlan)
+		if err != nil {
+			return nil, false, err
+		}
+		jsonPlan = append(jsonPlan, ',')
+		jsonPlan, err = ExprToCuraJson(conditions[index+1], jsonPlan)
+		if err != nil {
+			return nil, false, err
+		}
+		jsonPlan = append(jsonPlan, []byte("], \"type\": {\"type\": \"INT64\", \"nullable\": ")...)
+		if leftNullable || rightNullable {
+			jsonPlan = append(jsonPlan, []byte("false")...)
+			nullable = false
+		} else {
+			jsonPlan = append(jsonPlan, []byte("true")...)
+			nullable = true
+		}
+	} else {
+		jsonPlan = append(jsonPlan, []byte("{\"binary_op\": \"LOGICAL_AND\", \"operands\": [")...)
+		leftNullable := conditions[index].GetType().Flag&mysql.NotNullFlag != mysql.NotNullFlag
+		rightNullable := false
+		jsonPlan, err = ExprToCuraJson(conditions[index], jsonPlan)
+		if err != nil {
+			return nil, false, err
+		}
+		jsonPlan = append(jsonPlan, ',')
+		jsonPlan, rightNullable, err = selectionConditionsToJsonPlan(conditions, index+1, jsonPlan)
+		if err != nil {
+			return jsonPlan, false, err
+		}
+		jsonPlan = append(jsonPlan, []byte("], \"type\": {\"type\": \"INT64\", \"nullable\": ")...)
+		if leftNullable || rightNullable {
+			jsonPlan = append(jsonPlan, []byte("false")...)
+			nullable = false
+		} else {
+			jsonPlan = append(jsonPlan, []byte("true")...)
+			nullable = true
+		}
+		jsonPlan = append(jsonPlan, []byte("}}")...)
+	}
+	return jsonPlan, nullable, nil
+}
+
+// ToCuraJson implements PhysicalPlan interface.
+func (p *PhysicalSelection) ToCuraJson(jsonPlan []byte) ([]byte, error) {
+	jsonPlan = append(jsonPlan, []byte("{\"rel_op\": \"Filter\", \"condition\": ")...)
+	var err error = nil
+	if len(p.Conditions) == 1 {
+		jsonPlan, err = ExprToCuraJson(p.Conditions[0], jsonPlan)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		jsonPlan, _, err = selectionConditionsToJsonPlan(p.Conditions, 0, jsonPlan)
+		if err != nil {
+			return nil, err
+		}
+	}
+	jsonPlan = append(jsonPlan, '}')
+	return jsonPlan, nil
 }
 
 // PhysicalMaxOneRow is the physical operator of maxOneRow.

@@ -1616,7 +1616,7 @@ func toGoArray(schema *expression.Column, column *chunk.Column, length int) (arr
 		}
 		buffers[1] = arrowmemory.NewBufferBytes(column.GetRawData())
 		buffers[1].Retain()
-	case mysql.TypeString:
+	case mysql.TypeString, mysql.TypeVarchar:
 		dataType = &arrow.StringType{}
 		bufferSize := 3
 		buffers = make([]*arrowmemory.Buffer, bufferSize)
@@ -1678,6 +1678,8 @@ func arrowRecordToTiDBChunk(record array.Record, chk *chunk.Chunk, selectedColum
 			var nullBitMap []byte = nil
 			if col.Data().Buffers()[0] != nil {
 				nullBitMap = col.Data().Buffers()[0].Buf()[:(length+7)>>3]
+			} else {
+				nullBitMap = make([]byte, (length+7)>>3)
 			}
 			newCol := chunk.NewColumnZeroCopy(length, nullBitMap, nil, col.Data().Buffers()[1].Buf()[0:length*8], make([]byte, 8))
 			chk.SetCol(tidbIndex, newCol)
@@ -1685,6 +1687,8 @@ func arrowRecordToTiDBChunk(record array.Record, chk *chunk.Chunk, selectedColum
 			var nullBitMap []byte = nil
 			if col.Data().Buffers()[0] != nil {
 				nullBitMap = col.Data().Buffers()[0].Buf()[:(length+7)>>3]
+			} else {
+				nullBitMap = make([]byte, (length+7)>>3)
 			}
 			var offsets []int32 = nil
 			if col.Data().Buffers()[1] != nil {
@@ -1741,7 +1745,7 @@ func (f *CuraRunner) run(ctx context.Context) {
 				go func(sourceId int64) {
 					defer pipelineSourceWG.Done()
 					if driver.IsHeapSource(sourceId) {
-						var res, outRecord = driver.PipelineStream(sourceId, nil, 100)
+						var res, outRecord = driver.PipelineStream(sourceId, nil, 2 * 1024 * 1024)
 						if res < 0 {
 							f.curaExec.meetError.Store(true)
 							return
