@@ -1425,7 +1425,11 @@ func (p *PhysicalHashAgg) ToCuraJson(jsonPlan []byte) ([]byte, error) {
 		jsonPlan = append(jsonPlan, []byte("{\"agg\":")...)
 		switch strings.ToLower(agg.Name) {
 		case "count":
-			jsonPlan = append(jsonPlan, []byte("\"COUNT_VALID\", \"operands\":")...)
+			if agg.HasDistinct {
+				jsonPlan = append(jsonPlan, []byte("\"NUNIQUE\", \"operands\":")...)
+			} else {
+				jsonPlan = append(jsonPlan, []byte("\"COUNT_VALID\", \"operands\":")...)
+			}
 			if len(agg.Args) == 1 {
 				jsonPlan = append(jsonPlan, '[')
 				if _, isConst := agg.Args[0].(*expression.Constant); isConst {
@@ -1448,6 +1452,9 @@ func (p *PhysicalHashAgg) ToCuraJson(jsonPlan []byte) ([]byte, error) {
 			if len(agg.Args) > 1 {
 				return jsonPlan, errors.New("first row only support 1 arg")
 			}
+			if agg.HasDistinct {
+				return jsonPlan, errors.New("agg with distinct not supported")
+			}
 			jsonPlan = append(jsonPlan, []byte("\"NTH_ELEMENT\", \"operands\":")...)
 			jsonPlan = append(jsonPlan, '[')
 			jsonPlan, err = ExprToCuraJson(agg.Args[0], jsonPlan)
@@ -1461,6 +1468,9 @@ func (p *PhysicalHashAgg) ToCuraJson(jsonPlan []byte) ([]byte, error) {
 		case "avg":
 			// avg is very special, if current agg is final agg, then need to rewrite is to sum and count
 			// otherwise, push avg to cura is ok
+			if agg.HasDistinct {
+				return jsonPlan, errors.New("agg with distinct not supported")
+			}
 			if len(agg.Args) == 2 {
 				jsonPlan = append(jsonPlan, []byte("\"COUNT_VALID\", \"operands\":")...)
 				jsonPlan = append(jsonPlan, '[')
@@ -1506,6 +1516,9 @@ func (p *PhysicalHashAgg) ToCuraJson(jsonPlan []byte) ([]byte, error) {
 		case "max":
 			if len(curaFunName) == 0 {
 				curaFunName = "MAX"
+			}
+			if agg.HasDistinct {
+				return jsonPlan, errors.New("agg with distinct not supported")
 			}
 			jsonPlan = append(jsonPlan, []byte("\""+curaFunName+"\", \"operands\":")...)
 			if len(agg.Args) == 1 {
