@@ -1428,7 +1428,13 @@ func (p *PhysicalHashAgg) ToCuraJson(jsonPlan []byte) ([]byte, error) {
 			if agg.HasDistinct {
 				jsonPlan = append(jsonPlan, []byte("\"NUNIQUE\", \"operands\":")...)
 			} else {
-				jsonPlan = append(jsonPlan, []byte("\"COUNT_VALID\", \"operands\":")...)
+				if agg.Mode == aggregation.CompleteMode {
+					jsonPlan = append(jsonPlan, []byte("\"COUNT_VALID\", \"operands\":")...)
+				} else if agg.Mode == aggregation.FinalMode {
+					jsonPlan = append(jsonPlan, []byte("\"SUM\", \"operands\":")...)
+				} else {
+					return jsonPlan, errors.New("unsupported aggregation mode")
+				}
 			}
 			if len(agg.Args) == 1 {
 				jsonPlan = append(jsonPlan, '[')
@@ -1471,7 +1477,7 @@ func (p *PhysicalHashAgg) ToCuraJson(jsonPlan []byte) ([]byte, error) {
 			if agg.HasDistinct {
 				return jsonPlan, errors.New("agg with distinct not supported")
 			}
-			if len(agg.Args) == 2 {
+			if agg.Mode == aggregation.FinalMode {
 				jsonPlan = append(jsonPlan, []byte("\"COUNT_VALID\", \"operands\":")...)
 				jsonPlan = append(jsonPlan, '[')
 				jsonPlan, err = ExprToCuraJson(agg.Args[0], jsonPlan)
@@ -1492,7 +1498,7 @@ func (p *PhysicalHashAgg) ToCuraJson(jsonPlan []byte) ([]byte, error) {
 				jsonPlan = append(jsonPlan, ']')
 				jsonPlan = append(jsonPlan, []byte(",\"type\":")...)
 				jsonPlan, err = TypeToCuraJson(agg.Args[0].GetType(), jsonPlan)
-			} else if len(agg.Args) == 1 {
+			} else if agg.Mode == aggregation.CompleteMode {
 				jsonPlan = append(jsonPlan, []byte("\"MEAN\", \"operands\":")...)
 				jsonPlan = append(jsonPlan, '[')
 				jsonPlan, err = ExprToCuraJson(agg.Args[0], jsonPlan)
@@ -1503,7 +1509,7 @@ func (p *PhysicalHashAgg) ToCuraJson(jsonPlan []byte) ([]byte, error) {
 				jsonPlan = append(jsonPlan, []byte(",\"type\":")...)
 				jsonPlan, err = TypeToCuraJson(agg.RetTp, jsonPlan)
 			} else {
-				return jsonPlan, errors.New("first row only support 1 or 2 arg")
+				return jsonPlan, errors.New("un-supported agg mode")
 			}
 		case "sum":
 			curaFunName = "SUM"
