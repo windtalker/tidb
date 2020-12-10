@@ -629,6 +629,32 @@ func (lt *PhysicalTopN) ExtractCorrelatedCols() []*expression.CorrelatedColumn {
 	return corCols
 }
 
+func (lt *PhysicalTopN) ToCuraJson(jsonPlan []byte) ([]byte, error) {
+	jsonPlan = append(jsonPlan, []byte("{\"rel_op\": \"Sort\", \"sort_infos\": [")...)
+	var err error = nil
+	for idx, o := range lt.ByItems {
+		if idx != 0 {
+			jsonPlan = append(jsonPlan, ',')
+		}
+		jsonPlan = append(jsonPlan, []byte("{\"expr\": ")...)
+		jsonPlan, err = ExprToCuraJson(o.Expr, jsonPlan)
+		if err != nil {
+			return nil, err
+		}
+		jsonPlan = append(jsonPlan, []byte(", \"order\": ")...)
+		if o.Desc {
+			jsonPlan = append(jsonPlan, []byte("\"DESC\", \"null_order\": \"NULL_FIRST\"}")...)
+		} else {
+			jsonPlan = append(jsonPlan, []byte("\"ASC\", \"null_order\": \"NULL_FIRST\"}")...)
+		}
+	}
+	jsonPlan = append(jsonPlan, []byte("]}, ")...)
+	jsonPlan = append(jsonPlan, []byte("{\"rel_op\": \"Limit\", \"n\": ")...)
+	jsonPlan = append(jsonPlan, []byte(strconv.FormatUint(lt.Count, 10))...)
+	jsonPlan = append(jsonPlan, []byte("}")...)
+	return jsonPlan, nil
+}
+
 // PhysicalApply represents apply plan, only used for subquery.
 type PhysicalApply struct {
 	PhysicalHashJoin
@@ -1246,6 +1272,13 @@ func (p *PhysicalLimit) Clone() (PhysicalPlan, error) {
 	return cloned, nil
 }
 
+func (p *PhysicalLimit) ToCuraJson(jsonPlan []byte) ([]byte, error) {
+	jsonPlan = append(jsonPlan, []byte("{\"rel_op\": \"Limit\", \"n\": ")...)
+	jsonPlan = append(jsonPlan, []byte(strconv.FormatUint(p.Count, 10))...)
+	jsonPlan = append(jsonPlan, []byte("}")...)
+	return jsonPlan, nil
+}
+
 // PhysicalUnionAll is the physical operator of UnionAll.
 type PhysicalUnionAll struct {
 	physicalSchemaProducer
@@ -1411,20 +1444,59 @@ func (p *PhysicalHashAgg) ToCuraJson(jsonPlan []byte) ([]byte, error) {
 			}
 			jsonPlan = append(jsonPlan, []byte(",\"type\":")...)
 			jsonPlan, err = TypeToCuraJson(agg.RetTp, jsonPlan)
-		case "avg":
-			if len(curaFunName) == 0 {
-				curaFunName = "MEAN"
-			}
-			fallthrough
-		case "sum":
-			if len(curaFunName) == 0 {
-				curaFunName = "SUM"
-			}
-			fallthrough
 		case "firstrow":
-			if len(curaFunName) == 0 {
-				curaFunName = "MIN"
+			if len(agg.Args) > 1 {
+				return jsonPlan, errors.New("first row only support 1 arg")
 			}
+			jsonPlan = append(jsonPlan, []byte("\"NTH_ELEMENT\", \"operands\":")...)
+			jsonPlan = append(jsonPlan, '[')
+			jsonPlan, err = ExprToCuraJson(agg.Args[0], jsonPlan)
+			if err != nil {
+				return jsonPlan, err
+			}
+			jsonPlan = append(jsonPlan, ']')
+			jsonPlan = append(jsonPlan, []byte(",\"n\": 0")...)
+			jsonPlan = append(jsonPlan, []byte(",\"type\":")...)
+			jsonPlan, err = TypeToCuraJson(agg.RetTp, jsonPlan)
+		case "avg":
+			// avg is very special, if current agg is final agg, then need to rewrite is to sum and count
+			// otherwise, push avg to cura is ok
+			if len(agg.Args) == 2 {
+				jsonPlan = append(jsonPlan, []byte("\"COUNT_VALID\", \"operands\":")...)
+				jsonPlan = append(jsonPlan, '[')
+				jsonPlan, err = ExprToCuraJson(agg.Args[0], jsonPlan)
+				if err != nil {
+					return jsonPlan, err
+				}
+				jsonPlan = append(jsonPlan, ']')
+				jsonPlan = append(jsonPlan, []byte(",\"type\":")...)
+				jsonPlan, err = TypeToCuraJson(agg.Args[0].GetType(), jsonPlan)
+				jsonPlan = append(jsonPlan, []byte("},")...)
+				jsonPlan = append(jsonPlan, []byte("{\"agg\":")...)
+				jsonPlan = append(jsonPlan, []byte("\"SUM\", \"operands\":")...)
+				jsonPlan = append(jsonPlan, '[')
+				jsonPlan, err = ExprToCuraJson(agg.Args[1], jsonPlan)
+				if err != nil {
+					return jsonPlan, err
+				}
+				jsonPlan = append(jsonPlan, ']')
+				jsonPlan = append(jsonPlan, []byte(",\"type\":")...)
+				jsonPlan, err = TypeToCuraJson(agg.Args[0].GetType(), jsonPlan)
+			} else if len(agg.Args) == 1 {
+				jsonPlan = append(jsonPlan, []byte("\"MEAN\", \"operands\":")...)
+				jsonPlan = append(jsonPlan, '[')
+				jsonPlan, err = ExprToCuraJson(agg.Args[0], jsonPlan)
+				if err != nil {
+					return jsonPlan, err
+				}
+				jsonPlan = append(jsonPlan, ']')
+				jsonPlan = append(jsonPlan, []byte(",\"type\":")...)
+				jsonPlan, err = TypeToCuraJson(agg.RetTp, jsonPlan)
+			} else {
+				return jsonPlan, errors.New("first row only support 1 or 2 arg")
+			}
+		case "sum":
+			curaFunName = "SUM"
 			fallthrough
 		case "min":
 			if len(curaFunName) == 0 {
@@ -1458,13 +1530,33 @@ func (p *PhysicalHashAgg) ToCuraJson(jsonPlan []byte) ([]byte, error) {
 	jsonPlan = append(jsonPlan, []byte("{\"rel_op\": \"Project\", \"exprs\": [")...)
 	aggFuncNum := len(p.AggFuncs)
 	gbyColNum := len(p.GroupByItems)
+	curaOutputColumn := gbyColNum
 	for i := 0; i < aggFuncNum; i++ {
 		if i != 0 {
 			jsonPlan = append(jsonPlan, ',')
 		}
-		jsonPlan = append(jsonPlan, []byte("{\"col_ref\": ")...)
-		jsonPlan = append(jsonPlan, []byte(strconv.Itoa(i+gbyColNum))...)
-		jsonPlan = append(jsonPlan, '}')
+		if strings.ToLower(p.AggFuncs[i].Name) == "avg" && len(p.AggFuncs[i].Args) == 2 {
+			//
+			jsonPlan = append(jsonPlan, []byte("{\"binary_op\": \"DIV\", \"operands\": [")...)
+			jsonPlan = append(jsonPlan, []byte("{\"col_ref\": ")...)
+			jsonPlan = append(jsonPlan, []byte(strconv.Itoa(curaOutputColumn))...)
+			jsonPlan = append(jsonPlan, []byte("},")...)
+			curaOutputColumn++
+			jsonPlan = append(jsonPlan, []byte("{\"col_ref\": ")...)
+			jsonPlan = append(jsonPlan, []byte(strconv.Itoa(curaOutputColumn))...)
+			jsonPlan = append(jsonPlan, []byte("}], \"type\": ")...)
+			jsonPlan, err = TypeToCuraJson(p.AggFuncs[i].RetTp, jsonPlan)
+			if err != nil {
+				return jsonPlan, err
+			}
+			jsonPlan = append(jsonPlan, '}')
+			curaOutputColumn++
+		} else {
+			jsonPlan = append(jsonPlan, []byte("{\"col_ref\": ")...)
+			jsonPlan = append(jsonPlan, []byte(strconv.Itoa(curaOutputColumn))...)
+			jsonPlan = append(jsonPlan, '}')
+			curaOutputColumn++
+		}
 	}
 	jsonPlan = append(jsonPlan, []byte("]}")...)
 	return jsonPlan, err

@@ -161,6 +161,7 @@ const (
 	PROJECT
 	SORT
 	SELECTION
+	LIMIT
 )
 
 func checkCuraSupport(sctx sessionctx.Context, plan PhysicalPlan) {
@@ -176,6 +177,10 @@ func checkCuraSupport(sctx sessionctx.Context, plan PhysicalPlan) {
 		supportCura = (sctx.GetSessionVars().CuraSupport & uint64(SORT)) == uint64(SORT)
 	case *PhysicalSelection:
 		supportCura = (sctx.GetSessionVars().CuraSupport & uint64(SELECTION)) == uint64(SELECTION)
+	case *PhysicalLimit:
+		supportCura = plan.(*PhysicalLimit).Offset == 0 && (sctx.GetSessionVars().CuraSupport&uint64(LIMIT)) == uint64(LIMIT)
+	case *PhysicalTopN:
+		supportCura = plan.(*PhysicalTopN).Offset == 0 && (sctx.GetSessionVars().CuraSupport&uint64(LIMIT)) == uint64(LIMIT) && (sctx.GetSessionVars().CuraSupport&uint64(SORT)) == uint64(SORT)
 	}
 	plan.SetSupportCura(supportCura)
 	for _, child := range plan.Children() {
