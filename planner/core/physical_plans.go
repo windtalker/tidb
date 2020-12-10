@@ -643,14 +643,16 @@ func (lt *PhysicalTopN) ToCuraJson(jsonPlan []byte) ([]byte, error) {
 		}
 		jsonPlan = append(jsonPlan, []byte(", \"order\": ")...)
 		if o.Desc {
-			jsonPlan = append(jsonPlan, []byte("\"DESC\", \"null_order\": \"NULL_FIRST\"}")...)
+			jsonPlan = append(jsonPlan, []byte("\"DESC\", \"null_order\": \"NULLS_FIRST\"}")...)
 		} else {
-			jsonPlan = append(jsonPlan, []byte("\"ASC\", \"null_order\": \"NULL_FIRST\"}")...)
+			jsonPlan = append(jsonPlan, []byte("\"ASC\", \"null_order\": \"NULLS_FIRST\"}")...)
 		}
 	}
 	jsonPlan = append(jsonPlan, []byte("]}, ")...)
 	jsonPlan = append(jsonPlan, []byte("{\"rel_op\": \"Limit\", \"n\": ")...)
 	jsonPlan = append(jsonPlan, []byte(strconv.FormatUint(lt.Count, 10))...)
+	jsonPlan = append(jsonPlan, []byte(", \"offset\": ")...)
+	jsonPlan = append(jsonPlan, []byte(strconv.FormatUint(lt.Offset, 10))...)
 	jsonPlan = append(jsonPlan, []byte("}")...)
 	return jsonPlan, nil
 }
@@ -1275,6 +1277,8 @@ func (p *PhysicalLimit) Clone() (PhysicalPlan, error) {
 func (p *PhysicalLimit) ToCuraJson(jsonPlan []byte) ([]byte, error) {
 	jsonPlan = append(jsonPlan, []byte("{\"rel_op\": \"Limit\", \"n\": ")...)
 	jsonPlan = append(jsonPlan, []byte(strconv.FormatUint(p.Count, 10))...)
+	jsonPlan = append(jsonPlan, []byte(", \"offset\": ")...)
+	jsonPlan = append(jsonPlan, []byte(strconv.FormatUint(p.Offset, 10))...)
 	jsonPlan = append(jsonPlan, []byte("}")...)
 	return jsonPlan, nil
 }
@@ -1650,9 +1654,9 @@ func (ls *PhysicalSort) ToCuraJson(jsonPlan []byte) ([]byte, error) {
 		}
 		jsonPlan = append(jsonPlan, []byte(", \"order\": ")...)
 		if o.Desc {
-			jsonPlan = append(jsonPlan, []byte("\"DESC\", \"null_order\": \"NULL_FIRST\"}")...)
+			jsonPlan = append(jsonPlan, []byte("\"DESC\", \"null_order\": \"NULLS_FIRST\"}")...)
 		} else {
-			jsonPlan = append(jsonPlan, []byte("\"ASC\", \"null_order\": \"NULL_FIRST\"}")...)
+			jsonPlan = append(jsonPlan, []byte("\"ASC\", \"null_order\": \"NULLS_FIRST\"}")...)
 		}
 	}
 	jsonPlan = append(jsonPlan, []byte("]}")...)
