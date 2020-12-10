@@ -1812,7 +1812,7 @@ func (f *CuraRunner) run(ctx context.Context) {
 								totalRows := 0
 								totalBytes := int64(0)
 								defer func() {
-									logutil.CuraLogger.Infof("pipeline %v source %v stream thread elapsed time: %v, rows %v, mem %v\n", pipelineIndex, sourceId, pipelineStreamTime, totalRows, totalBytes)
+									logutil.CuraLogger.Infof("pipeline %v source %v stream thread elapsed time: %v, rows %v, mem %v", pipelineIndex, sourceId, pipelineStreamTime, totalRows, totalBytes)
 									wg.Done()
 								}()
 								for true {
@@ -1919,7 +1919,7 @@ func (f *CuraRunner) run(ctx context.Context) {
 								startTime2 := time.Now()
 								defer func() {
 									elapsed2 := time.Since(startTime2)
-									logutil.CuraLogger.Infof("pipeline %v source %v push thread elapsed: %v, rows: %v, mem: %v\n", pipelineIndex, sourceId, elapsed2, totalRows, totalBytes)
+									logutil.CuraLogger.Infof("pipeline %v source %v push thread elapsed: %v, rows: %v, mem: %v", pipelineIndex, sourceId, elapsed2, totalRows, totalBytes)
 									wg.Done()
 								}()
 								for true {
@@ -1946,7 +1946,7 @@ func (f *CuraRunner) run(ctx context.Context) {
 											}
 											res, _ := driver.PipelinePush(sourceId, &input)
 											elapsed1 := time.Since(startTime1)
-											logutil.CuraLogger.Infof("pipeline %v source %v push elapsed %v, rows %v, mem %v\n", pipelineIndex, sourceId, elapsed1, childResult.chk.NumRows(), childResult.chk.MemoryUsage())
+											logutil.CuraLogger.Infof("pipeline %v source %v push elapsed %v, rows %v, mem %v", pipelineIndex, sourceId, elapsed1, childResult.chk.NumRows(), childResult.chk.MemoryUsage())
 											//pipelinePushTime++
 											if res < 0 {
 												f.curaExec.meetError.Store(true)
@@ -1959,7 +1959,7 @@ func (f *CuraRunner) run(ctx context.Context) {
 						}
 						wg.Wait()
 						elapsed := time.Since(startTime)
-						logutil.CuraLogger.Infof("pipeline %v source %v push total elapsed %v\n", pipelineIndex, sourceId, elapsed)
+						logutil.CuraLogger.Infof("pipeline %v source %v push total elapsed %v", pipelineIndex, sourceId, elapsed)
 					}
 				}(nextSourceId)
 			}
@@ -1967,7 +1967,7 @@ func (f *CuraRunner) run(ctx context.Context) {
 		pipelineSourceWG.Wait()
 		err = driver.FinishPipeline()
 		elapsed := time.Since(startTime)
-		logutil.CuraLogger.Infof("pipeline %v running elapsed: %v\n", pipelineIndex, elapsed)
+		logutil.CuraLogger.Infof("pipeline %v running elapsed: %v", pipelineIndex, elapsed)
 		if err != 0 {
 			f.curaExec.meetError.Store(true)
 			return
