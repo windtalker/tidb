@@ -587,7 +587,13 @@ func (p *PhysicalProjection) ExtractCorrelatedCols() []*expression.CorrelatedCol
 func (p *PhysicalProjection) ToCuraJson(jsonPlan []byte) ([]byte, error) {
 	jsonPlan = append(jsonPlan, []byte("{\"rel_op\": \"Project\", \"exprs\": ")...)
 	var err error = nil
+	if len(p.Exprs) == 1 {
+		jsonPlan = append(jsonPlan, '[')
+	}
 	jsonPlan, err = ExprsToCuraJson(p.Exprs, jsonPlan)
+	if len(p.Exprs) == 1 {
+		jsonPlan = append(jsonPlan, ']')
+	}
 	if err != nil {
 		return jsonPlan, err
 	}
@@ -863,7 +869,7 @@ func ExprToCuraJsonInternal(expr expression.Expression, jsonPlan []byte, forSele
 				jsonPlan = append(jsonPlan, []byte("\"SUB\"")...)
 			case "*", "mul":
 				jsonPlan = append(jsonPlan, []byte("\"MUL\"")...)
-			case "/":
+			case "/", "div":
 				jsonPlan = append(jsonPlan, []byte("\"DIV\"")...)
 			case "=":
 				jsonPlan = append(jsonPlan, []byte("\"EQUAL\"")...)
