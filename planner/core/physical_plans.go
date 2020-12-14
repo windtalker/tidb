@@ -1505,7 +1505,7 @@ func (p *PhysicalHashAgg) ToCuraJson(jsonPlan []byte) ([]byte, error) {
 				return jsonPlan, errors.New("agg with distinct not supported")
 			}
 			if agg.Mode == aggregation.FinalMode {
-				jsonPlan = append(jsonPlan, []byte("\"COUNT_VALID\", \"operands\":")...)
+				jsonPlan = append(jsonPlan, []byte("\"SUM\", \"operands\":")...)
 				jsonPlan = append(jsonPlan, '[')
 				jsonPlan, err = ExprToCuraJson(agg.Args[0], jsonPlan)
 				if err != nil {
