@@ -1050,10 +1050,10 @@ func joinEqualConditionsToCuraJson(leftKeys []*expression.Column, rightKeys []*e
 }
 
 func (p *PhysicalHashJoin) ToCuraJson(jsonPlan []byte) ([]byte, error) {
-	if len(p.LeftConditions) > 0 || len(p.RightConditions) > 0 || len(p.OtherConditions) > 0 {
+	if p.JoinType != InnerJoin {
 		return nil, errors.New("Cura not supported join")
 	}
-	if p.JoinType != InnerJoin {
+	if len(p.LeftConditions) > 0 || len(p.RightConditions) > 0 {
 		return nil, errors.New("Cura not supported join")
 	}
 	jsonPlan = append(jsonPlan, []byte("{\"rel_op\": \"HashJoin\",\"type\": \"INNER\", \"condition\":")...)
@@ -1077,6 +1077,23 @@ func (p *PhysicalHashJoin) ToCuraJson(jsonPlan []byte) ([]byte, error) {
 		}
 	}
 	jsonPlan = append(jsonPlan, '}')
+	if p.JoinType == InnerJoin && len(p.OtherConditions) > 0 {
+		// convert join other conditions to filter(only inner join support this)
+		jsonPlan = append(jsonPlan, []byte(", {\"rel_op\": \"Filter\", \"condition\": ")...)
+		var err error = nil
+		if len(p.OtherConditions) == 1 {
+			jsonPlan, err = ExprToCuraJsonInternal(p.OtherConditions[0], jsonPlan, true)
+			if err != nil {
+				return nil, err
+			}
+		} else {
+			jsonPlan, _, err = selectionConditionsToJsonPlan(p.OtherConditions, 0, jsonPlan)
+			if err != nil {
+				return nil, err
+			}
+		}
+		jsonPlan = append(jsonPlan, '}')
+	}
 	if len(p.schema.Columns) != len(p.children[0].Schema().Columns)+len(p.children[1].Schema().Columns) {
 		// need to add extra projection
 		jsonPlan = append(jsonPlan, []byte(", {\"rel_op\": \"Project\", \"exprs\": [")...)
