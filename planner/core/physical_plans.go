@@ -1585,11 +1585,11 @@ func (p *PhysicalHashAgg) ToCuraJson(jsonPlan []byte) ([]byte, error) {
 			//
 			jsonPlan = append(jsonPlan, []byte("{\"binary_op\": \"DIV\", \"operands\": [")...)
 			jsonPlan = append(jsonPlan, []byte("{\"col_ref\": ")...)
-			jsonPlan = append(jsonPlan, []byte(strconv.Itoa(curaOutputColumn))...)
+			jsonPlan = append(jsonPlan, []byte(strconv.Itoa(curaOutputColumn+1))...)
 			jsonPlan = append(jsonPlan, []byte("},")...)
 			curaOutputColumn++
 			jsonPlan = append(jsonPlan, []byte("{\"col_ref\": ")...)
-			jsonPlan = append(jsonPlan, []byte(strconv.Itoa(curaOutputColumn))...)
+			jsonPlan = append(jsonPlan, []byte(strconv.Itoa(curaOutputColumn-1))...)
 			jsonPlan = append(jsonPlan, []byte("}], \"type\": ")...)
 			jsonPlan, err = TypeToCuraJson(p.AggFuncs[i].RetTp, jsonPlan)
 			if err != nil {
