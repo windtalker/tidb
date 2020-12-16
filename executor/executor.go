@@ -1633,8 +1633,13 @@ func toGoArray(schema *expression.Column, column *chunk.Column, length int) (arr
 	default:
 		return arrow.Field{}, nil, errors.New("Unsupported type")
 	}
-	data := array.NewData(dataType, length, buffers, make([]*array.Data, 0), -1, 0)
-	return arrow.Field{Name: schema.OrigName, Type: dataType, Nullable: schema.RetType.Flag&mysql.NotNullFlag != mysql.NotNullFlag}, array.MakeFromData(data), nil
+	isNullable := schema.RetType.Flag&mysql.NotNullFlag != mysql.NotNullFlag
+	nulls := -1
+	if isNullable {
+		nulls = 0
+	}
+	data := array.NewData(dataType, length, buffers, make([]*array.Data, 0), nulls, 0)
+	return arrow.Field{Name: schema.OrigName, Type: dataType, Nullable: isNullable}, array.MakeFromData(data), nil
 }
 
 func tidbChunkToArrowRecord(chk *chunk.Chunk, schema *expression.Schema) (array.Record, error) {
@@ -1719,7 +1724,7 @@ func (f *CuraRunner) run(ctx context.Context) {
 		close(f.curaExec.curaResultChan)
 		f.curaExec.wg.Done()
 	}()
-	logutil.Logger(ctx).Info("Cura executor running")
+	logutil.CuraLogger.Info("Cura executor running with json plan: \n" + f.curaExec.jsonPlan)
 	driver := cura.NewDriver()
 	err, explained := driver.Explain(f.curaExec.jsonPlan, true)
 	if err <= 0 {

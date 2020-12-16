@@ -3861,10 +3861,10 @@ func (b *executorBuilder) buildCuraExec(p plannercore.PhysicalPlan) Executor {
 	id := int64(1)
 	jsonPlan := make([]byte, 0, 5)
 	var err error = nil
-	jsonPlan = append(jsonPlan, []byte("{\"rels\": [")...)
+	jsonPlan = append(jsonPlan, []byte("{\"rels\": [\n")...)
 	for idx, plan := range curaPlan.plans {
 		if idx != 0 {
-			jsonPlan = append(jsonPlan, ',')
+			jsonPlan = append(jsonPlan, []byte(",\n")...)
 		}
 		if plan.SupportCura() {
 			// generate json
@@ -3895,7 +3895,7 @@ func (b *executorBuilder) buildCuraExec(p plannercore.PhysicalPlan) Executor {
 			id++
 		}
 	}
-	jsonPlan = append(jsonPlan, []byte("]}")...)
+	jsonPlan = append(jsonPlan, []byte("\n]}")...)
 	for idx := range p.Schema().Columns {
 		selectedColumns = append(selectedColumns, int64(idx))
 	}
