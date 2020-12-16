@@ -815,7 +815,7 @@ func TypeToCuraJson(t *types.FieldType, jsonPlan []byte) ([]byte, error) {
 	case mysql.TypeFloat, mysql.TypeDouble:
 		jsonPlan = append(jsonPlan, []byte("\"FLOAT64\"")...)
 	case mysql.TypeDate, mysql.TypeDatetime, mysql.TypeTimestamp:
-		jsonPlan = append(jsonPlan, []byte("\"UINT64\"")...)
+		jsonPlan = append(jsonPlan, []byte("\"INT64\"")...)
 	default:
 		return jsonPlan, errors.New("Type not supported by Cura")
 	}
@@ -860,6 +860,26 @@ func ExprToCuraJsonInternal(expr expression.Expression, jsonPlan []byte, forSele
 		if len(x.GetArgs()) == 1 {
 			return jsonPlan, errors.New("Cura not supported expr")
 		} else if len(x.GetArgs()) == 2 {
+			if x.FuncName.L == "extract" {
+				firstArg := x.GetArgs()[0]
+				if constColumn, ok := firstArg.(*expression.Constant); ok {
+					if constColumn.Value.GetString() == "YEAR" {
+						jsonPlan = append(jsonPlan, []byte("\"ti_unary_op\": \"EXTRACT_YEAR\"")...)
+						jsonPlan = append(jsonPlan, []byte(", \"operands\": [")...)
+						jsonPlan, err = ExprToCuraJson(x.GetArgs()[1], jsonPlan)
+						if err != nil {
+							return nil, err
+						}
+						jsonPlan = append(jsonPlan, []byte("], \"type\": ")...)
+						jsonPlan, err = TypeToCuraJson(x.RetType, jsonPlan)
+						if err != nil {
+							return nil, err
+						}
+						jsonPlan = append(jsonPlan, '}')
+						return jsonPlan, nil
+					}
+				}
+			}
 			jsonPlan = append(jsonPlan, []byte("\"binary_op\": ")...)
 			name := x.FuncName
 			switch strings.ToLower(name.L) {

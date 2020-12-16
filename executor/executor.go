@@ -1593,7 +1593,7 @@ func toGoArray(schema *expression.Column, column *chunk.Column, length int) (arr
 		buffers[1] = arrowmemory.NewBufferBytes(column.GetRawData())
 		buffers[1].Retain()
 	case mysql.TypeDatetime, mysql.TypeDate, mysql.TypeTimestamp:
-		dataType = arrow.PrimitiveTypes.Uint64
+		dataType = arrow.PrimitiveTypes.Int64
 		bufferSize := 2
 		buffers = make([]*arrowmemory.Buffer, bufferSize)
 		if column.GetNullBitMap() == nil {
