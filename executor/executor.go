@@ -1746,6 +1746,7 @@ func (f *CuraRunner) run(ctx context.Context) {
 		f.curaExec.meetError.Store(true)
 		return
 	}
+	concurrentInputSource := f.curaExec.ctx.GetSessionVars().CuraConcurrentInputSource
 	pipelineIndex := 0
 	for driver.HasNextPipeline() {
 		//inputRecords := make([][]*cura.InputRecord, 0)
@@ -1877,6 +1878,9 @@ func (f *CuraRunner) run(ctx context.Context) {
 						wg.Wait()
 					}
 				}(nextSourceId)
+				if !concurrentInputSource {
+					pipelineSourceWG.Wait()
+				}
 			}
 		} else {
 			for driver.PipelineHasNextSource() {
@@ -1979,9 +1983,14 @@ func (f *CuraRunner) run(ctx context.Context) {
 						logutil.CuraLogger.Infof("pipeline %v source %v push total elapsed %v", pipelineIndex, sourceId, elapsed)
 					}
 				}(nextSourceId)
+				if !concurrentInputSource {
+					pipelineSourceWG.Wait()
+				}
 			}
 		}
-		pipelineSourceWG.Wait()
+		if concurrentInputSource {
+			pipelineSourceWG.Wait()
+		}
 		err = driver.FinishPipeline()
 		elapsed := time.Since(startTime)
 		logutil.CuraLogger.Infof("pipeline %v running elapsed: %v", pipelineIndex, elapsed)

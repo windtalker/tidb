@@ -309,6 +309,8 @@ const (
 	// tidb_enable_cura_exec is used for cura exec.
 	TiDBEnableCuraExec = "tidb_enable_cura_exec"
 
+	TiDBCuraConcurrentInputSource = "tidb_cura_concurrent_input_source"
+
 	TiDBCuraStreamConcurrency = "tidb_cura_stream_concurrency"
 
 	TiDBCuraChunkSize = "tidb_cura_chunk_size"
@@ -561,7 +563,8 @@ const (
 	DefTiDBEnableTelemetry             = true
 	DefTiDBEnableParallelApply         = false
 	DefTiDBEnableCuraExec              = false
-	DefTiDBCuraStreamConcurrency       = 10
+	DefTiDBCuraConcurrentInputSource   = false
+	DefTiDBCuraStreamConcurrency       = 2
 	DefTiDBCuraChunkSize               = 4 * 1024 * 1024
 	DefTiDBCuraSupport                 = 127
 	DefTiDBEnableAmendPessimisticTxn   = true

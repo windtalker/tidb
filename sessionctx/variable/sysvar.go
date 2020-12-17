@@ -695,6 +695,7 @@ var defaultSysVars = []*SysVar{
 	{Scope: ScopeGlobal | ScopeSession, Name: TiDBWindowConcurrency, Value: strconv.Itoa(DefTiDBWindowConcurrency)},
 	{Scope: ScopeGlobal | ScopeSession, Name: TiDBEnableParallelApply, Value: BoolToIntStr(DefTiDBEnableParallelApply)},
 	{Scope: ScopeGlobal | ScopeSession, Name: TiDBEnableCuraExec, Value: BoolToIntStr(DefTiDBEnableCuraExec)},
+	{Scope: ScopeGlobal | ScopeSession, Name: TiDBCuraConcurrentInputSource, Value: BoolToIntStr(DefTiDBCuraConcurrentInputSource)},
 	{Scope: ScopeGlobal | ScopeSession, Name: TiDBCuraStreamConcurrency, Value: strconv.Itoa(DefTiDBCuraStreamConcurrency)},
 	{Scope: ScopeGlobal | ScopeSession, Name: TiDBCuraChunkSize, Value: strconv.Itoa(DefTiDBCuraChunkSize)},
 	{Scope: ScopeGlobal | ScopeSession, Name: TiDBCuraSupport, Value: strconv.Itoa(DefTiDBCuraSupport)},

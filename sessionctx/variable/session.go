@@ -706,6 +706,9 @@ type SessionVars struct {
 	// EnableCuraExec indicates that thether to use cura
 	EnableCuraExec bool
 
+	// CuraConcurrentInputSource indicates that thether to use cura
+	CuraConcurrentInputSource bool
+
 	// CuraStreamConcurrency indicates that thether to use cura
 	CuraStreamConcurrency uint64
 
@@ -847,6 +850,7 @@ func NewSessionVars() *SessionVars {
 		EnableClusteredIndex:        DefTiDBEnableClusteredIndex,
 		EnableParallelApply:         DefTiDBEnableParallelApply,
 		EnableCuraExec:              DefTiDBEnableCuraExec,
+		CuraConcurrentInputSource:   DefTiDBCuraConcurrentInputSource,
 		CuraStreamConcurrency:       DefTiDBCuraStreamConcurrency,
 		CuraChunkSize:               DefTiDBCuraChunkSize,
 		CuraSupport:                 DefTiDBCuraSupport,
@@ -1474,6 +1478,8 @@ func (s *SessionVars) SetSystemVar(name string, val string) error {
 		s.EnableParallelApply = TiDBOptOn(val)
 	case TiDBEnableCuraExec:
 		s.EnableCuraExec = TiDBOptOn(val)
+	case TiDBCuraConcurrentInputSource:
+		s.CuraConcurrentInputSource = TiDBOptOn(val)
 	case TiDBCuraStreamConcurrency:
 		result, err := strconv.ParseUint(val, 10, 64)
 		if err != nil {
