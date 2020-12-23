@@ -1746,9 +1746,22 @@ func (f *CuraRunner) run(ctx context.Context) {
 		f.curaExec.meetError.Store(true)
 		return
 	}
+
+	concurrency := int(f.curaExec.ctx.GetSessionVars().CuraStreamConcurrency)
+	driver.SetThreadsPerPipeline(uint64(concurrency))
+	if err != 0 {
+		fmt.Println("Set cura threads per pipeline failed")
+		f.curaExec.meetError.Store(true)
+		return
+	}
 	concurrentInputSource := f.curaExec.ctx.GetSessionVars().CuraConcurrentInputSource
 	pipelineIndex := 0
 	for driver.HasNextPipeline() {
+		if driver.PreparePipeline() != 0 {
+			fmt.Println("Prepare cura pipeline failed")
+			f.curaExec.meetError.Store(true)
+			return
+		}
 		//inputRecords := make([][]*cura.InputRecord, 0)
 		final := driver.IsPipelineFinal()
 		if f.curaExec.meetError.Load() == true {
@@ -1763,7 +1776,7 @@ func (f *CuraRunner) run(ctx context.Context) {
 				go func(sourceId int64) {
 					defer pipelineSourceWG.Done()
 					if driver.IsHeapSource(sourceId) {
-						var res, outRecord = driver.PipelineStream(sourceId, nil, 2*1024*1024)
+						var res, outRecord = driver.PipelineStream(-1, sourceId, nil, 2*1024*1024)
 						if res < 0 {
 							f.curaExec.meetError.Store(true)
 							logutil.CuraLogger.Error("1762 pipeline stream internal source error")
@@ -1781,7 +1794,7 @@ func (f *CuraRunner) run(ctx context.Context) {
 								res := &curaResult{chk: retChk, err: nil}
 								f.curaExec.curaResultChan <- res
 							}
-							res, outRecord = driver.PipelineStream(sourceId, nil, 2*1024*1024)
+							res, outRecord = driver.PipelineStream(-1, sourceId, nil, 2*1024*1024)
 							if res < 0 {
 								f.curaExec.meetError.Store(true)
 								logutil.CuraLogger.Error("1780 pipeline stream internal source error")
@@ -1848,7 +1861,7 @@ func (f *CuraRunner) run(ctx context.Context) {
 												logutil.CuraLogger.Error("1841 tidb chunk to arrow record error")
 												return
 											}
-											res, arrowOutput := driver.PipelineStream(sourceId, &input, 0)
+											res, arrowOutput := driver.PipelineStream(-1, sourceId, &input, 0)
 											pipelineStreamTime++
 											if res < 0 {
 												f.curaExec.meetError.Store(true)
@@ -1889,7 +1902,7 @@ func (f *CuraRunner) run(ctx context.Context) {
 				go func(sourceId int64) {
 					defer pipelineSourceWG.Done()
 					if driver.IsHeapSource(sourceId) {
-						res, _ := driver.PipelinePush(sourceId, nil)
+						res, _ := driver.PipelinePush(-1, sourceId, nil)
 						if res < 0 {
 							f.curaExec.meetError.Store(true)
 							logutil.CuraLogger.Error("1885 pipeline push internal source error")
@@ -1964,7 +1977,7 @@ func (f *CuraRunner) run(ctx context.Context) {
 												logutil.CuraLogger.Error("1954 pipeline push tidb chunk to arrow record error")
 												return
 											}
-											res, _ := driver.PipelinePush(sourceId, &input)
+											res, _ := driver.PipelinePush(-1, sourceId, &input)
 											elapsed1 := time.Since(startTime1)
 											logutil.CuraLogger.Infof("pipeline %v source %v push elapsed %v, rows %v, mem %v", pipelineIndex, sourceId, elapsed1, childResult.chk.NumRows(), childResult.chk.MemoryUsage())
 											//pipelinePushTime++

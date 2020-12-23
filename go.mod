@@ -52,7 +52,7 @@ require (
 	github.com/twmb/murmur3 v1.1.3
 	github.com/uber-go/atomic v1.3.2
 	github.com/uber/jaeger-client-go v2.22.1+incompatible
-	github.com/zanmato1984/cura/go/cura v0.0.0-20201113091606-93dd5bc3bd2f
+	github.com/zanmato1984/cura/go/cura v0.0.0-20201218095033-6447537d9b18
 	go.etcd.io/etcd v0.5.0-alpha.5.0.20191023171146-3cf2f69b5738
 	go.uber.org/atomic v1.7.0
 	go.uber.org/automaxprocs v1.2.0
