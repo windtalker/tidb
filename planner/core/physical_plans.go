@@ -1409,7 +1409,6 @@ func (p *PhysicalHashAgg) Clone() (PhysicalPlan, error) {
 func (p *PhysicalHashAgg) ToCuraJson(jsonPlan []byte) ([]byte, error) {
 	var err error = nil
 	hasConstantColumnInAggFunc := false
-	//hasNonColumnExprInAggFunc := false
 	for _, agg := range p.AggFuncs {
 		for _, expr := range agg.Args {
 			if _, isConst := expr.(*expression.Constant); isConst {
@@ -1463,9 +1462,13 @@ func (p *PhysicalHashAgg) ToCuraJson(jsonPlan []byte) ([]byte, error) {
 	if err != nil {
 		return jsonPlan, err
 	}
+	agg_func_idx := 0
 	jsonPlan = append(jsonPlan, []byte(", \"aggs\":[")...)
-	for idx, agg := range p.AggFuncs {
-		if idx != 0 {
+	for _, agg := range p.AggFuncs {
+		if strings.ToLower(agg.Name) == "firstrow" {
+			continue
+		}
+		if agg_func_idx != 0 {
 			jsonPlan = append(jsonPlan, ',')
 		}
 		curaFunName := ""
@@ -1501,23 +1504,25 @@ func (p *PhysicalHashAgg) ToCuraJson(jsonPlan []byte) ([]byte, error) {
 			}
 			jsonPlan = append(jsonPlan, []byte(",\"type\":")...)
 			jsonPlan, err = TypeToCuraJson(agg.RetTp, jsonPlan)
-		case "firstrow":
-			if len(agg.Args) > 1 {
-				return jsonPlan, errors.New("first row only support 1 arg")
-			}
-			if agg.HasDistinct {
-				return jsonPlan, errors.New("agg with distinct not supported")
-			}
-			jsonPlan = append(jsonPlan, []byte("\"NTH_ELEMENT\", \"operands\":")...)
-			jsonPlan = append(jsonPlan, '[')
-			jsonPlan, err = ExprToCuraJson(agg.Args[0], jsonPlan)
-			if err != nil {
-				return jsonPlan, err
-			}
-			jsonPlan = append(jsonPlan, ']')
-			jsonPlan = append(jsonPlan, []byte(",\"n\": 0")...)
-			jsonPlan = append(jsonPlan, []byte(",\"type\":")...)
-			jsonPlan, err = TypeToCuraJson(agg.RetTp, jsonPlan)
+			/*
+				case "firstrow":
+					if len(agg.Args) > 1 {
+						return jsonPlan, errors.New("first row only support 1 arg")
+					}
+					if agg.HasDistinct {
+						return jsonPlan, errors.New("agg with distinct not supported")
+					}
+					jsonPlan = append(jsonPlan, []byte("\"NTH_ELEMENT\", \"operands\":")...)
+					jsonPlan = append(jsonPlan, '[')
+					jsonPlan, err = ExprToCuraJson(agg.Args[0], jsonPlan)
+					if err != nil {
+						return jsonPlan, err
+					}
+					jsonPlan = append(jsonPlan, ']')
+					jsonPlan = append(jsonPlan, []byte(",\"n\": 0")...)
+					jsonPlan = append(jsonPlan, []byte(",\"type\":")...)
+					jsonPlan, err = TypeToCuraJson(agg.RetTp, jsonPlan)
+			*/
 		case "avg":
 			// avg is very special, if current agg is final agg, then need to rewrite is to sum and count
 			// otherwise, push avg to cura is ok
@@ -1590,12 +1595,13 @@ func (p *PhysicalHashAgg) ToCuraJson(jsonPlan []byte) ([]byte, error) {
 			return jsonPlan, errors.New("Cura not supported agg")
 		}
 		jsonPlan = append(jsonPlan, '}')
+		agg_func_idx++
 	}
 	jsonPlan = append(jsonPlan, []byte("]}, ")...)
 	// add extra project since the output schema for aggregation in cura and tidb is different
 	jsonPlan = append(jsonPlan, []byte("{\"rel_op\": \"Project\", \"exprs\": [")...)
-	aggFuncNum := len(p.AggFuncs)
 	gbyColNum := len(p.GroupByItems)
+	aggFuncNum := len(p.AggFuncs) - gbyColNum
 	curaOutputColumn := gbyColNum
 	for i := 0; i < aggFuncNum; i++ {
 		if i != 0 {
@@ -1623,6 +1629,14 @@ func (p *PhysicalHashAgg) ToCuraJson(jsonPlan []byte) ([]byte, error) {
 			jsonPlan = append(jsonPlan, '}')
 			curaOutputColumn++
 		}
+	}
+	for i := 0; i < gbyColNum; i++ {
+		if aggFuncNum != 0 || i != 0 {
+			jsonPlan = append(jsonPlan, ',')
+		}
+		jsonPlan = append(jsonPlan, []byte("{\"col_ref\": ")...)
+		jsonPlan = append(jsonPlan, []byte(strconv.Itoa(i))...)
+		jsonPlan = append(jsonPlan, '}')
 	}
 	jsonPlan = append(jsonPlan, []byte("]}")...)
 	return jsonPlan, err
