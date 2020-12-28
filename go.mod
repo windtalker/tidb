@@ -1,5 +1,7 @@
 module github.com/pingcap/tidb
 
+replace github.com/zanmato1984/cura/go/cura => /Users/xufei/dev/open_source/cura/go/cura
+
 require (
 	github.com/BurntSushi/toml v0.3.1
 	github.com/Jeffail/gabs/v2 v2.5.1

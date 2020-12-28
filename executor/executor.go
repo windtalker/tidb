@@ -1550,6 +1550,7 @@ type CuraExec struct {
 	selectedColumns []int64
 	outputRows      []int64
 
+	driver         *cura.Driver
 	curaResultChan chan *curaResult
 	prepared       bool
 	meetError      atomic.Value
@@ -1725,7 +1726,8 @@ func (f *CuraRunner) run(ctx context.Context) {
 		f.curaExec.wg.Done()
 	}()
 	logutil.CuraLogger.Info("Cura executor running with json plan: \n" + f.curaExec.jsonPlan)
-	driver := cura.NewDriver()
+	f.curaExec.driver = cura.CreateDriver()
+	driver := f.curaExec.driver
 	err, explained := driver.Explain(f.curaExec.jsonPlan, true)
 	if err <= 0 {
 		logutil.CuraLogger.Error("Explain cura failed")
@@ -2063,6 +2065,10 @@ func (e *CuraExec) Close() error {
 		for range e.curaResultChan {
 		}
 		e.wg.Wait()
+	}
+	if e.driver != nil {
+		cura.ReleaseDriver(e.driver)
+		e.driver = nil
 	}
 	return e.baseExecutor.Close()
 }
