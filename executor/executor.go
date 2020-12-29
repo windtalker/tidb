@@ -1832,6 +1832,7 @@ func (f *CuraRunner) run(ctx context.Context) {
 						}()
 						wg.Add(concurrency)
 						for i := 0; i < concurrency; i++ {
+							threadId := int64(i)
 							go func() {
 								pipelineStreamTime := 0
 								totalRows := 0
@@ -1863,7 +1864,7 @@ func (f *CuraRunner) run(ctx context.Context) {
 												logutil.CuraLogger.Error("1841 tidb chunk to arrow record error")
 												return
 											}
-											res, arrowOutput := driver.PipelineStream(-1, sourceId, &input, 0)
+											res, arrowOutput := driver.PipelineStream(threadId, sourceId, &input, 0)
 											pipelineStreamTime++
 											if res < 0 {
 												f.curaExec.meetError.Store(true)
@@ -1945,6 +1946,7 @@ func (f *CuraRunner) run(ctx context.Context) {
 						wg.Add(concurrency)
 
 						for i := 0; i < concurrency; i++ {
+							threadId := int64(i)
 							go func() {
 								//pipelinePushTime := 0
 								totalRows := 0
@@ -1979,7 +1981,7 @@ func (f *CuraRunner) run(ctx context.Context) {
 												logutil.CuraLogger.Error("1954 pipeline push tidb chunk to arrow record error")
 												return
 											}
-											res, _ := driver.PipelinePush(-1, sourceId, &input)
+											res, _ := driver.PipelinePush(threadId, sourceId, &input)
 											elapsed1 := time.Since(startTime1)
 											logutil.CuraLogger.Infof("pipeline %v source %v push elapsed %v, rows %v, mem %v", pipelineIndex, sourceId, elapsed1, childResult.chk.NumRows(), childResult.chk.MemoryUsage())
 											//pipelinePushTime++
