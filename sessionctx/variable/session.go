@@ -51,6 +51,7 @@ import (
 	"github.com/pingcap/tidb/util/stringutil"
 	"github.com/pingcap/tidb/util/timeutil"
 	"github.com/twmb/murmur3"
+	"github.com/zanmato1984/cura/go/cura"
 	atomic2 "go.uber.org/atomic"
 )
 
@@ -718,6 +719,13 @@ type SessionVars struct {
 	// CuraSupport indicates that thether to use cura
 	CuraSupport uint64
 
+	// CuraMemResType indicates that thether to use cura
+	CuraMemResType cura.MemoryResource
+
+	CuraPoolSize uint64
+
+	CuraPoolSizePerThread uint64
+
 	// ShardAllocateStep indicates the max size of continuous rowid shard in one transaction.
 	ShardAllocateStep int64
 
@@ -854,6 +862,9 @@ func NewSessionVars() *SessionVars {
 		CuraStreamConcurrency:       DefTiDBCuraStreamConcurrency,
 		CuraChunkSize:               DefTiDBCuraChunkSize,
 		CuraSupport:                 DefTiDBCuraSupport,
+		CuraMemResType:              DefTiDBCuraMemResType,
+		CuraPoolSize:                DefTiDBCuraPoolSize,
+		CuraPoolSizePerThread:       DefTiDBCuraPoolSizePerThread,
 		ShardAllocateStep:           DefTiDBShardAllocateStep,
 		EnableChangeColumnType:      DefTiDBChangeColumnType,
 		EnableAmendPessimisticTxn:   DefTiDBEnableAmendPessimisticTxn,
@@ -1498,6 +1509,31 @@ func (s *SessionVars) SetSystemVar(name string, val string) error {
 			return errors.Trace(err)
 		}
 		s.CuraSupport = result
+	case TiDBCuraPoolSize:
+		result, err := strconv.ParseUint(val, 10, 64)
+		if err != nil {
+			return errors.Trace(err)
+		}
+		s.CuraPoolSize = result
+	case TiDBCuraPoolSizePerThread:
+		result, err := strconv.ParseUint(val, 10, 64)
+		if err != nil {
+			return errors.Trace(err)
+		}
+		s.CuraPoolSizePerThread = result
+	case TiDBCuraMemoryResourceType:
+		switch strings.ToLower(val) {
+		case "pool", strconv.Itoa(int(cura.Pool)):
+			s.CuraMemResType = cura.Pool
+		case "managed", strconv.Itoa(int(cura.Managed)):
+			s.CuraMemResType = cura.Managed
+		case "cuda", strconv.Itoa(int(cura.Cuda)):
+			s.CuraMemResType = cura.Cuda
+		case "poolperthread", strconv.Itoa(int(cura.PoolPerThread)):
+			s.CuraMemResType = cura.PoolPerThread
+		default:
+			return errors.Trace(errors.New("only pool/managed/cuda/poolperthread can be set to tidb_cura_mem_res_type"))
+		}
 	case TiDBSlowLogMasking, TiDBRedactLog:
 		config.SetRedactLog(TiDBOptOn(val))
 	case TiDBShardAllocateStep:

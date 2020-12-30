@@ -1727,6 +1727,12 @@ func (f *CuraRunner) run(ctx context.Context) {
 	}()
 	logutil.CuraLogger.Info("Cura executor running with json plan: \n" + f.curaExec.jsonPlan)
 	f.curaExec.driver = cura.CreateDriver()
+	f.curaExec.driver.SetMemoryResource(f.curaExec.ctx.GetSessionVars().CuraMemResType)
+	if f.curaExec.ctx.GetSessionVars().CuraMemResType == cura.Pool {
+		f.curaExec.driver.SetPoolSize(f.curaExec.ctx.GetSessionVars().CuraPoolSize)
+	} else if f.curaExec.ctx.GetSessionVars().CuraMemResType == cura.PoolPerThread {
+		f.curaExec.driver.SetPoolSizePerThread(f.curaExec.ctx.GetSessionVars().CuraPoolSizePerThread)
+	}
 	driver := f.curaExec.driver
 	err, explained := driver.Explain(f.curaExec.jsonPlan, true)
 	if err <= 0 {

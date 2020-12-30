@@ -19,6 +19,7 @@ import (
 
 	"github.com/pingcap/parser/mysql"
 	"github.com/uber-go/atomic"
+	"github.com/zanmato1984/cura/go/cura"
 )
 
 /*
@@ -317,6 +318,12 @@ const (
 
 	TiDBCuraSupport = "tidb_cura_support"
 
+	TiDBCuraMemoryResourceType = "tidb_cura_mem_res_type"
+
+	TiDBCuraPoolSize = "tidb_cura_pool_size"
+
+	TiDBCuraPoolSizePerThread = "tidb_cura_pool_size_per_thread"
+
 	// tidb_backoff_lock_fast is used for tikv backoff base time in milliseconds.
 	TiDBBackoffLockFast = "tidb_backoff_lock_fast"
 
@@ -567,6 +574,9 @@ const (
 	DefTiDBCuraStreamConcurrency       = 2
 	DefTiDBCuraChunkSize               = 4 * 1024 * 1024
 	DefTiDBCuraSupport                 = 127
+	DefTiDBCuraMemResType              = cura.Pool
+	DefTiDBCuraPoolSize                = 3 * 1024 * 1024 * 1024
+	DefTiDBCuraPoolSizePerThread       = 512 * 1024 * 1024
 	DefTiDBEnableAmendPessimisticTxn   = true
 )
 

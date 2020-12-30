@@ -32,6 +32,7 @@ import (
 	"github.com/pingcap/tidb/types"
 	"github.com/pingcap/tidb/util/collate"
 	"github.com/pingcap/tidb/util/timeutil"
+	"github.com/zanmato1984/cura/go/cura"
 )
 
 // secondsPerYear represents seconds in a normal year. Leap year is not considered here.
@@ -747,7 +748,7 @@ func ValidateSetSystemVar(vars *SessionVars, name string, value string, scope Sc
 			return value, errors.Errorf("%v(%d) cannot be smaller than %v or larger than %v", name, v, 1, 60*60)
 		}
 		return value, nil
-	case TiDBCuraChunkSize, TiDBCuraSupport:
+	case TiDBCuraChunkSize, TiDBCuraSupport, TiDBCuraPoolSize, TiDBCuraPoolSizePerThread:
 		v, err := strconv.ParseUint(value, 10, 64)
 		if err != nil {
 			return value, ErrWrongValueForVar.GenWithStackByArgs(name, value)
@@ -756,6 +757,19 @@ func ValidateSetSystemVar(vars *SessionVars, name string, value string, scope Sc
 			return value, errors.Errorf("%v(%d) cannot be smaller than %v or larger than %v", name, v, 0, math.MaxInt32)
 		}
 		return value, nil
+	case TiDBCuraMemoryResourceType:
+		switch strings.ToLower(value) {
+		case "pool", strconv.Itoa(int(cura.Pool)):
+			return "pool", nil
+		case "managed", strconv.Itoa(int(cura.Managed)):
+			return "managed", nil
+		case "cuda", strconv.Itoa(int(cura.Cuda)):
+			return "cuda", nil
+		case "poolperthread", strconv.Itoa(int(cura.PoolPerThread)):
+			return "poolperthread", nil
+		default:
+			return "", errors.New("only pool/managed/cuda/poolperthread can be set to tidb_cura_mem_res_type")
+		}
 	case TiDBCapturePlanBaseline:
 		switch {
 		case strings.EqualFold(value, "ON") || value == "1":
