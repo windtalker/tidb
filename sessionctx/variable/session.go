@@ -722,9 +722,11 @@ type SessionVars struct {
 	// CuraMemResType indicates that thether to use cura
 	CuraMemResType cura.MemoryResource
 
-	CuraPoolSize uint64
+	CuraMemResSize uint64
 
-	CuraPoolSizePerThread uint64
+	CuraMemResSizePerThread uint64
+
+	CuraExclusiveDefaultMemRes bool
 
 	// ShardAllocateStep indicates the max size of continuous rowid shard in one transaction.
 	ShardAllocateStep int64
@@ -863,8 +865,9 @@ func NewSessionVars() *SessionVars {
 		CuraChunkSize:               DefTiDBCuraChunkSize,
 		CuraSupport:                 DefTiDBCuraSupport,
 		CuraMemResType:              DefTiDBCuraMemResType,
-		CuraPoolSize:                DefTiDBCuraPoolSize,
-		CuraPoolSizePerThread:       DefTiDBCuraPoolSizePerThread,
+		CuraMemResSize:              DefTiDBCuraMemResSize,
+		CuraMemResSizePerThread:     DefTiDBCuraMemResSizePerThread,
+		CuraExclusiveDefaultMemRes:  DefTiDBCuraExclusiveDefaultMemRes,
 		ShardAllocateStep:           DefTiDBShardAllocateStep,
 		EnableChangeColumnType:      DefTiDBChangeColumnType,
 		EnableAmendPessimisticTxn:   DefTiDBEnableAmendPessimisticTxn,
@@ -1491,6 +1494,8 @@ func (s *SessionVars) SetSystemVar(name string, val string) error {
 		s.EnableCuraExec = TiDBOptOn(val)
 	case TiDBCuraConcurrentInputSource:
 		s.CuraConcurrentInputSource = TiDBOptOn(val)
+	case TiDBCuraExclusiveDefaultMemoryResource:
+		s.CuraExclusiveDefaultMemRes = TiDBOptOn(val)
 	case TiDBCuraStreamConcurrency:
 		result, err := strconv.ParseUint(val, 10, 64)
 		if err != nil {
@@ -1509,18 +1514,18 @@ func (s *SessionVars) SetSystemVar(name string, val string) error {
 			return errors.Trace(err)
 		}
 		s.CuraSupport = result
-	case TiDBCuraPoolSize:
+	case TiDBCuraMemResSize:
 		result, err := strconv.ParseUint(val, 10, 64)
 		if err != nil {
 			return errors.Trace(err)
 		}
-		s.CuraPoolSize = result
-	case TiDBCuraPoolSizePerThread:
+		s.CuraMemResSize = result
+	case TiDBCuraMemResSizePerThread:
 		result, err := strconv.ParseUint(val, 10, 64)
 		if err != nil {
 			return errors.Trace(err)
 		}
-		s.CuraPoolSizePerThread = result
+		s.CuraMemResSizePerThread = result
 	case TiDBCuraMemoryResourceType:
 		switch strings.ToLower(val) {
 		case "pool", strconv.Itoa(int(cura.Pool)):

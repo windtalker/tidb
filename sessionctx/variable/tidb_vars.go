@@ -320,9 +320,11 @@ const (
 
 	TiDBCuraMemoryResourceType = "tidb_cura_mem_res_type"
 
-	TiDBCuraPoolSize = "tidb_cura_pool_size"
+	TiDBCuraMemResSize = "tidb_cura_mem_res_size"
 
-	TiDBCuraPoolSizePerThread = "tidb_cura_pool_size_per_thread"
+	TiDBCuraMemResSizePerThread = "tidb_cura_mem_res_size_per_thread"
+
+	TiDBCuraExclusiveDefaultMemoryResource = "tidb_cura_exclusive_default_mem_res"
 
 	// tidb_backoff_lock_fast is used for tikv backoff base time in milliseconds.
 	TiDBBackoffLockFast = "tidb_backoff_lock_fast"
@@ -574,9 +576,10 @@ const (
 	DefTiDBCuraStreamConcurrency       = 2
 	DefTiDBCuraChunkSize               = 4 * 1024 * 1024
 	DefTiDBCuraSupport                 = 127
-	DefTiDBCuraMemResType              = cura.Pool
-	DefTiDBCuraPoolSize                = 3 * 1024 * 1024 * 1024
-	DefTiDBCuraPoolSizePerThread       = 512 * 1024 * 1024
+	DefTiDBCuraMemResType              = cura.Arena
+	DefTiDBCuraMemResSize              = 0
+	DefTiDBCuraMemResSizePerThread     = 0
+	DefTiDBCuraExclusiveDefaultMemRes  = false
 	DefTiDBEnableAmendPessimisticTxn   = true
 )
 

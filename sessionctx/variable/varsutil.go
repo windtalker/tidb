@@ -731,7 +731,7 @@ func ValidateSetSystemVar(vars *SessionVars, name string, value string, scope Sc
 			return value, ErrWrongTypeForVar.GenWithStackByArgs(name)
 		}
 	case TiDBAllowRemoveAutoInc, TiDBUsePlanBaselines, TiDBEvolvePlanBaselines, TiDBEnableParallelApply,
-		TiDBEnableCuraExec, TiDBCuraConcurrentInputSource:
+		TiDBEnableCuraExec, TiDBCuraConcurrentInputSource, TiDBCuraExclusiveDefaultMemoryResource:
 		switch {
 		case strings.EqualFold(value, "ON") || value == "1":
 			return "on", nil
@@ -748,7 +748,7 @@ func ValidateSetSystemVar(vars *SessionVars, name string, value string, scope Sc
 			return value, errors.Errorf("%v(%d) cannot be smaller than %v or larger than %v", name, v, 1, 60*60)
 		}
 		return value, nil
-	case TiDBCuraChunkSize, TiDBCuraSupport, TiDBCuraPoolSize, TiDBCuraPoolSizePerThread:
+	case TiDBCuraChunkSize, TiDBCuraSupport, TiDBCuraMemResSize, TiDBCuraMemResSizePerThread:
 		v, err := strconv.ParseUint(value, 10, 64)
 		if err != nil {
 			return value, ErrWrongValueForVar.GenWithStackByArgs(name, value)
