@@ -1528,16 +1528,20 @@ func (s *SessionVars) SetSystemVar(name string, val string) error {
 		s.CuraMemResSizePerThread = result
 	case TiDBCuraMemoryResourceType:
 		switch strings.ToLower(val) {
+		case "arena", strconv.Itoa(int(cura.Arena)):
+			s.CuraMemResType = cura.Arena
+		case "arenaperthread", strconv.Itoa(int(cura.ArenaPerThread)):
+			s.CuraMemResType = cura.ArenaPerThread
 		case "pool", strconv.Itoa(int(cura.Pool)):
 			s.CuraMemResType = cura.Pool
+		case "poolperthread", strconv.Itoa(int(cura.PoolPerThread)):
+			s.CuraMemResType = cura.PoolPerThread
 		case "managed", strconv.Itoa(int(cura.Managed)):
 			s.CuraMemResType = cura.Managed
 		case "cuda", strconv.Itoa(int(cura.Cuda)):
 			s.CuraMemResType = cura.Cuda
-		case "poolperthread", strconv.Itoa(int(cura.PoolPerThread)):
-			s.CuraMemResType = cura.PoolPerThread
 		default:
-			return errors.Trace(errors.New("only pool/managed/cuda/poolperthread can be set to tidb_cura_mem_res_type"))
+			return errors.Trace(errors.New("only arena/arenaperthread/pool/managed/cuda/poolperthread can be set to tidb_cura_mem_res_type"))
 		}
 	case TiDBSlowLogMasking, TiDBRedactLog:
 		config.SetRedactLog(TiDBOptOn(val))

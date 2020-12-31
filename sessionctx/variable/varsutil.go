@@ -748,7 +748,7 @@ func ValidateSetSystemVar(vars *SessionVars, name string, value string, scope Sc
 			return value, errors.Errorf("%v(%d) cannot be smaller than %v or larger than %v", name, v, 1, 60*60)
 		}
 		return value, nil
-	case TiDBCuraChunkSize, TiDBCuraSupport, TiDBCuraMemResSize, TiDBCuraMemResSizePerThread:
+	case TiDBCuraChunkSize, TiDBCuraSupport:
 		v, err := strconv.ParseUint(value, 10, 64)
 		if err != nil {
 			return value, ErrWrongValueForVar.GenWithStackByArgs(name, value)
@@ -757,18 +757,28 @@ func ValidateSetSystemVar(vars *SessionVars, name string, value string, scope Sc
 			return value, errors.Errorf("%v(%d) cannot be smaller than %v or larger than %v", name, v, 0, math.MaxInt32)
 		}
 		return value, nil
+	case TiDBCuraMemResSize, TiDBCuraMemResSizePerThread:
+		_, err := strconv.ParseUint(value, 10, 64)
+		if err != nil {
+			return value, ErrWrongValueForVar.GenWithStackByArgs(name, value)
+		}
+		return value, nil
 	case TiDBCuraMemoryResourceType:
 		switch strings.ToLower(value) {
+		case "arena", strconv.Itoa(int(cura.Arena)):
+			return "arena", nil
+		case "arenaperthread", strconv.Itoa(int(cura.ArenaPerThread)):
+			return "arenaperthread", nil
 		case "pool", strconv.Itoa(int(cura.Pool)):
 			return "pool", nil
+		case "poolperthread", strconv.Itoa(int(cura.PoolPerThread)):
+			return "poolperthread", nil
 		case "managed", strconv.Itoa(int(cura.Managed)):
 			return "managed", nil
 		case "cuda", strconv.Itoa(int(cura.Cuda)):
 			return "cuda", nil
-		case "poolperthread", strconv.Itoa(int(cura.PoolPerThread)):
-			return "poolperthread", nil
 		default:
-			return "", errors.New("only pool/managed/cuda/poolperthread can be set to tidb_cura_mem_res_type")
+			return "", errors.New("only arena/arenaperthread/pool/managed/cuda/poolperthread can be set to tidb_cura_mem_res_type")
 		}
 	case TiDBCapturePlanBaseline:
 		switch {
