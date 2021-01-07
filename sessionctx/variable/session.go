@@ -728,6 +728,10 @@ type SessionVars struct {
 
 	CuraExclusiveDefaultMemRes bool
 
+	CuraEnableBucketAgg bool
+
+	CuraBucketAggBuckets uint64
+
 	// ShardAllocateStep indicates the max size of continuous rowid shard in one transaction.
 	ShardAllocateStep int64
 
@@ -868,6 +872,8 @@ func NewSessionVars() *SessionVars {
 		CuraMemResSize:              DefTiDBCuraMemResSize,
 		CuraMemResSizePerThread:     DefTiDBCuraMemResSizePerThread,
 		CuraExclusiveDefaultMemRes:  DefTiDBCuraExclusiveDefaultMemRes,
+		CuraEnableBucketAgg:         DefTiDBCuraEnableBucketAgg,
+		CuraBucketAggBuckets:        DefTiDBCuraBucketAggBuckets,
 		ShardAllocateStep:           DefTiDBShardAllocateStep,
 		EnableChangeColumnType:      DefTiDBChangeColumnType,
 		EnableAmendPessimisticTxn:   DefTiDBEnableAmendPessimisticTxn,
@@ -1526,6 +1532,12 @@ func (s *SessionVars) SetSystemVar(name string, val string) error {
 			return errors.Trace(err)
 		}
 		s.CuraMemResSizePerThread = result
+	case TiDBCuraBucketAggBuckets:
+		result, err := strconv.ParseUint(val, 10, 64)
+		if err != nil {
+			return errors.Trace(err)
+		}
+		s.CuraBucketAggBuckets = result
 	case TiDBCuraMemoryResourceType:
 		switch strings.ToLower(val) {
 		case "arena", strconv.Itoa(int(cura.Arena)):
@@ -1545,6 +1557,8 @@ func (s *SessionVars) SetSystemVar(name string, val string) error {
 		}
 	case TiDBSlowLogMasking, TiDBRedactLog:
 		config.SetRedactLog(TiDBOptOn(val))
+	case TiDBCuraEnableBucketAgg:
+		s.CuraEnableBucketAgg = TiDBOptOn(val)
 	case TiDBShardAllocateStep:
 		s.ShardAllocateStep = tidbOptInt64(val, DefTiDBShardAllocateStep)
 	case TiDBEnableChangeColumnType:

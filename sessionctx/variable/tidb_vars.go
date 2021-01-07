@@ -326,6 +326,10 @@ const (
 
 	TiDBCuraExclusiveDefaultMemoryResource = "tidb_cura_exclusive_default_mem_res"
 
+	TiDBCuraEnableBucketAgg = "tidb_cura_enable_bucket_agg"
+
+	TiDBCuraBucketAggBuckets = "tidb_cura_bucket_agg_buckets"
+
 	// tidb_backoff_lock_fast is used for tikv backoff base time in milliseconds.
 	TiDBBackoffLockFast = "tidb_backoff_lock_fast"
 
@@ -580,6 +584,8 @@ const (
 	DefTiDBCuraMemResSize              = 0
 	DefTiDBCuraMemResSizePerThread     = 0
 	DefTiDBCuraExclusiveDefaultMemRes  = false
+	DefTiDBCuraEnableBucketAgg         = false
+	DefTiDBCuraBucketAggBuckets        = 0
 	DefTiDBEnableAmendPessimisticTxn   = true
 )
 

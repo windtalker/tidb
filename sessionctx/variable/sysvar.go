@@ -703,6 +703,8 @@ var defaultSysVars = []*SysVar{
 	{Scope: ScopeGlobal | ScopeSession, Name: TiDBCuraMemResSize, Value: strconv.FormatInt(DefTiDBCuraMemResSize, 10)},
 	{Scope: ScopeGlobal | ScopeSession, Name: TiDBCuraMemResSizePerThread, Value: strconv.FormatInt(DefTiDBCuraMemResSize, 10)},
 	{Scope: ScopeGlobal | ScopeSession, Name: TiDBCuraExclusiveDefaultMemoryResource, Value: BoolToIntStr(DefTiDBCuraExclusiveDefaultMemRes)},
+	{Scope: ScopeGlobal | ScopeSession, Name: TiDBCuraEnableBucketAgg, Value: BoolToIntStr(DefTiDBCuraEnableBucketAgg)},
+	{Scope: ScopeGlobal | ScopeSession, Name: TiDBCuraBucketAggBuckets, Value: strconv.Itoa(DefTiDBCuraBucketAggBuckets)},
 	{Scope: ScopeGlobal | ScopeSession, Name: TiDBBackoffLockFast, Value: strconv.Itoa(kv.DefBackoffLockFast)},
 	{Scope: ScopeGlobal | ScopeSession, Name: TiDBBackOffWeight, Value: strconv.Itoa(kv.DefBackOffWeight)},
 	{Scope: ScopeGlobal | ScopeSession, Name: TiDBRetryLimit, Value: strconv.Itoa(DefTiDBRetryLimit)},

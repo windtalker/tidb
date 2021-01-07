@@ -1462,10 +1462,32 @@ func (p *PhysicalHashAgg) ToCuraJson(jsonPlan []byte) ([]byte, error) {
 	if err != nil {
 		return jsonPlan, err
 	}
+	skipFirstRowAgg := true
+	aggFuncNum := len(p.AggFuncs) - len(p.GroupByItems)
+	for i := 0; i < len(p.GroupByItems); i++ {
+		origAggFunc := p.AggFuncs[i+aggFuncNum]
+		if strings.ToLower(origAggFunc.Name) != "firstrow" {
+			skipFirstRowAgg = false
+			break
+		}
+		foundGbCol := false
+		if col, ok := origAggFunc.Args[0].(*expression.Column); ok {
+			for _, gbExpr := range p.GroupByItems {
+				if gbCol, gbOk := gbExpr.(*expression.Column); gbOk {
+					if gbCol.Index == col.Index {
+						foundGbCol = true
+					}
+				}
+			}
+		}
+		if !foundGbCol {
+			skipFirstRowAgg = false
+		}
+	}
 	agg_func_idx := 0
 	jsonPlan = append(jsonPlan, []byte(", \"aggs\":[")...)
 	for _, agg := range p.AggFuncs {
-		if strings.ToLower(agg.Name) == "firstrow" {
+		if skipFirstRowAgg && strings.ToLower(agg.Name) == "firstrow" {
 			continue
 		}
 		if agg_func_idx != 0 {
@@ -1504,25 +1526,23 @@ func (p *PhysicalHashAgg) ToCuraJson(jsonPlan []byte) ([]byte, error) {
 			}
 			jsonPlan = append(jsonPlan, []byte(",\"type\":")...)
 			jsonPlan, err = TypeToCuraJson(agg.RetTp, jsonPlan)
-			/*
-				case "firstrow":
-					if len(agg.Args) > 1 {
-						return jsonPlan, errors.New("first row only support 1 arg")
-					}
-					if agg.HasDistinct {
-						return jsonPlan, errors.New("agg with distinct not supported")
-					}
-					jsonPlan = append(jsonPlan, []byte("\"NTH_ELEMENT\", \"operands\":")...)
-					jsonPlan = append(jsonPlan, '[')
-					jsonPlan, err = ExprToCuraJson(agg.Args[0], jsonPlan)
-					if err != nil {
-						return jsonPlan, err
-					}
-					jsonPlan = append(jsonPlan, ']')
-					jsonPlan = append(jsonPlan, []byte(",\"n\": 0")...)
-					jsonPlan = append(jsonPlan, []byte(",\"type\":")...)
-					jsonPlan, err = TypeToCuraJson(agg.RetTp, jsonPlan)
-			*/
+		case "firstrow":
+			if len(agg.Args) > 1 {
+				return jsonPlan, errors.New("first row only support 1 arg")
+			}
+			if agg.HasDistinct {
+				return jsonPlan, errors.New("agg with distinct not supported")
+			}
+			jsonPlan = append(jsonPlan, []byte("\"NTH_ELEMENT\", \"operands\":")...)
+			jsonPlan = append(jsonPlan, '[')
+			jsonPlan, err = ExprToCuraJson(agg.Args[0], jsonPlan)
+			if err != nil {
+				return jsonPlan, err
+			}
+			jsonPlan = append(jsonPlan, ']')
+			jsonPlan = append(jsonPlan, []byte(",\"n\": 0")...)
+			jsonPlan = append(jsonPlan, []byte(",\"type\":")...)
+			jsonPlan, err = TypeToCuraJson(agg.RetTp, jsonPlan)
 		case "avg":
 			// avg is very special, if current agg is final agg, then need to rewrite is to sum and count
 			// otherwise, push avg to cura is ok
@@ -1601,7 +1621,10 @@ func (p *PhysicalHashAgg) ToCuraJson(jsonPlan []byte) ([]byte, error) {
 	// add extra project since the output schema for aggregation in cura and tidb is different
 	jsonPlan = append(jsonPlan, []byte("{\"rel_op\": \"Project\", \"exprs\": [")...)
 	gbyColNum := len(p.GroupByItems)
-	aggFuncNum := len(p.AggFuncs) - gbyColNum
+	aggFuncNum = len(p.AggFuncs) - gbyColNum
+	if !skipFirstRowAgg {
+		aggFuncNum = len(p.AggFuncs)
+	}
 	curaOutputColumn := gbyColNum
 	for i := 0; i < aggFuncNum; i++ {
 		if i != 0 {
@@ -1630,29 +1653,31 @@ func (p *PhysicalHashAgg) ToCuraJson(jsonPlan []byte) ([]byte, error) {
 			curaOutputColumn++
 		}
 	}
-	for i := 0; i < gbyColNum; i++ {
-		if aggFuncNum != 0 || i != 0 {
-			jsonPlan = append(jsonPlan, ',')
-		}
-		origAggFunc := p.AggFuncs[i+aggFuncNum]
-		if strings.ToLower(origAggFunc.Name) != "firstrow" {
-			return nil, errors.New("not supported agg")
-		}
-		foundGbCol := false
-		if col, ok := origAggFunc.Args[0].(*expression.Column); ok {
-			for idx, gbExpr := range p.GroupByItems {
-				if gbCol, gbOk := gbExpr.(*expression.Column); gbOk {
-					if gbCol.Index == col.Index {
-						jsonPlan = append(jsonPlan, []byte("{\"col_ref\": ")...)
-						jsonPlan = append(jsonPlan, []byte(strconv.Itoa(idx))...)
-						jsonPlan = append(jsonPlan, '}')
-						foundGbCol = true
+	if skipFirstRowAgg {
+		for i := 0; i < gbyColNum; i++ {
+			if aggFuncNum != 0 || i != 0 {
+				jsonPlan = append(jsonPlan, ',')
+			}
+			origAggFunc := p.AggFuncs[i+aggFuncNum]
+			if strings.ToLower(origAggFunc.Name) != "firstrow" {
+				return nil, errors.New("not supported agg, should not reach here")
+			}
+			foundGbCol := false
+			if col, ok := origAggFunc.Args[0].(*expression.Column); ok {
+				for idx, gbExpr := range p.GroupByItems {
+					if gbCol, gbOk := gbExpr.(*expression.Column); gbOk {
+						if gbCol.Index == col.Index {
+							jsonPlan = append(jsonPlan, []byte("{\"col_ref\": ")...)
+							jsonPlan = append(jsonPlan, []byte(strconv.Itoa(idx))...)
+							jsonPlan = append(jsonPlan, '}')
+							foundGbCol = true
+						}
 					}
 				}
 			}
-		}
-		if !foundGbCol {
-			return nil, errors.New("not supported agg: can not found gb col for fristrow")
+			if !foundGbCol {
+				return nil, errors.New("not supported agg: can not found gb col for fristrow, should not reach here")
+			}
 		}
 	}
 	jsonPlan = append(jsonPlan, []byte("]}")...)
