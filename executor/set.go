@@ -187,9 +187,16 @@ func (e *SetExecutor) setSysVariable(name string, v *expression.VarAssignment) e
 			sessionVars.StmtCtx.AppendWarning(fmt.Errorf("Set operation for '%s' will not take effect", variable.TiDBFoundInPlanCache))
 			return nil
 		}
+		origLoadCopPath := sessionVars.LoadCopPath
 		err = variable.SetSessionSystemVar(sessionVars, name, value)
 		if err != nil {
 			return err
+		}
+		if origLoadCopPath != sessionVars.LoadCopPath && len(sessionVars.LoadCopPath) != 0 {
+			err = e.ctx.GetStore().LoadCopCache(sessionVars.LoadCopPath)
+			if err != nil {
+				return err
+			}
 		}
 		newSnapshotIsSet := sessionVars.SnapshotTS > 0 && sessionVars.SnapshotTS != oldSnapshotTS
 		if newSnapshotIsSet {

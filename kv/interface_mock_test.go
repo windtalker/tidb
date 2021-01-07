@@ -177,6 +177,10 @@ func (s *mockStorage) CurrentVersion() (Version, error) {
 	return NewVersion(1), nil
 }
 
+func (s *mockStorage) LoadCopCache(loadCopPath string) error {
+	return nil
+}
+
 func (s *mockStorage) GetClient() Client {
 	return nil
 }

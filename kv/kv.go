@@ -359,6 +359,7 @@ type Request struct {
 	KeyRanges     []KeyRange
 	ResultTypes   []*types.FieldType
 	CuraChunkSize uint64
+	DumpCopPath   string
 
 	// Concurrency is 1, if it only sends the request to a single storage unit when
 	// ResponseIterator.Next is called. If concurrency is greater than 1, the request will be
@@ -470,6 +471,8 @@ type Storage interface {
 	Describe() string
 	// ShowStatus returns the specified status of the storage
 	ShowStatus(ctx context.Context, key string) (interface{}, error)
+
+	LoadCopCache(loadCopPath string) error
 }
 
 // FnKeyCmp is the function for iterator the keys

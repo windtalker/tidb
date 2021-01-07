@@ -635,6 +635,8 @@ func ValidateSetSystemVar(vars *SessionVars, name string, value string, scope Sc
 			return "", err
 		}
 		return v, nil
+	case TiDBDumpCopPath, TiDBLoadCopPath:
+		return value, nil
 	case TiDBAutoAnalyzeRatio:
 		v, err := strconv.ParseFloat(value, 64)
 		if err != nil || v < 0 {

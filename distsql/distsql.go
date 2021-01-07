@@ -50,6 +50,7 @@ func Select(ctx context.Context, sctx sessionctx.Context, kvReq *kv.Request, fie
 		kvReq.ResultTypes = fieldTypes
 		kvReq.CuraChunkSize = sctx.GetSessionVars().CuraChunkSize
 	}
+	kvReq.DumpCopPath = sctx.GetSessionVars().DumpCopPath
 
 	resp := sctx.GetClient().Send(ctx, kvReq, sctx.GetSessionVars().KVVars, sctx.GetSessionVars().StmtCtx.MemTracker)
 	if resp == nil {

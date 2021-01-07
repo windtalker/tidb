@@ -16,8 +16,15 @@ package tikv
 import (
 	"bytes"
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
+	"io/ioutil"
 	"math"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"sync"
 	"time"
 	"unsafe"
 
@@ -25,20 +32,24 @@ import (
 	"github.com/pingcap/errors"
 	"github.com/pingcap/kvproto/pkg/coprocessor"
 	"github.com/pingcap/tidb/config"
+	"github.com/pingcap/tidb/util/logutil"
+	"go.uber.org/atomic"
 )
 
 type coprCache struct {
 	cache                   *ristretto.Cache
 	admissionMaxSize        int
 	admissionMinProcessTime time.Duration
+	fileIndex               *atomic.Int64
+	rw                      sync.RWMutex
 }
 
 type coprCacheValue struct {
-	Key               []byte
-	Data              []byte
-	TimeStamp         uint64
-	RegionID          uint64
-	RegionDataVersion uint64
+	Key               []byte `json:"key"`
+	Data              []byte `json:"data"`
+	TimeStamp         uint64 `json:"timestamp"`
+	RegionID          uint64 `json:"region_id"`
+	RegionDataVersion uint64 `json:"region_data_version"`
 }
 
 func (v *coprCacheValue) String() string {
@@ -83,6 +94,7 @@ func newCoprCache(config *config.CoprocessorCache) (*coprCache, error) {
 		cache:                   cache,
 		admissionMaxSize:        int(maxEntityInBytes),
 		admissionMinProcessTime: time.Duration(config.AdmissionMinProcessMs) * time.Millisecond,
+		fileIndex:               atomic.NewInt64(0),
 	}
 	return &c, nil
 }
@@ -146,6 +158,8 @@ func (c *coprCache) Get(key []byte) *coprCacheValue {
 	if c == nil {
 		return nil
 	}
+	c.rw.RLock()
+	defer c.rw.RUnlock()
 	value, hit := c.cache.Get(key)
 	if !hit {
 		return nil
@@ -172,13 +186,69 @@ func (c *coprCache) CheckAdmission(dataSize int, processTime time.Duration) bool
 	return true
 }
 
+func (c *coprCache) LoadFromFile(loadPath string) error {
+	if c == nil {
+		return nil
+	}
+	c.rw.Lock()
+	c.cache.Clear()
+	c.rw.Unlock()
+
+	stat, err := os.Stat(loadPath)
+	if err != nil {
+		return err
+	}
+	if !stat.IsDir() {
+		return errors.New(loadPath + " is not a dir")
+	}
+	rd, err := ioutil.ReadDir(loadPath)
+	if err != nil {
+		return err
+	}
+	for _, file := range rd {
+		if strings.HasPrefix(file.Name(), "file_") {
+			contents, err := ioutil.ReadFile(filepath.Join(loadPath, file.Name()))
+			if err != nil {
+				logutil.BgLogger().Warn("failed to load cop cache from " + file.Name())
+				continue
+			}
+			cacheValue := &coprCacheValue{}
+			if json.Unmarshal(contents, cacheValue) != nil {
+				logutil.BgLogger().Warn("failed to load cop cache from " + file.Name())
+				continue
+			}
+			c.Set(cacheValue.Key, cacheValue, "")
+		}
+	}
+	return nil
+}
+
 // Set inserts an item to the cache.
 // It is recommended to call `CheckAdmission` before inserting the item to the cache.
-func (c *coprCache) Set(key []byte, value *coprCacheValue) bool {
+func (c *coprCache) Set(key []byte, value *coprCacheValue, diskName string) bool {
 	if c == nil {
 		return false
 	}
+	c.rw.RLock()
+	defer c.rw.RUnlock()
 	// Always ensure that the `Key` in `value` is the `key` we received.
 	value.Key = key
+	if len(diskName) > 0 {
+		j, err := json.Marshal(value)
+		if err == nil {
+			fileName := ""
+			for {
+				fileName = diskName + "/file_" + strconv.Itoa(int(c.fileIndex.Add(1)))
+				if _, err := os.Stat(fileName); os.IsNotExist(err) {
+					// find first file that not exits
+					break
+				}
+			}
+			e := ioutil.WriteFile(fileName, j, 0644)
+			if e != nil {
+				logutil.BgLogger().Warn("failed to save cop cache to file")
+			}
+		}
+	}
 	return c.cache.Set(key, value, int64(value.Len()))
 }

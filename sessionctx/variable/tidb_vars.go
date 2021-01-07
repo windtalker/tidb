@@ -330,6 +330,10 @@ const (
 
 	TiDBCuraBucketAggBuckets = "tidb_cura_bucket_agg_buckets"
 
+	TiDBDumpCopPath = "tidb_dump_cop_path"
+
+	TiDBLoadCopPath = "tidb_load_cop_path"
+
 	// tidb_backoff_lock_fast is used for tikv backoff base time in milliseconds.
 	TiDBBackoffLockFast = "tidb_backoff_lock_fast"
 
@@ -586,6 +590,8 @@ const (
 	DefTiDBCuraExclusiveDefaultMemRes  = false
 	DefTiDBCuraEnableBucketAgg         = false
 	DefTiDBCuraBucketAggBuckets        = 0
+	DefTiDBDumpCopPath                 = ""
+	DefTiDBLoadCopPath                 = ""
 	DefTiDBEnableAmendPessimisticTxn   = true
 )
 

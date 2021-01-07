@@ -124,6 +124,7 @@ type copTask struct {
 	storeType     kv.StoreType
 	resultTypes   []*types.FieldType
 	curaChunkSize uint64
+	dumpCachePath string
 }
 
 func (r *copTask) String() string {
@@ -273,6 +274,7 @@ func buildCopTasks(bo *Backoffer, cache *RegionCache, ranges *copRanges, req *kv
 				storeType:     req.StoreType,
 				resultTypes:   req.ResultTypes,
 				curaChunkSize: req.CuraChunkSize,
+				dumpCachePath: req.DumpCopPath,
 			})
 			i = nextI
 		}
@@ -1182,7 +1184,7 @@ func (worker *copIteratorWorker) handleCopResponse(bo *Backoffer, rpcCtx *RPCCon
 								RegionID:          task.region.id,
 								RegionDataVersion: resp.pbResp.CacheLastVersion,
 							}
-							worker.store.coprCache.Set(cacheKey, &newCacheValue)
+							worker.store.coprCache.Set(cacheKey, &newCacheValue, task.dumpCachePath)
 						}
 
 					}
@@ -1196,7 +1198,7 @@ func (worker *copIteratorWorker) handleCopResponse(bo *Backoffer, rpcCtx *RPCCon
 						RegionID:          task.region.id,
 						RegionDataVersion: resp.pbResp.CacheLastVersion,
 					}
-					worker.store.coprCache.Set(cacheKey, &newCacheValue)
+					worker.store.coprCache.Set(cacheKey, &newCacheValue, task.dumpCachePath)
 				}
 			}
 		}

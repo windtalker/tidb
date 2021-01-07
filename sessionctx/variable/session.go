@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"math"
 	"math/rand"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -732,6 +733,10 @@ type SessionVars struct {
 
 	CuraBucketAggBuckets uint64
 
+	DumpCopPath string
+
+	LoadCopPath string
+
 	// ShardAllocateStep indicates the max size of continuous rowid shard in one transaction.
 	ShardAllocateStep int64
 
@@ -874,6 +879,8 @@ func NewSessionVars() *SessionVars {
 		CuraExclusiveDefaultMemRes:  DefTiDBCuraExclusiveDefaultMemRes,
 		CuraEnableBucketAgg:         DefTiDBCuraEnableBucketAgg,
 		CuraBucketAggBuckets:        DefTiDBCuraBucketAggBuckets,
+		DumpCopPath:                 DefTiDBDumpCopPath,
+		LoadCopPath:                 DefTiDBLoadCopPath,
 		ShardAllocateStep:           DefTiDBShardAllocateStep,
 		EnableChangeColumnType:      DefTiDBChangeColumnType,
 		EnableAmendPessimisticTxn:   DefTiDBEnableAmendPessimisticTxn,
@@ -1494,6 +1501,22 @@ func (s *SessionVars) SetSystemVar(name string, val string) error {
 		s.EnableClusteredIndex = TiDBOptOn(val)
 	case TiDBPartitionPruneMode:
 		s.PartitionPruneMode.Store(strings.ToLower(strings.TrimSpace(val)))
+	case TiDBDumpCopPath:
+		s.DumpCopPath = strings.TrimSpace(val)
+		if s.DumpCopPath != "" {
+			stat, err := os.Stat(s.DumpCopPath)
+			if os.IsNotExist(err) {
+				// path/to/whatever does not exist
+				os.MkdirAll(s.DumpCopPath, 0777)
+			} else {
+				if !stat.IsDir() {
+					s.DumpCopPath = ""
+					return errors.New(val + " is a file")
+				}
+			}
+		}
+	case TiDBLoadCopPath:
+		s.LoadCopPath = strings.TrimSpace(val)
 	case TiDBEnableParallelApply:
 		s.EnableParallelApply = TiDBOptOn(val)
 	case TiDBEnableCuraExec:
