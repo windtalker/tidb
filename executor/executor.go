@@ -1764,7 +1764,7 @@ func (f *CuraRunner) run(ctx context.Context) {
 	driver.SetThreadsPerPipeline(uint64(concurrency))
 	logutil.CuraLogger.Infof("cura threads per pipeline: %v", concurrency)
 	if err != 0 {
-		fmt.Println("Set cura threads per pipeline failed")
+		logutil.CuraLogger.Info("Set cura threads per pipeline failed")
 		f.curaExec.meetError.Store(true)
 		return
 	}
@@ -1772,7 +1772,7 @@ func (f *CuraRunner) run(ctx context.Context) {
 	pipelineIndex := 0
 	for driver.HasNextPipeline() {
 		if driver.PreparePipeline() != 0 {
-			fmt.Println("Prepare cura pipeline failed")
+			logutil.CuraLogger.Errorf("prepare pipeline %v failed", pipelineIndex)
 			f.curaExec.meetError.Store(true)
 			return
 		}
@@ -1793,7 +1793,7 @@ func (f *CuraRunner) run(ctx context.Context) {
 						var res, outRecord = driver.PipelineStream(-1, sourceId, nil, 2*1024*1024)
 						if res < 0 {
 							f.curaExec.meetError.Store(true)
-							logutil.CuraLogger.Error("1762 pipeline stream internal source error")
+							logutil.CuraLogger.Errorf("1762 pipelinestream meet error, pipeline %v, source %v", pipelineIndex, sourceId)
 							return
 						}
 						for res != 0 {
@@ -1801,7 +1801,7 @@ func (f *CuraRunner) run(ctx context.Context) {
 							retChk := chunk.New(f.curaExec.retFieldTypes, 0, int(outRecord.Record.NumRows()))
 							if arrowRecordToTiDBChunk(outRecord.Record, retChk, f.curaExec.selectedColumns) != nil {
 								f.curaExec.meetError.Store(true)
-								logutil.CuraLogger.Error("1770 pipeline stream internal source to tidb chunk error")
+								logutil.CuraLogger.Errorf("1770 pipelinestream to tidb chunk meet error, pipeline %v, source %v", pipelineIndex, sourceId)
 								return
 							} else {
 								// send out record to tidb
@@ -1811,7 +1811,7 @@ func (f *CuraRunner) run(ctx context.Context) {
 							res, outRecord = driver.PipelineStream(-1, sourceId, nil, 2*1024*1024)
 							if res < 0 {
 								f.curaExec.meetError.Store(true)
-								logutil.CuraLogger.Error("1780 pipeline stream internal source error")
+								logutil.CuraLogger.Errorf("1780 pipelinestream meet error, pipeline %v, source %v", pipelineIndex, sourceId)
 								return
 							}
 						}
@@ -1864,7 +1864,7 @@ func (f *CuraRunner) run(ctx context.Context) {
 										}
 										if childResult.err != nil {
 											f.curaExec.meetError.Store(true)
-											logutil.CuraLogger.Error("1832 get child chunk error")
+											logutil.CuraLogger.Errorf("1832 get child chunk error, pipelie %v, source %v", pipelineIndex, sourceId)
 											return
 										}
 										if childResult.chk.NumRows() > 0 {
@@ -1873,14 +1873,14 @@ func (f *CuraRunner) run(ctx context.Context) {
 											input, err := tidbChunkToArrowRecord(childResult.chk, child.Schema())
 											if err != nil {
 												f.curaExec.meetError.Store(true)
-												logutil.CuraLogger.Error("1841 tidb chunk to arrow record error")
+												logutil.CuraLogger.Errorf("1841 tidb chunk to arrow record error, pipeline %v, source %v", pipelineIndex, sourceId)
 												return
 											}
 											res, arrowOutput := driver.PipelineStream(threadId, sourceId, &input, 0)
 											pipelineStreamTime++
 											if res < 0 {
 												f.curaExec.meetError.Store(true)
-												logutil.CuraLogger.Error("1848 pipelinestream error")
+												logutil.CuraLogger.Errorf("1848 pipelinestream error, pipelie %v, source %v", pipelineIndex, sourceId)
 												return
 											}
 
@@ -1891,7 +1891,7 @@ func (f *CuraRunner) run(ctx context.Context) {
 											retChk := chunk.New(f.curaExec.retFieldTypes, 0, int(arrowOutput.Record.NumRows()))
 											if arrowRecordToTiDBChunk(arrowOutput.Record, retChk, f.curaExec.selectedColumns) != nil {
 												f.curaExec.meetError.Store(true)
-												logutil.CuraLogger.Error("1859 pipelinestream to tidb chunk error")
+												logutil.CuraLogger.Errorf("1859 pipelinestream to tidb chunk error, pipeline %v, source %v", pipelineIndex, sourceId)
 												return
 											} else {
 												// send out record to tidb
@@ -1920,7 +1920,7 @@ func (f *CuraRunner) run(ctx context.Context) {
 						res, _ := driver.PipelinePush(-1, sourceId, nil)
 						if res < 0 {
 							f.curaExec.meetError.Store(true)
-							logutil.CuraLogger.Error("1885 pipeline push internal source error")
+							logutil.CuraLogger.Errorf("1885 pipeline push internal source error, pipeline %v, source %v", pipelineIndex, sourceId)
 							return
 						}
 					} else {
@@ -1980,7 +1980,7 @@ func (f *CuraRunner) run(ctx context.Context) {
 										}
 										if childResult.err != nil {
 											f.curaExec.meetError.Store(true)
-											logutil.CuraLogger.Error("1944 pipeline push get child chunk error")
+											logutil.CuraLogger.Errorf("1944 pipeline push get child chunk error, pipeline %v, source %v", pipelineIndex, sourceId)
 											return
 										}
 										if childResult.chk.NumRows() > 0 {
@@ -1990,7 +1990,7 @@ func (f *CuraRunner) run(ctx context.Context) {
 											input, err := tidbChunkToArrowRecord(childResult.chk, child.Schema())
 											if err != nil {
 												f.curaExec.meetError.Store(true)
-												logutil.CuraLogger.Error("1954 pipeline push tidb chunk to arrow record error")
+												logutil.CuraLogger.Errorf("1954 pipeline push tidb chunk to arrow record error, pipeline %v, source %v", pipelineIndex, sourceId)
 												return
 											}
 											res, _ := driver.PipelinePush(threadId, sourceId, &input)
@@ -1999,7 +1999,7 @@ func (f *CuraRunner) run(ctx context.Context) {
 											//pipelinePushTime++
 											if res < 0 {
 												f.curaExec.meetError.Store(true)
-												logutil.CuraLogger.Error("1963 pipeline push error")
+												logutil.CuraLogger.Errorf("1963 pipeline push error, pipeline %v, source %v", pipelineIndex, sourceId)
 												return
 											}
 										}
@@ -2025,7 +2025,7 @@ func (f *CuraRunner) run(ctx context.Context) {
 		logutil.CuraLogger.Infof("pipeline %v running elapsed: %v", pipelineIndex, elapsed)
 		if err != 0 {
 			f.curaExec.meetError.Store(true)
-			logutil.CuraLogger.Error("1984 finish pipeline error")
+			logutil.CuraLogger.Error("1984 finish pipeline error, pipeline %v", pipelineIndex)
 			return
 		}
 		pipelineIndex++
