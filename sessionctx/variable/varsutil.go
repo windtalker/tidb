@@ -760,7 +760,7 @@ func ValidateSetSystemVar(vars *SessionVars, name string, value string, scope Sc
 			return value, errors.Errorf("%v(%d) cannot be smaller than %v or larger than %v", name, v, 0, math.MaxInt32)
 		}
 		return value, nil
-	case TiDBCuraMemResSize, TiDBCuraMemResSizePerThread, TiDBCuraBucketAggBuckets:
+	case TiDBCuraMemResSize, TiDBCuraMemResSizePerThread, TiDBCuraBucketAggBuckets, TiDBLoadCopConcurrency:
 		_, err := strconv.ParseUint(value, 10, 64)
 		if err != nil {
 			return value, ErrWrongValueForVar.GenWithStackByArgs(name, value)

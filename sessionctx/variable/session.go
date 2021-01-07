@@ -737,6 +737,8 @@ type SessionVars struct {
 
 	LoadCopPath string
 
+	LoadCopConcurrency uint64
+
 	// ShardAllocateStep indicates the max size of continuous rowid shard in one transaction.
 	ShardAllocateStep int64
 
@@ -881,6 +883,7 @@ func NewSessionVars() *SessionVars {
 		CuraBucketAggBuckets:        DefTiDBCuraBucketAggBuckets,
 		DumpCopPath:                 DefTiDBDumpCopPath,
 		LoadCopPath:                 DefTiDBLoadCopPath,
+		LoadCopConcurrency:          DefTiDBLoadCopConcurrency,
 		ShardAllocateStep:           DefTiDBShardAllocateStep,
 		EnableChangeColumnType:      DefTiDBChangeColumnType,
 		EnableAmendPessimisticTxn:   DefTiDBEnableAmendPessimisticTxn,
@@ -1582,6 +1585,12 @@ func (s *SessionVars) SetSystemVar(name string, val string) error {
 		config.SetRedactLog(TiDBOptOn(val))
 	case TiDBCuraEnableBucketAgg:
 		s.CuraEnableBucketAgg = TiDBOptOn(val)
+	case TiDBLoadCopConcurrency:
+		result, err := strconv.ParseUint(val, 10, 64)
+		if err != nil {
+			return errors.Trace(err)
+		}
+		s.LoadCopConcurrency = result
 	case TiDBShardAllocateStep:
 		s.ShardAllocateStep = tidbOptInt64(val, DefTiDBShardAllocateStep)
 	case TiDBEnableChangeColumnType:

@@ -177,7 +177,7 @@ func (s *mockStorage) CurrentVersion() (Version, error) {
 	return NewVersion(1), nil
 }
 
-func (s *mockStorage) LoadCopCache(loadCopPath string) error {
+func (s *mockStorage) LoadCopCache(loadCopPath string, loadConcurrency uint64) error {
 	return nil
 }
 

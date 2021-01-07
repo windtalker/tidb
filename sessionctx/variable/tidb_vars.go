@@ -334,6 +334,8 @@ const (
 
 	TiDBLoadCopPath = "tidb_load_cop_path"
 
+	TiDBLoadCopConcurrency = "tidb_load_cop_concurrency"
+
 	// tidb_backoff_lock_fast is used for tikv backoff base time in milliseconds.
 	TiDBBackoffLockFast = "tidb_backoff_lock_fast"
 
@@ -592,6 +594,7 @@ const (
 	DefTiDBCuraBucketAggBuckets        = 0
 	DefTiDBDumpCopPath                 = ""
 	DefTiDBLoadCopPath                 = ""
+	DefTiDBLoadCopConcurrency          = 15
 	DefTiDBEnableAmendPessimisticTxn   = true
 )
 

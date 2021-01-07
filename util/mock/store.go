@@ -43,7 +43,7 @@ func (s *Store) GetSnapshot(ver kv.Version) (kv.Snapshot, error) { return nil, n
 // Close implements kv.Storage interface.
 func (s *Store) Close() error { return nil }
 
-func (s *Store) LoadCopCache(loadCopPath string) error { return nil }
+func (s *Store) LoadCopCache(loadCopPath string, loadConcurrency uint64) error { return nil }
 
 // UUID implements kv.Storage interface.
 func (s *Store) UUID() string { return "mock" }

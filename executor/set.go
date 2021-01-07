@@ -193,7 +193,7 @@ func (e *SetExecutor) setSysVariable(name string, v *expression.VarAssignment) e
 			return err
 		}
 		if origLoadCopPath != sessionVars.LoadCopPath && len(sessionVars.LoadCopPath) != 0 {
-			err = e.ctx.GetStore().LoadCopCache(sessionVars.LoadCopPath)
+			err = e.ctx.GetStore().LoadCopCache(sessionVars.LoadCopPath, sessionVars.LoadCopConcurrency)
 			if err != nil {
 				return err
 			}

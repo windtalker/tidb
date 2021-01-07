@@ -186,13 +186,28 @@ func (c *coprCache) CheckAdmission(dataSize int, processTime time.Duration) bool
 	return true
 }
 
-func (c *coprCache) LoadFromFile(loadPath string) error {
+func (c *coprCache) loadSingleFile(file string) {
+	contents, err := ioutil.ReadFile(file)
+	if err != nil {
+		logutil.BgLogger().Warn("failed to load cop cache from " + file)
+	}
+	cacheValue := &coprCacheValue{}
+	if json.Unmarshal(contents, cacheValue) != nil {
+		logutil.BgLogger().Warn("failed to load cop cache from " + file)
+	}
+	c.Set(cacheValue.Key, cacheValue, "")
+}
+
+func (c *coprCache) LoadFromFile(loadPath string, loadConcurrency uint64) error {
 	if c == nil {
 		return nil
 	}
 	c.rw.Lock()
 	c.cache.Clear()
 	c.rw.Unlock()
+	if loadConcurrency <= 0 || loadConcurrency >= 20 {
+		loadConcurrency = 15
+	}
 
 	stat, err := os.Stat(loadPath)
 	if err != nil {
@@ -205,21 +220,33 @@ func (c *coprCache) LoadFromFile(loadPath string) error {
 	if err != nil {
 		return err
 	}
-	for _, file := range rd {
-		if strings.HasPrefix(file.Name(), "file_") {
-			contents, err := ioutil.ReadFile(filepath.Join(loadPath, file.Name()))
-			if err != nil {
-				logutil.BgLogger().Warn("failed to load cop cache from " + file.Name())
-				continue
+	fileNum := len(rd)
+	filePerThread := fileNum / int(loadConcurrency)
+	remainingFile := fileNum % int(loadConcurrency)
+	var wg sync.WaitGroup
+	for index := 0; index < int(loadConcurrency); index++ {
+		wg.Add(1)
+		go func(indexValue int) {
+			defer wg.Done()
+			extraFile := false
+			if remainingFile > indexValue {
+				extraFile = true
 			}
-			cacheValue := &coprCacheValue{}
-			if json.Unmarshal(contents, cacheValue) != nil {
-				logutil.BgLogger().Warn("failed to load cop cache from " + file.Name())
-				continue
+			for i := filePerThread * indexValue; i < filePerThread*(indexValue+1); i++ {
+				file := rd[i]
+				if strings.HasPrefix(file.Name(), "file_") {
+					c.loadSingleFile(filepath.Join(loadPath, file.Name()))
+				}
 			}
-			c.Set(cacheValue.Key, cacheValue, "")
-		}
+			if extraFile {
+				file := rd[len(rd)-1-indexValue]
+				if strings.HasPrefix(file.Name(), "file_") {
+					c.loadSingleFile(filepath.Join(loadPath, file.Name()))
+				}
+			}
+		}(index)
 	}
+	wg.Wait()
 	return nil
 }
 

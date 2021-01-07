@@ -707,6 +707,7 @@ var defaultSysVars = []*SysVar{
 	{Scope: ScopeGlobal | ScopeSession, Name: TiDBCuraBucketAggBuckets, Value: strconv.Itoa(DefTiDBCuraBucketAggBuckets)},
 	{Scope: ScopeGlobal | ScopeSession, Name: TiDBDumpCopPath, Value: DefTiDBDumpCopPath},
 	{Scope: ScopeGlobal | ScopeSession, Name: TiDBLoadCopPath, Value: DefTiDBLoadCopPath},
+	{Scope: ScopeGlobal | ScopeSession, Name: TiDBLoadCopConcurrency, Value: strconv.Itoa(DefTiDBLoadCopConcurrency)},
 	{Scope: ScopeGlobal | ScopeSession, Name: TiDBBackoffLockFast, Value: strconv.Itoa(kv.DefBackoffLockFast)},
 	{Scope: ScopeGlobal | ScopeSession, Name: TiDBBackOffWeight, Value: strconv.Itoa(kv.DefBackOffWeight)},
 	{Scope: ScopeGlobal | ScopeSession, Name: TiDBRetryLimit, Value: strconv.Itoa(DefTiDBRetryLimit)},

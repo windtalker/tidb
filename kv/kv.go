@@ -472,7 +472,7 @@ type Storage interface {
 	// ShowStatus returns the specified status of the storage
 	ShowStatus(ctx context.Context, key string) (interface{}, error)
 
-	LoadCopCache(loadCopPath string) error
+	LoadCopCache(loadCopPath string, loadConcurrency uint64) error
 }
 
 // FnKeyCmp is the function for iterator the keys

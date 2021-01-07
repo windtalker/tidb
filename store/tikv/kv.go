@@ -331,9 +331,9 @@ func (s *tikvStore) GetSnapshot(ver kv.Version) (kv.Snapshot, error) {
 	return snapshot, nil
 }
 
-func (s *tikvStore) LoadCopCache(loadCopPath string) error {
+func (s *tikvStore) LoadCopCache(loadCopPath string, loadConcurrency uint64) error {
 	if s.coprCache != nil {
-		return s.coprCache.LoadFromFile(loadCopPath)
+		return s.coprCache.LoadFromFile(loadCopPath, loadConcurrency)
 	}
 	return nil
 }
