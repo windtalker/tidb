@@ -16,7 +16,6 @@ package tikv
 import (
 	"bytes"
 	"encoding/binary"
-	"encoding/json"
 	"fmt"
 	"io/ioutil"
 	"math"
@@ -29,6 +28,7 @@ import (
 	"unsafe"
 
 	"github.com/dgraph-io/ristretto"
+	uuid2 "github.com/google/uuid"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/kvproto/pkg/coprocessor"
 	"github.com/pingcap/tidb/config"
@@ -186,14 +186,39 @@ func (c *coprCache) CheckAdmission(dataSize int, processTime time.Duration) bool
 	return true
 }
 
-func (c *coprCache) loadSingleFile(file string) {
-	contents, err := ioutil.ReadFile(file)
-	if err != nil {
-		logutil.BgLogger().Warn("failed to load cop cache from " + file)
+func (c *coprCache) loadSingleFile(path string, file string) {
+	names := strings.Split(file, "_")
+	if len(names) != 5 {
+		logutil.BgLogger().Warn("failed to load cop cache from " + file + ": file name not valid")
+		return
 	}
 	cacheValue := &coprCacheValue{}
-	if json.Unmarshal(contents, cacheValue) != nil {
-		logutil.BgLogger().Warn("failed to load cop cache from " + file)
+	var err error
+	cacheValue.TimeStamp, err = strconv.ParseUint(names[0], 10, 64)
+	if err != nil {
+		logutil.BgLogger().Warn("failed to load cop cache from " + file + ": can not extract ts from filename")
+		return
+	}
+	cacheValue.RegionID, err = strconv.ParseUint(names[1], 10, 64)
+	if err != nil {
+		logutil.BgLogger().Warn("failed to load cop cache from " + file + ": can not extract region id from filename")
+		return
+	}
+	cacheValue.RegionDataVersion, err = strconv.ParseUint(names[2], 10, 64)
+	if err != nil {
+		logutil.BgLogger().Warn("failed to load cop cache from " + file + ": can not extract region data version from filename")
+		return
+	}
+	cacheValue.Key, err = ioutil.ReadFile(filepath.Join(path, file))
+	if err != nil {
+		logutil.BgLogger().Warn("failed to load cop cache from " + file + ": can not load key")
+		return
+	}
+	valueFileName := names[0] + "_" + names[1] + "_" + names[2] + "_" + names[3] + "_value"
+	cacheValue.Data, err = ioutil.ReadFile(filepath.Join(path, valueFileName))
+	if err != nil {
+		logutil.BgLogger().Warn("failed to load cop cache from " + file + ": can not load value")
+		return
 	}
 	c.Set(cacheValue.Key, cacheValue, "")
 }
@@ -234,14 +259,14 @@ func (c *coprCache) LoadFromFile(loadPath string, loadConcurrency uint64) error 
 			}
 			for i := filePerThread * indexValue; i < filePerThread*(indexValue+1); i++ {
 				file := rd[i]
-				if strings.HasPrefix(file.Name(), "file_") {
-					c.loadSingleFile(filepath.Join(loadPath, file.Name()))
+				if strings.HasSuffix(file.Name(), "_key") {
+					c.loadSingleFile(loadPath, file.Name())
 				}
 			}
 			if extraFile {
 				file := rd[len(rd)-1-indexValue]
-				if strings.HasPrefix(file.Name(), "file_") {
-					c.loadSingleFile(filepath.Join(loadPath, file.Name()))
+				if strings.HasSuffix(file.Name(), "_key") {
+					c.loadSingleFile(loadPath, file.Name())
 				}
 			}
 		}(index)
@@ -261,20 +286,21 @@ func (c *coprCache) Set(key []byte, value *coprCacheValue, diskName string) bool
 	// Always ensure that the `Key` in `value` is the `key` we received.
 	value.Key = key
 	if len(diskName) > 0 {
-		j, err := json.Marshal(value)
-		if err == nil {
-			fileName := ""
-			for {
-				fileName = diskName + "/file_" + strconv.Itoa(int(c.fileIndex.Add(1)))
-				if _, err := os.Stat(fileName); os.IsNotExist(err) {
-					// find first file that not exits
-					break
-				}
-			}
-			e := ioutil.WriteFile(fileName, j, 0644)
+		if uid, err := uuid2.NewUUID(); err == nil {
+			uuidString := uid.String()
+			fileNamePrefix := strconv.FormatUint(value.TimeStamp, 10) + "_" + strconv.FormatUint(value.RegionID, 10) + "_" + strconv.FormatUint(value.RegionDataVersion, 10) + "_" + uuidString
+			keyName := fileNamePrefix + "_key"
+			e := ioutil.WriteFile(filepath.Join(diskName, keyName), value.Key, 0644)
 			if e != nil {
-				logutil.BgLogger().Warn("failed to save cop cache to file")
+				logutil.BgLogger().Warn("failed to save cop key to file")
 			}
+			valueName := fileNamePrefix + "_value"
+			e = ioutil.WriteFile(filepath.Join(diskName, valueName), value.Data, 0644)
+			if e != nil {
+				logutil.BgLogger().Warn("failed to save cop key to file")
+			}
+		} else {
+			logutil.BgLogger().Warn("failed to save cop cache to file because uuid is not generated")
 		}
 	}
 	return c.cache.Set(key, value, int64(value.Len()))
