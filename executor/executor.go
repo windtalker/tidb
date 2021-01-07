@@ -1736,8 +1736,8 @@ func (f *CuraRunner) run(ctx context.Context) {
 	f.curaExec.driver.SetBucketAggregateBuckets(sessionVars.CuraBucketAggBuckets)
 
 	logutil.CuraLogger.Infof("Cura config: mem res type: %v, mem res size: %v, mem res size per thread %v, bucket agg %v, bucket agg buckets %v, exclusive default mem "+
-		"res: %v", sessionVars.CuraMemResType, sessionVars.CuraMemResType, sessionVars.CuraMemResSizePerThread, sessionVars.CuraExclusiveDefaultMemRes, sessionVars.CuraEnableBucketAgg,
-		sessionVars.CuraBucketAggBuckets)
+		"res: %v", sessionVars.CuraMemResType, sessionVars.CuraMemResType, sessionVars.CuraMemResSizePerThread, sessionVars.CuraEnableBucketAgg,
+		sessionVars.CuraBucketAggBuckets, sessionVars.CuraExclusiveDefaultMemRes)
 	driver := f.curaExec.driver
 	err, explained := driver.Explain(f.curaExec.jsonPlan, true)
 	if err <= 0 {
