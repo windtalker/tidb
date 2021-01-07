@@ -1510,7 +1510,10 @@ func (s *SessionVars) SetSystemVar(name string, val string) error {
 			stat, err := os.Stat(s.DumpCopPath)
 			if os.IsNotExist(err) {
 				// path/to/whatever does not exist
-				os.MkdirAll(s.DumpCopPath, 0777)
+				err := os.MkdirAll(s.DumpCopPath, 0777)
+				if err != nil {
+					return err
+				}
 			} else {
 				if !stat.IsDir() {
 					s.DumpCopPath = ""
