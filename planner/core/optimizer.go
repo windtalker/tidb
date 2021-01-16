@@ -149,6 +149,78 @@ func postOptimize(sctx sessionctx.Context, plan PhysicalPlan) PhysicalPlan {
 	plan = InjectExtraProjection(plan)
 	plan = eliminateUnionScanAndLock(sctx, plan)
 	plan = enableParallelApply(sctx, plan)
+	plan = checkCuraExec(sctx, plan)
+	return plan
+}
+
+type CuraSupportType uint64
+
+const (
+	HASHJOIN CuraSupportType = 1 << iota
+	HASHAGG
+	PROJECT
+	SORT
+	SELECTION
+	LIMIT
+)
+
+func checkCuraSupport(sctx sessionctx.Context, plan PhysicalPlan) {
+	supportCura := false
+	switch plan.(type) {
+	case *PhysicalHashJoin:
+		supportCura = (sctx.GetSessionVars().CuraSupport & uint64(HASHJOIN)) == uint64(HASHJOIN)
+	case *PhysicalHashAgg:
+		supportCura = (sctx.GetSessionVars().CuraSupport & uint64(HASHAGG)) == uint64(HASHAGG)
+	case *PhysicalProjection:
+		supportCura = (sctx.GetSessionVars().CuraSupport & uint64(PROJECT)) == uint64(PROJECT)
+	case *PhysicalSort:
+		supportCura = (sctx.GetSessionVars().CuraSupport & uint64(SORT)) == uint64(SORT)
+	case *PhysicalSelection:
+		supportCura = (sctx.GetSessionVars().CuraSupport & uint64(SELECTION)) == uint64(SELECTION)
+	case *PhysicalLimit:
+		supportCura = (sctx.GetSessionVars().CuraSupport & uint64(LIMIT)) == uint64(LIMIT)
+	case *PhysicalTopN:
+		supportCura = (sctx.GetSessionVars().CuraSupport&uint64(LIMIT)) == uint64(LIMIT) && (sctx.GetSessionVars().CuraSupport&uint64(SORT)) == uint64(SORT)
+	}
+	plan.SetSupportCura(supportCura)
+	for _, child := range plan.Children() {
+		checkCuraSupport(sctx, child)
+	}
+}
+
+/*
+func genCuraPlan(plan PhysicalPlan) *CuraPlan {
+	return &CuraPlan{}
+}
+
+func convertToCuraPlan(plan PhysicalPlan) {
+	for idx := 0; idx < len(plan.Children()); idx++ {
+		if plan.Children()[idx].SupportCura() {
+			curaPlan := genCuraPlan(plan.Children()[idx])
+			plan.Children()[idx] = curaPlan
+			for _, p := range curaPlan.idToChildPlans {
+				convertToCuraPlan(p)
+			}
+		} else {
+			convertToCuraPlan(plan.Children()[idx])
+		}
+	}
+}
+*/
+
+func checkCuraExec(sctx sessionctx.Context, plan PhysicalPlan) PhysicalPlan {
+	if !sctx.GetSessionVars().EnableCuraExec {
+		return plan
+	}
+	checkCuraSupport(sctx, plan)
+
+	/*
+		if plan.SupportCura() {
+			return genCuraPlan(plan)
+		}
+		convertToCuraPlan(plan)
+		return plan
+	*/
 	return plan
 }
 

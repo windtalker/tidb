@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"runtime"
 	"runtime/trace"
@@ -253,6 +254,8 @@ func initFileLog(cfg *zaplog.FileLogConfig, logger *log.Logger) error {
 // SlowQueryLogger is used to log slow query, InitLogger will modify it according to config file.
 var SlowQueryLogger = log.StandardLogger()
 
+var CuraLogger = log.StandardLogger()
+
 // SlowQueryZapLogger is used to log slow query, InitZapLogger will modify it according to config file.
 var SlowQueryZapLogger = zaplog.L()
 
@@ -282,6 +285,21 @@ func InitLogger(cfg *LogConfig) error {
 		}
 		SlowQueryLogger.Formatter = &slowLogFormatter{}
 	}
+
+	CuraLogger = log.New()
+
+	if len(cfg.File.Filename) != 0 {
+		if err := initFileLog(&cfg.File, nil); err != nil {
+			return errors.Trace(err)
+		}
+	}
+	tmp := cfg.File
+	tmp.Filename = path.Dir(tmp.Filename) + "/cura.log"
+	if err := initFileLog(&tmp, CuraLogger); err != nil {
+		return errors.Trace(err)
+	}
+	curaFormatter := stringToLogFormatter(cfg.Format, cfg.DisableTimestamp)
+	CuraLogger.Formatter = curaFormatter
 
 	return nil
 }

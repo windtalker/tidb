@@ -359,6 +359,13 @@ func (s *tikvStore) GetSnapshot(ver kv.Version) kv.Snapshot {
 	return snapshot
 }
 
+func (s *tikvStore) LoadCopCache(loadCopPath string, loadConcurrency uint64) error {
+	if s.coprCache != nil {
+		return s.coprCache.LoadFromFile(loadCopPath, loadConcurrency)
+	}
+	return nil
+}
+
 func (s *tikvStore) Close() error {
 	mc.Lock()
 	defer mc.Unlock()

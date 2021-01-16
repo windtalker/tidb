@@ -21,6 +21,7 @@ import (
 	"math"
 	"math/rand"
 	"net"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -53,6 +54,7 @@ import (
 	"github.com/pingcap/tidb/util/stringutil"
 	"github.com/pingcap/tidb/util/timeutil"
 	"github.com/twmb/murmur3"
+	"github.com/zanmato1984/cura/go/cura"
 	atomic2 "go.uber.org/atomic"
 )
 
@@ -764,6 +766,39 @@ type SessionVars struct {
 
 	// EnableRedactLog indicates that whether redact log.
 	EnableRedactLog bool
+	// EnableCuraExec indicates that thether to use cura
+	EnableCuraExec bool
+
+	// CuraConcurrentInputSource indicates that thether to use cura
+	CuraConcurrentInputSource bool
+
+	// CuraStreamConcurrency indicates that thether to use cura
+	CuraStreamConcurrency uint64
+
+	// CuraChunkSize indicates that thether to use cura
+	CuraChunkSize uint64
+
+	// CuraSupport indicates that thether to use cura
+	CuraSupport uint64
+
+	// CuraMemResType indicates that thether to use cura
+	CuraMemResType cura.MemoryResource
+
+	CuraMemResSize uint64
+
+	CuraMemResSizePerThread uint64
+
+	CuraExclusiveDefaultMemRes bool
+
+	CuraEnableBucketAgg bool
+
+	CuraBucketAggBuckets uint64
+
+	DumpCopPath string
+
+	LoadCopPath string
+
+	LoadCopConcurrency uint64
 
 	// ShardAllocateStep indicates the max size of continuous rowid shard in one transaction.
 	ShardAllocateStep int64
@@ -960,6 +995,20 @@ func NewSessionVars() *SessionVars {
 		GuaranteeExternalConsistency: DefTiDBGuaranteeExternalConsistency,
 		AnalyzeVersion:               DefTiDBAnalyzeVersion,
 		EnableIndexMergeJoin:         DefTiDBEnableIndexMergeJoin,
+		EnableCuraExec:               DefTiDBEnableCuraExec,
+		CuraConcurrentInputSource:    DefTiDBCuraConcurrentInputSource,
+		CuraStreamConcurrency:        DefTiDBCuraStreamConcurrency,
+		CuraChunkSize:                DefTiDBCuraChunkSize,
+		CuraSupport:                  DefTiDBCuraSupport,
+		CuraMemResType:               DefTiDBCuraMemResType,
+		CuraMemResSize:               DefTiDBCuraMemResSize,
+		CuraMemResSizePerThread:      DefTiDBCuraMemResSizePerThread,
+		CuraExclusiveDefaultMemRes:   DefTiDBCuraExclusiveDefaultMemRes,
+		CuraEnableBucketAgg:          DefTiDBCuraEnableBucketAgg,
+		CuraBucketAggBuckets:         DefTiDBCuraBucketAggBuckets,
+		DumpCopPath:                  DefTiDBDumpCopPath,
+		LoadCopPath:                  DefTiDBLoadCopPath,
+		LoadCopConcurrency:           DefTiDBLoadCopConcurrency,
 	}
 	vars.KVVars = kv.NewVariables(&vars.Killed)
 	vars.Concurrency = Concurrency{
@@ -1648,6 +1697,25 @@ func (s *SessionVars) SetSystemVar(name string, val string) error {
 		s.EnableClusteredIndex = TiDBOptOn(val)
 	case TiDBPartitionPruneMode:
 		s.PartitionPruneMode.Store(strings.ToLower(strings.TrimSpace(val)))
+	case TiDBDumpCopPath:
+		s.DumpCopPath = strings.TrimSpace(val)
+		if s.DumpCopPath != "" {
+			stat, err := os.Stat(s.DumpCopPath)
+			if os.IsNotExist(err) {
+				// path/to/whatever does not exist
+				err := os.MkdirAll(s.DumpCopPath, 0777)
+				if err != nil {
+					return err
+				}
+			} else {
+				if !stat.IsDir() {
+					s.DumpCopPath = ""
+					return errors.New(val + " is a file")
+				}
+			}
+		}
+	case TiDBLoadCopPath:
+		s.LoadCopPath = strings.TrimSpace(val)
 	case TiDBEnableParallelApply:
 		s.EnableParallelApply = TiDBOptOn(val)
 	case TiDBSlowLogMasking:
@@ -1656,6 +1724,73 @@ func (s *SessionVars) SetSystemVar(name string, val string) error {
 	case TiDBRedactLog:
 		s.EnableRedactLog = TiDBOptOn(val)
 		errors.RedactLogEnabled.Store(s.EnableRedactLog)
+	case TiDBEnableCuraExec:
+		s.EnableCuraExec = TiDBOptOn(val)
+	case TiDBCuraConcurrentInputSource:
+		s.CuraConcurrentInputSource = TiDBOptOn(val)
+	case TiDBCuraExclusiveDefaultMemoryResource:
+		s.CuraExclusiveDefaultMemRes = TiDBOptOn(val)
+	case TiDBCuraStreamConcurrency:
+		result, err := strconv.ParseUint(val, 10, 64)
+		if err != nil {
+			return errors.Trace(err)
+		}
+		s.CuraStreamConcurrency = result
+	case TiDBCuraChunkSize:
+		result, err := strconv.ParseUint(val, 10, 64)
+		if err != nil {
+			return errors.Trace(err)
+		}
+		s.CuraChunkSize = result
+	case TiDBCuraSupport:
+		result, err := strconv.ParseUint(val, 10, 64)
+		if err != nil {
+			return errors.Trace(err)
+		}
+		s.CuraSupport = result
+	case TiDBCuraMemResSize:
+		result, err := strconv.ParseUint(val, 10, 64)
+		if err != nil {
+			return errors.Trace(err)
+		}
+		s.CuraMemResSize = result
+	case TiDBCuraMemResSizePerThread:
+		result, err := strconv.ParseUint(val, 10, 64)
+		if err != nil {
+			return errors.Trace(err)
+		}
+		s.CuraMemResSizePerThread = result
+	case TiDBCuraBucketAggBuckets:
+		result, err := strconv.ParseUint(val, 10, 64)
+		if err != nil {
+			return errors.Trace(err)
+		}
+		s.CuraBucketAggBuckets = result
+	case TiDBCuraMemoryResourceType:
+		switch strings.ToLower(val) {
+		case "arena", strconv.Itoa(int(cura.Arena)):
+			s.CuraMemResType = cura.Arena
+		case "arenaperthread", strconv.Itoa(int(cura.ArenaPerThread)):
+			s.CuraMemResType = cura.ArenaPerThread
+		case "pool", strconv.Itoa(int(cura.Pool)):
+			s.CuraMemResType = cura.Pool
+		case "poolperthread", strconv.Itoa(int(cura.PoolPerThread)):
+			s.CuraMemResType = cura.PoolPerThread
+		case "managed", strconv.Itoa(int(cura.Managed)):
+			s.CuraMemResType = cura.Managed
+		case "cuda", strconv.Itoa(int(cura.Cuda)):
+			s.CuraMemResType = cura.Cuda
+		default:
+			return errors.Trace(errors.New("only arena/arenaperthread/pool/managed/cuda/poolperthread can be set to tidb_cura_mem_res_type"))
+		}
+	case TiDBCuraEnableBucketAgg:
+		s.CuraEnableBucketAgg = TiDBOptOn(val)
+	case TiDBLoadCopConcurrency:
+		result, err := strconv.ParseUint(val, 10, 64)
+		if err != nil {
+			return errors.Trace(err)
+		}
+		s.LoadCopConcurrency = result
 	case TiDBShardAllocateStep:
 		s.ShardAllocateStep = tidbOptInt64(val, DefTiDBShardAllocateStep)
 	case TiDBEnableChangeColumnType:

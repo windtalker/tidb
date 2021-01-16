@@ -20,6 +20,7 @@ import (
 	"github.com/pingcap/parser/mysql"
 	"github.com/pingcap/tidb/config"
 	"github.com/uber-go/atomic"
+	"github.com/zanmato1984/cura/go/cura"
 )
 
 /*
@@ -335,6 +336,35 @@ const (
 
 	// tidb_enable_parallel_apply is used for parallel apply.
 	TiDBEnableParallelApply = "tidb_enable_parallel_apply"
+
+	// tidb_enable_cura_exec is used for cura exec.
+	TiDBEnableCuraExec = "tidb_enable_cura_exec"
+
+	TiDBCuraConcurrentInputSource = "tidb_cura_concurrent_input_source"
+
+	TiDBCuraStreamConcurrency = "tidb_cura_stream_concurrency"
+
+	TiDBCuraChunkSize = "tidb_cura_chunk_size"
+
+	TiDBCuraSupport = "tidb_cura_support"
+
+	TiDBCuraMemoryResourceType = "tidb_cura_mem_res_type"
+
+	TiDBCuraMemResSize = "tidb_cura_mem_res_size"
+
+	TiDBCuraMemResSizePerThread = "tidb_cura_mem_res_size_per_thread"
+
+	TiDBCuraExclusiveDefaultMemoryResource = "tidb_cura_exclusive_default_mem_res"
+
+	TiDBCuraEnableBucketAgg = "tidb_cura_enable_bucket_agg"
+
+	TiDBCuraBucketAggBuckets = "tidb_cura_bucket_agg_buckets"
+
+	TiDBDumpCopPath = "tidb_dump_cop_path"
+
+	TiDBLoadCopPath = "tidb_load_cop_path"
+
+	TiDBLoadCopConcurrency = "tidb_load_cop_concurrency"
 
 	// tidb_backoff_lock_fast is used for tikv backoff base time in milliseconds.
 	TiDBBackoffLockFast = "tidb_backoff_lock_fast"
@@ -655,6 +685,20 @@ const (
 	DefTiDBAnalyzeVersion               = 1
 	DefTiDBEnableIndexMergeJoin         = false
 	DefTiDBTrackAggregateMemoryUsage    = false
+	DefTiDBEnableCuraExec               = false
+	DefTiDBCuraConcurrentInputSource    = false
+	DefTiDBCuraStreamConcurrency        = 2
+	DefTiDBCuraChunkSize                = 4 * 1024 * 1024
+	DefTiDBCuraSupport                  = 127
+	DefTiDBCuraMemResType               = cura.Arena
+	DefTiDBCuraMemResSize               = 0
+	DefTiDBCuraMemResSizePerThread      = 0
+	DefTiDBCuraExclusiveDefaultMemRes   = false
+	DefTiDBCuraEnableBucketAgg          = false
+	DefTiDBCuraBucketAggBuckets         = 0
+	DefTiDBDumpCopPath                  = ""
+	DefTiDBLoadCopPath                  = ""
+	DefTiDBLoadCopConcurrency           = 15
 )
 
 // Process global variables.

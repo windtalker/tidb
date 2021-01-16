@@ -17,6 +17,7 @@ import (
 	"bytes"
 	"context"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -80,12 +81,14 @@ type executorBuilder struct {
 	err              error // err is set when there is error happened during Executor building process.
 	hasLock          bool
 	mppTaskID        int64
+	curaID     int64
 }
 
 func newExecutorBuilder(ctx sessionctx.Context, is infoschema.InfoSchema) *executorBuilder {
 	return &executorBuilder{
-		ctx: ctx,
-		is:  is,
+		ctx:    ctx,
+		is:     is,
+		curaID: 1,
 	}
 }
 
@@ -608,6 +611,9 @@ func (b *executorBuilder) buildSelectLock(v *plannercore.PhysicalLock) Executor 
 }
 
 func (b *executorBuilder) buildLimit(v *plannercore.PhysicalLimit) Executor {
+	if v.SupportCura() {
+		return b.buildCuraExec(v)
+	}
 	childExec := b.build(v.Children()[0])
 	if b.err != nil {
 		return nil
@@ -939,6 +945,9 @@ func (b *executorBuilder) buildSelectInto(v *plannercore.SelectInto) Executor {
 }
 
 func (b *executorBuilder) buildUnionScanExec(v *plannercore.PhysicalUnionScan) Executor {
+	if v.SupportCura() {
+		return b.buildCuraExec(v)
+	}
 	reader := b.build(v.Children()[0])
 	if b.err != nil {
 		return nil
@@ -1028,6 +1037,9 @@ func (b *executorBuilder) buildUnionScanFromReader(reader Executor, v *plannerco
 
 // buildMergeJoin builds MergeJoinExec executor.
 func (b *executorBuilder) buildMergeJoin(v *plannercore.PhysicalMergeJoin) Executor {
+	if v.SupportCura() {
+		return b.buildCuraExec(v)
+	}
 	leftExec := b.build(v.Children()[0])
 	if b.err != nil {
 		return nil
@@ -1108,6 +1120,9 @@ func (b *executorBuilder) buildSideEstCount(v *plannercore.PhysicalHashJoin) flo
 }
 
 func (b *executorBuilder) buildHashJoin(v *plannercore.PhysicalHashJoin) Executor {
+	if v.SupportCura() {
+		return b.buildCuraExec(v)
+	}
 	leftExec := b.build(v.Children()[0])
 	if b.err != nil {
 		return nil
@@ -1206,6 +1221,9 @@ func (b *executorBuilder) buildHashJoin(v *plannercore.PhysicalHashJoin) Executo
 }
 
 func (b *executorBuilder) buildHashAgg(v *plannercore.PhysicalHashAgg) Executor {
+	if v.SupportCura() {
+		return b.buildCuraExec(v)
+	}
 	src := b.build(v.Children()[0])
 	if b.err != nil {
 		return nil
@@ -1286,6 +1304,9 @@ func (b *executorBuilder) buildHashAgg(v *plannercore.PhysicalHashAgg) Executor 
 }
 
 func (b *executorBuilder) buildStreamAgg(v *plannercore.PhysicalStreamAgg) Executor {
+	if v.SupportCura() {
+		return b.buildCuraExec(v)
+	}
 	src := b.build(v.Children()[0])
 	if b.err != nil {
 		return nil
@@ -1314,6 +1335,9 @@ func (b *executorBuilder) buildStreamAgg(v *plannercore.PhysicalStreamAgg) Execu
 }
 
 func (b *executorBuilder) buildSelection(v *plannercore.PhysicalSelection) Executor {
+	if v.SupportCura() {
+		return b.buildCuraExec(v)
+	}
 	childExec := b.build(v.Children()[0])
 	if b.err != nil {
 		return nil
@@ -1326,6 +1350,9 @@ func (b *executorBuilder) buildSelection(v *plannercore.PhysicalSelection) Execu
 }
 
 func (b *executorBuilder) buildProjection(v *plannercore.PhysicalProjection) Executor {
+	if v.SupportCura() {
+		return b.buildCuraExec(v)
+	}
 	childExec := b.build(v.Children()[0])
 	if b.err != nil {
 		return nil
@@ -1347,6 +1374,9 @@ func (b *executorBuilder) buildProjection(v *plannercore.PhysicalProjection) Exe
 }
 
 func (b *executorBuilder) buildTableDual(v *plannercore.PhysicalTableDual) Executor {
+	if v.SupportCura() {
+		return b.buildCuraExec(v)
+	}
 	if v.RowCount != 0 && v.RowCount != 1 {
 		b.err = errors.Errorf("buildTableDual failed, invalid row count for dual table: %v", v.RowCount)
 		return nil
@@ -1400,6 +1430,9 @@ func (b *executorBuilder) getSnapshotTS() (uint64, error) {
 }
 
 func (b *executorBuilder) buildMemTable(v *plannercore.PhysicalMemTable) Executor {
+	if v.SupportCura() {
+		return b.buildCuraExec(v)
+	}
 	switch v.DBName.L {
 	case util.MetricSchemaName.L:
 		return &MemTableReaderExec{
@@ -1599,6 +1632,9 @@ func (b *executorBuilder) buildMemTable(v *plannercore.PhysicalMemTable) Executo
 }
 
 func (b *executorBuilder) buildSort(v *plannercore.PhysicalSort) Executor {
+	if v.SupportCura() {
+		return b.buildCuraExec(v)
+	}
 	childExec := b.build(v.Children()[0])
 	if b.err != nil {
 		return nil
@@ -1613,6 +1649,9 @@ func (b *executorBuilder) buildSort(v *plannercore.PhysicalSort) Executor {
 }
 
 func (b *executorBuilder) buildTopN(v *plannercore.PhysicalTopN) Executor {
+	if v.SupportCura() {
+		return b.buildCuraExec(v)
+	}
 	childExec := b.build(v.Children()[0])
 	if b.err != nil {
 		return nil
@@ -1630,6 +1669,9 @@ func (b *executorBuilder) buildTopN(v *plannercore.PhysicalTopN) Executor {
 }
 
 func (b *executorBuilder) buildApply(v *plannercore.PhysicalApply) Executor {
+	if v.SupportCura() {
+		return b.buildCuraExec(v)
+	}
 	var (
 		innerPlan plannercore.PhysicalPlan
 		outerPlan plannercore.PhysicalPlan
@@ -1721,6 +1763,9 @@ func (b *executorBuilder) buildApply(v *plannercore.PhysicalApply) Executor {
 }
 
 func (b *executorBuilder) buildMaxOneRow(v *plannercore.PhysicalMaxOneRow) Executor {
+	if v.SupportCura() {
+		return b.buildCuraExec(v)
+	}
 	childExec := b.build(v.Children()[0])
 	if b.err != nil {
 		return nil
@@ -1733,6 +1778,9 @@ func (b *executorBuilder) buildMaxOneRow(v *plannercore.PhysicalMaxOneRow) Execu
 }
 
 func (b *executorBuilder) buildUnionAll(v *plannercore.PhysicalUnionAll) Executor {
+	if v.SupportCura() {
+		return b.buildCuraExec(v)
+	}
 	childExecs := make([]Executor, len(v.Children()))
 	for i, child := range v.Children() {
 		childExecs[i] = b.build(child)
@@ -2285,6 +2333,9 @@ func (b *executorBuilder) corColInAccess(p plannercore.PhysicalPlan) bool {
 }
 
 func (b *executorBuilder) buildIndexLookUpJoin(v *plannercore.PhysicalIndexJoin) Executor {
+	if v.SupportCura() {
+		return b.buildCuraExec(v)
+	}
 	outerExec := b.build(v.Children()[1-v.InnerChildIdx])
 	if b.err != nil {
 		return nil
@@ -2380,6 +2431,9 @@ func (b *executorBuilder) buildIndexLookUpJoin(v *plannercore.PhysicalIndexJoin)
 }
 
 func (b *executorBuilder) buildIndexLookUpMergeJoin(v *plannercore.PhysicalIndexMergeJoin) Executor {
+	if v.SupportCura() {
+		return b.buildCuraExec(v)
+	}
 	outerExec := b.build(v.Children()[1-v.InnerChildIdx])
 	if b.err != nil {
 		return nil
@@ -2465,6 +2519,9 @@ func (b *executorBuilder) buildIndexLookUpMergeJoin(v *plannercore.PhysicalIndex
 }
 
 func (b *executorBuilder) buildIndexNestedLoopHashJoin(v *plannercore.PhysicalIndexHashJoin) Executor {
+	if v.SupportCura() {
+		return b.buildCuraExec(v)
+	}
 	e := b.buildIndexLookUpJoin(&(v.PhysicalIndexJoin)).(*IndexLookUpJoin)
 	idxHash := &IndexNestedLoopHashJoin{
 		IndexLookUpJoin: *e,
@@ -2590,6 +2647,9 @@ func (b *executorBuilder) buildMPPGather(v *plannercore.PhysicalTableReader) Exe
 // buildTableReader builds a table reader executor. It first build a no range table reader,
 // and then update it ranges from table scan plan.
 func (b *executorBuilder) buildTableReader(v *plannercore.PhysicalTableReader) Executor {
+	if v.SupportCura() {
+		return b.buildCuraExec(v)
+	}
 	if useMPPExecution(b.ctx, v) {
 		return b.buildMPPGather(v)
 	}
@@ -2826,6 +2886,9 @@ func buildNoRangeIndexReader(b *executorBuilder, v *plannercore.PhysicalIndexRea
 }
 
 func (b *executorBuilder) buildIndexReader(v *plannercore.PhysicalIndexReader) Executor {
+	if v.SupportCura() {
+		return b.buildCuraExec(v)
+	}
 	ret, err := buildNoRangeIndexReader(b, v)
 	if err != nil {
 		b.err = err
@@ -2969,6 +3032,9 @@ func buildNoRangeIndexLookUpReader(b *executorBuilder, v *plannercore.PhysicalIn
 }
 
 func (b *executorBuilder) buildIndexLookUpReader(v *plannercore.PhysicalIndexLookUpReader) Executor {
+	if v.SupportCura() {
+		return b.buildCuraExec(v)
+	}
 	ret, err := buildNoRangeIndexLookUpReader(b, v)
 	if err != nil {
 		b.err = err
@@ -3075,6 +3141,9 @@ func buildNoRangeIndexMergeReader(b *executorBuilder, v *plannercore.PhysicalInd
 }
 
 func (b *executorBuilder) buildIndexMergeReader(v *plannercore.PhysicalIndexMergeReader) Executor {
+	if v.SupportCura() {
+		return b.buildCuraExec(v)
+	}
 	ret, err := buildNoRangeIndexMergeReader(b, v)
 	if err != nil {
 		b.err = err
@@ -3890,6 +3959,76 @@ func (b *executorBuilder) buildBatchPointGet(plan *plannercore.BatchPointGetPlan
 	e.base().initCap = capacity
 	e.base().maxChunkSize = capacity
 	e.buildVirtualColumnInfo()
+	return e
+}
+
+type CuraPlan struct {
+	plans []plannercore.PhysicalPlan
+}
+
+func (b *executorBuilder) getCuraRelatedPlans(p plannercore.PhysicalPlan, curaPlan *CuraPlan) {
+	for _, child := range p.Children() {
+		if child.SupportCura() {
+			b.getCuraRelatedPlans(child, curaPlan)
+		} else {
+			curaPlan.plans = append(curaPlan.plans, child)
+		}
+	}
+	curaPlan.plans = append(curaPlan.plans, p)
+}
+
+func (b *executorBuilder) buildCuraExec(p plannercore.PhysicalPlan) Executor {
+	idToChildrenExecutors := make(map[int64]Executor)
+	selectedColumns := make([]int64, 0, len(p.Schema().Columns))
+	curaPlan := CuraPlan{plans: make([]plannercore.PhysicalPlan, 0, 5)}
+	b.getCuraRelatedPlans(p, &curaPlan)
+	var allExecs []Executor
+	id := int64(1)
+	jsonPlan := make([]byte, 0, 5)
+	var err error = nil
+	jsonPlan = append(jsonPlan, []byte("{\"rels\": [\n")...)
+	for idx, plan := range curaPlan.plans {
+		if idx != 0 {
+			jsonPlan = append(jsonPlan, []byte(",\n")...)
+		}
+		if plan.SupportCura() {
+			// generate json
+			jsonPlan, err = plan.ToCuraJson(jsonPlan)
+			if err != nil {
+				b.err = err
+				return nil
+			}
+		} else {
+			executor := b.build(plan)
+			idToChildrenExecutors[id] = executor
+			allExecs = append(allExecs, executor)
+			// generate json
+			jsonPlan = append(jsonPlan, []byte("{\"rel_op\": \"InputSource\",\"source_id\":")...)
+			jsonPlan = append(jsonPlan, []byte(strconv.FormatInt(id, 10))...)
+			jsonPlan = append(jsonPlan, []byte(", \"schema\": [")...)
+			for sIdx, col := range plan.Schema().Columns {
+				if sIdx != 0 {
+					jsonPlan = append(jsonPlan, ',')
+				}
+				jsonPlan, err = plannercore.TypeToCuraJson(col.RetType, jsonPlan)
+				if err != nil {
+					b.err = err
+					return nil
+				}
+			}
+			jsonPlan = append(jsonPlan, []byte("]}")...)
+			id++
+		}
+	}
+	jsonPlan = append(jsonPlan, []byte("\n]}")...)
+	for idx := range p.Schema().Columns {
+		selectedColumns = append(selectedColumns, int64(idx))
+	}
+	e := &CuraExec{idToExecutors: idToChildrenExecutors,
+		jsonPlan:        string(jsonPlan),
+		selectedColumns: selectedColumns,
+		baseExecutor:    newBaseExecutor(b.ctx, p.Schema(), p.ID(), allExecs...),
+		prepared:        false}
 	return e
 }
 

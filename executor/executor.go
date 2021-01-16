@@ -17,6 +17,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"reflect"
 	"runtime"
 	"runtime/trace"
 	"strconv"
@@ -24,7 +25,11 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unsafe"
 
+	"github.com/apache/arrow/go/arrow"
+	"github.com/apache/arrow/go/arrow/array"
+	arrowmemory "github.com/apache/arrow/go/arrow/memory"
 	"github.com/cznic/mathutil"
 	"github.com/opentracing/opentracing-go"
 	"github.com/pingcap/errors"
@@ -59,6 +64,7 @@ import (
 	"github.com/pingcap/tidb/util/execdetails"
 	"github.com/pingcap/tidb/util/logutil"
 	"github.com/pingcap/tidb/util/memory"
+	"github.com/zanmato1984/cura/go/cura"
 	"go.uber.org/zap"
 )
 
@@ -214,13 +220,15 @@ func (e *baseExecutor) updateDeltaForTableID(id int64) {
 }
 
 func newBaseExecutor(ctx sessionctx.Context, schema *expression.Schema, id int, children ...Executor) baseExecutor {
+	maxChunkSize := ctx.GetSessionVars().MaxChunkSize
+	initCap := ctx.GetSessionVars().InitChunkSize
 	e := baseExecutor{
 		children:     children,
 		ctx:          ctx,
 		id:           id,
 		schema:       schema,
-		initCap:      ctx.GetSessionVars().InitChunkSize,
-		maxChunkSize: ctx.GetSessionVars().MaxChunkSize,
+		initCap:      initCap,
+		maxChunkSize: maxChunkSize,
 	}
 	if ctx.GetSessionVars().StmtCtx.RuntimeStatsColl != nil {
 		if e.id > 0 {
@@ -1141,7 +1149,7 @@ func init() {
 			ctx = opentracing.ContextWithSpan(ctx, span1)
 		}
 
-		e := &executorBuilder{is: is, ctx: sctx}
+		e := &executorBuilder{is: is, ctx: sctx, curaID: 1}
 		exec := e.build(p)
 		if e.err != nil {
 			return nil, e.err
@@ -1602,6 +1610,555 @@ func (e *UnionExec) Close() error {
 		}
 	}
 	return firstErr
+}
+
+type curaResult struct {
+	chk *chunk.Chunk
+	err error
+}
+
+type CuraExec struct {
+	baseExecutor
+	jsonPlan        string
+	idToExecutors   map[int64]Executor
+	selectedColumns []int64
+	outputRows      []int64
+
+	driver         *cura.Driver
+	curaResultChan chan *curaResult
+	prepared       bool
+	meetError      atomic.Value
+	runner         *CuraRunner
+	wg             sync.WaitGroup
+}
+
+type CuraRunner struct {
+	curaExec *CuraExec
+}
+
+func i32SliceToBytes(i32s []int32) (b []byte) {
+	if len(i32s) == 0 {
+		return nil
+	}
+	hdr := (*reflect.SliceHeader)(unsafe.Pointer(&b))
+	hdr.Len = len(i32s) * 4
+	hdr.Cap = hdr.Len
+	hdr.Data = uintptr(unsafe.Pointer(&i32s[0]))
+	return b
+}
+
+func toGoArray(schema *expression.Column, column *chunk.Column, length int) (arrow.Field, array.Interface, error) {
+	var dataType arrow.DataType
+	var buffers []*arrowmemory.Buffer
+	switch schema.RetType.Tp {
+	case mysql.TypeLonglong, mysql.TypeLong:
+		if schema.RetType.Flag&mysql.UnsignedFlag == mysql.UnsignedFlag {
+			dataType = arrow.PrimitiveTypes.Uint64
+		} else {
+			dataType = arrow.PrimitiveTypes.Int64
+		}
+		bufferSize := 2
+		buffers = make([]*arrowmemory.Buffer, bufferSize)
+		if column.GetNullBitMap() == nil {
+			buffers[0] = nil
+		} else {
+			buffers[0] = arrowmemory.NewBufferBytes(column.GetNullBitMap())
+			buffers[0].Retain()
+		}
+		buffers[1] = arrowmemory.NewBufferBytes(column.GetRawData())
+		buffers[1].Retain()
+	case mysql.TypeDatetime, mysql.TypeDate, mysql.TypeTimestamp:
+		dataType = arrow.PrimitiveTypes.Int64
+		bufferSize := 2
+		buffers = make([]*arrowmemory.Buffer, bufferSize)
+		if column.GetNullBitMap() == nil {
+			buffers[0] = nil
+		} else {
+			buffers[0] = arrowmemory.NewBufferBytes(column.GetNullBitMap())
+			buffers[0].Retain()
+		}
+		buffers[1] = arrowmemory.NewBufferBytes(column.GetRawData())
+		buffers[1].Retain()
+	case mysql.TypeFloat, mysql.TypeDouble:
+		dataType = arrow.PrimitiveTypes.Float64
+		bufferSize := 2
+		buffers = make([]*arrowmemory.Buffer, bufferSize)
+		if column.GetNullBitMap() == nil {
+			buffers[0] = nil
+		} else {
+			buffers[0] = arrowmemory.NewBufferBytes(column.GetNullBitMap())
+			buffers[0].Retain()
+		}
+		buffers[1] = arrowmemory.NewBufferBytes(column.GetRawData())
+		buffers[1].Retain()
+	case mysql.TypeString, mysql.TypeVarchar:
+		dataType = &arrow.StringType{}
+		bufferSize := 3
+		buffers = make([]*arrowmemory.Buffer, bufferSize)
+		if column.GetNullBitMap() == nil {
+			buffers[0] = nil
+		} else {
+			buffers[0] = arrowmemory.NewBufferBytes(column.GetNullBitMap())
+			buffers[0].Retain()
+		}
+		buffers[1] = arrowmemory.NewBufferBytes(i32SliceToBytes(column.GetOffsets()))
+		buffers[1].Retain()
+		buffers[2] = arrowmemory.NewBufferBytes(column.GetRawData())
+		buffers[2].Retain()
+	default:
+		return arrow.Field{}, nil, errors.New("Unsupported type")
+	}
+	isNullable := schema.RetType.Flag&mysql.NotNullFlag != mysql.NotNullFlag
+	nulls := -1
+	if isNullable {
+		nulls = 0
+	}
+	data := array.NewData(dataType, length, buffers, make([]*array.Data, 0), nulls, 0)
+	return arrow.Field{Name: schema.OrigName, Type: dataType, Nullable: isNullable}, array.MakeFromData(data), nil
+}
+
+func tidbChunkToArrowRecord(chk *chunk.Chunk, schema *expression.Schema) (array.Record, error) {
+	nColumn := chk.NumCols()
+	fields := make([]arrow.Field, nColumn)
+	children := make([]array.Interface, nColumn)
+	for i := 0; i < nColumn; i++ {
+		field, child, err := toGoArray(schema.Columns[i], chk.Column(i), chk.NumRows())
+		if err != nil {
+			logutil.CuraLogger.Error("tidb chunk to arrow record error " + err.Error())
+			return nil, err
+		}
+		fields[i] = field
+		children[i] = child
+	}
+	s := arrow.NewSchema(fields, nil)
+	record := array.NewRecord(s, children, int64(chk.NumRows()))
+	return record, nil
+}
+
+func bytesToI32Slice(b []byte) (i32s []int32) {
+	if len(b) == 0 {
+		return nil
+	}
+	hdr := (*reflect.SliceHeader)(unsafe.Pointer(&i32s))
+	hdr.Len = len(b) / 4
+	hdr.Cap = hdr.Len
+	hdr.Data = uintptr(unsafe.Pointer(&b[0]))
+	return i32s
+}
+
+func arrowRecordToTiDBChunk(record array.Record, chk *chunk.Chunk, selectedColumns []int64) error {
+	for tidbIndex, arrowIndex := range selectedColumns {
+		col := record.Column(int(arrowIndex))
+		// todo check type
+		if col.Data().Offset() != 0 {
+			return errors.New("Not supported type")
+		}
+		length := col.Data().Len()
+		switch record.Schema().Field(int(arrowIndex)).Type.ID() {
+		case arrow.UINT64, arrow.INT64, arrow.FLOAT64:
+			var nullBitMap []byte = nil
+			if col.Data().Buffers()[0] != nil {
+				nullBitMap = col.Data().Buffers()[0].Buf()[:(length+7)>>3]
+			} else {
+				nullBitMap = make([]byte, (length+7)>>3)
+				for i := range nullBitMap {
+					nullBitMap[i] = 0xff
+				}
+			}
+			newCol := chunk.NewColumnZeroCopy(length, nullBitMap, nil, col.Data().Buffers()[1].Buf()[0:length*8], make([]byte, 8))
+			chk.SetCol(tidbIndex, newCol)
+		case arrow.STRING:
+			var nullBitMap []byte = nil
+			if col.Data().Buffers()[0] != nil {
+				nullBitMap = col.Data().Buffers()[0].Buf()[:(length+7)>>3]
+			} else {
+				nullBitMap = make([]byte, (length+7)>>3)
+				for i := range nullBitMap {
+					nullBitMap[i] = 0xff
+				}
+			}
+			var offsets []int32 = nil
+			if col.Data().Buffers()[1] != nil {
+				offsets = bytesToI32Slice(col.Data().Buffers()[1].Buf())[:length+1]
+			}
+			newCol := chunk.NewColumnZeroCopy(length, nullBitMap, offsets, col.Data().Buffers()[2].Buf()[:offsets[len(offsets)-1]], nil)
+			//newCol := chunk.NewColumnZeroCopy(col.Data().Len(), nullBitMap, offsets, col.Data().Buffers()[2].Buf(), nil)
+			chk.SetCol(tidbIndex, newCol)
+		default:
+			return errors.New("Not supported type")
+		}
+	}
+	if len(selectedColumns) == 0 {
+		chk.SetNumVirtualRows(int(record.NumRows()))
+	}
+	return nil
+}
+
+func (f *CuraRunner) run(ctx context.Context) {
+	defer func() {
+		close(f.curaExec.curaResultChan)
+		f.curaExec.wg.Done()
+	}()
+	logutil.CuraLogger.Info("Cura executor running with json plan: \n" + f.curaExec.jsonPlan)
+	f.curaExec.driver = cura.CreateDriver()
+	sessionVars := f.curaExec.ctx.GetSessionVars()
+	f.curaExec.driver.SetMemoryResource(sessionVars.CuraMemResType)
+	f.curaExec.driver.SetMemoryResourceSize(sessionVars.CuraMemResSize)
+	f.curaExec.driver.SetMemoryResourceSizePerThread(sessionVars.CuraMemResSizePerThread)
+	f.curaExec.driver.SetExclusiveDefaultMemoryResource(sessionVars.CuraExclusiveDefaultMemRes)
+	f.curaExec.driver.SetBucketAggregate(sessionVars.CuraEnableBucketAgg)
+	f.curaExec.driver.SetBucketAggregateBuckets(sessionVars.CuraBucketAggBuckets)
+
+	logutil.CuraLogger.Infof("Cura config: mem res type: %v, mem res size: %v, mem res size per thread %v, bucket agg %v, bucket agg buckets %v, exclusive default mem "+
+		"res: %v", sessionVars.CuraMemResType, sessionVars.CuraMemResType, sessionVars.CuraMemResSizePerThread, sessionVars.CuraEnableBucketAgg,
+		sessionVars.CuraBucketAggBuckets, sessionVars.CuraExclusiveDefaultMemRes)
+	driver := f.curaExec.driver
+	err, explained := driver.Explain(f.curaExec.jsonPlan, true)
+	if err <= 0 {
+		logutil.CuraLogger.Error("Explain cura failed")
+	} else {
+		plan := ""
+		for index, line := range explained {
+			if index != 0 {
+				plan = plan + "\n"
+			}
+			plan = plan + line
+		}
+		logutil.CuraLogger.Info(plan)
+	}
+
+	err = driver.Compile(f.curaExec.jsonPlan)
+	if err != 0 {
+		logutil.CuraLogger.Error("Compile cura failed")
+		f.curaExec.meetError.Store(true)
+		return
+	}
+
+	concurrency := int(f.curaExec.ctx.GetSessionVars().CuraStreamConcurrency)
+	driver.SetThreadsPerPipeline(uint64(concurrency))
+	logutil.CuraLogger.Infof("cura threads per pipeline: %v", concurrency)
+	if err != 0 {
+		logutil.CuraLogger.Info("Set cura threads per pipeline failed")
+		f.curaExec.meetError.Store(true)
+		return
+	}
+	concurrentInputSource := f.curaExec.ctx.GetSessionVars().CuraConcurrentInputSource
+	pipelineIndex := 0
+	for driver.HasNextPipeline() {
+		if driver.PreparePipeline() != 0 {
+			logutil.CuraLogger.Errorf("prepare pipeline %v failed", pipelineIndex)
+			f.curaExec.meetError.Store(true)
+			return
+		}
+		//inputRecords := make([][]*cura.InputRecord, 0)
+		final := driver.IsPipelineFinal()
+		if f.curaExec.meetError.Load() == true {
+			return
+		}
+		startTime := time.Now()
+		var pipelineSourceWG sync.WaitGroup
+		if final {
+			for driver.PipelineHasNextSource() {
+				nextSourceId := driver.PipelineNextSource()
+				pipelineSourceWG.Add(1)
+				go func(sourceId int64) {
+					defer pipelineSourceWG.Done()
+					if driver.IsHeapSource(sourceId) {
+						var res, outRecord = driver.PipelineStream(-1, sourceId, nil, 2*1024*1024)
+						if res < 0 {
+							f.curaExec.meetError.Store(true)
+							logutil.CuraLogger.Errorf("1762 pipelinestream meet error, pipeline %v, source %v", pipelineIndex, sourceId)
+							return
+						}
+						for res != 0 {
+							// send out record to tidb
+							retChk := chunk.New(f.curaExec.retFieldTypes, 0, int(outRecord.Record.NumRows()))
+							if arrowRecordToTiDBChunk(outRecord.Record, retChk, f.curaExec.selectedColumns) != nil {
+								f.curaExec.meetError.Store(true)
+								logutil.CuraLogger.Errorf("1770 pipelinestream to tidb chunk meet error, pipeline %v, source %v", pipelineIndex, sourceId)
+								return
+							} else {
+								// send out record to tidb
+								res := &curaResult{chk: retChk, err: nil}
+								f.curaExec.curaResultChan <- res
+							}
+							res, outRecord = driver.PipelineStream(-1, sourceId, nil, 2*1024*1024)
+							if res < 0 {
+								f.curaExec.meetError.Store(true)
+								logutil.CuraLogger.Errorf("1780 pipelinestream meet error, pipeline %v, source %v", pipelineIndex, sourceId)
+								return
+							}
+						}
+					} else {
+						child := f.curaExec.idToExecutors[sourceId]
+						var wg sync.WaitGroup
+						concurrency := int(f.curaExec.ctx.GetSessionVars().CuraStreamConcurrency)
+						resultChannel := make(chan *curaResult, concurrency)
+						go func() {
+							defer close(resultChannel)
+							index := 0
+							chk := newFirstChunk(child)
+							if f.curaExec.meetError.Load() == true {
+								return
+							}
+							err := Next(ctx, child, chk)
+							for err == nil && chk.NumRows() > 0 {
+								index++
+								resultChannel <- &curaResult{chk: chk, err: nil}
+								chk = newFirstChunk(child)
+								if f.curaExec.meetError.Load() == true {
+									return
+								}
+								err = Next(ctx, child, chk)
+							}
+							if err != nil {
+								resultChannel <- &curaResult{chk: nil, err: err}
+							}
+							return
+						}()
+						wg.Add(concurrency)
+						for i := 0; i < concurrency; i++ {
+							threadId := int64(i)
+							go func() {
+								pipelineStreamTime := 0
+								totalRows := 0
+								totalBytes := int64(0)
+								defer func() {
+									logutil.CuraLogger.Infof("pipeline %v source %v stream thread elapsed time: %v, rows %v, mem %v", pipelineIndex, sourceId, pipelineStreamTime, totalRows, totalBytes)
+									wg.Done()
+								}()
+								for true {
+									if f.curaExec.meetError.Load() == true {
+										return
+									}
+									select {
+									case childResult := <-resultChannel:
+										if childResult == nil {
+											return
+										}
+										if childResult.err != nil {
+											f.curaExec.meetError.Store(true)
+											logutil.CuraLogger.Errorf("1832 get child chunk error, pipelie %v, source %v", pipelineIndex, sourceId)
+											return
+										}
+										if childResult.chk.NumRows() > 0 {
+											totalRows += childResult.chk.NumRows()
+											totalBytes += childResult.chk.MemoryUsage()
+											input, err := tidbChunkToArrowRecord(childResult.chk, child.Schema())
+											if err != nil {
+												f.curaExec.meetError.Store(true)
+												logutil.CuraLogger.Errorf("1841 tidb chunk to arrow record error, pipeline %v, source %v", pipelineIndex, sourceId)
+												return
+											}
+											res, arrowOutput := driver.PipelineStream(threadId, sourceId, &input, 0)
+											pipelineStreamTime++
+											if res < 0 {
+												f.curaExec.meetError.Store(true)
+												logutil.CuraLogger.Errorf("1848 pipelinestream error, pipelie %v, source %v", pipelineIndex, sourceId)
+												return
+											}
+
+											if arrowOutput == nil || arrowOutput.Record == nil || arrowOutput.Record.NumRows() == 0 {
+												continue
+											}
+											// set cap to 0 because we convert arrowOutput to chunk using zeroCopy
+											retChk := chunk.New(f.curaExec.retFieldTypes, 0, int(arrowOutput.Record.NumRows()))
+											if arrowRecordToTiDBChunk(arrowOutput.Record, retChk, f.curaExec.selectedColumns) != nil {
+												f.curaExec.meetError.Store(true)
+												logutil.CuraLogger.Errorf("1859 pipelinestream to tidb chunk error, pipeline %v, source %v", pipelineIndex, sourceId)
+												return
+											} else {
+												// send out record to tidb
+												res := &curaResult{chk: retChk, err: nil}
+												f.curaExec.curaResultChan <- res
+											}
+										}
+									}
+								}
+							}()
+						}
+						wg.Wait()
+					}
+				}(nextSourceId)
+				if !concurrentInputSource {
+					pipelineSourceWG.Wait()
+				}
+			}
+		} else {
+			for driver.PipelineHasNextSource() {
+				nextSourceId := driver.PipelineNextSource()
+				pipelineSourceWG.Add(1)
+				go func(sourceId int64) {
+					defer pipelineSourceWG.Done()
+					if driver.IsHeapSource(sourceId) {
+						res, _ := driver.PipelinePush(-1, sourceId, nil)
+						if res < 0 {
+							f.curaExec.meetError.Store(true)
+							logutil.CuraLogger.Errorf("1885 pipeline push internal source error, pipeline %v, source %v", pipelineIndex, sourceId)
+							return
+						}
+					} else {
+						//pipelinePushTime := 0
+						startTime := time.Now()
+						//n := len(inputRecords)
+						//inputRecords = append(inputRecords, make([]*cura.InputRecord, 0))
+						child := f.curaExec.idToExecutors[sourceId]
+						var wg sync.WaitGroup
+						concurrency := int(f.curaExec.ctx.GetSessionVars().CuraStreamConcurrency)
+						resultChannel := make(chan *curaResult, concurrency)
+
+						go func() {
+							defer close(resultChannel)
+							index := 0
+							chk := newFirstChunk(child)
+							if f.curaExec.meetError.Load() == true {
+								return
+							}
+							err := Next(ctx, child, chk)
+							for err == nil && chk.NumRows() > 0 {
+								index++
+								resultChannel <- &curaResult{chk: chk, err: nil}
+								chk = newFirstChunk(child)
+								if f.curaExec.meetError.Load() == true {
+									return
+								}
+								err = Next(ctx, child, chk)
+							}
+							if err != nil {
+								resultChannel <- &curaResult{chk: nil, err: err}
+							}
+							return
+						}()
+						wg.Add(concurrency)
+
+						for i := 0; i < concurrency; i++ {
+							threadId := int64(i)
+							go func() {
+								//pipelinePushTime := 0
+								totalRows := 0
+								totalBytes := int64(0)
+								startTime2 := time.Now()
+								defer func() {
+									elapsed2 := time.Since(startTime2)
+									logutil.CuraLogger.Infof("pipeline %v source %v push thread elapsed: %v, rows: %v, mem: %v", pipelineIndex, sourceId, elapsed2, totalRows, totalBytes)
+									wg.Done()
+								}()
+								for true {
+									if f.curaExec.meetError.Load() == true {
+										return
+									}
+									select {
+									case childResult := <-resultChannel:
+										if childResult == nil {
+											return
+										}
+										if childResult.err != nil {
+											f.curaExec.meetError.Store(true)
+											logutil.CuraLogger.Errorf("1944 pipeline push get child chunk error, pipeline %v, source %v", pipelineIndex, sourceId)
+											return
+										}
+										if childResult.chk.NumRows() > 0 {
+											totalRows += childResult.chk.NumRows()
+											totalBytes += childResult.chk.MemoryUsage()
+											startTime1 := time.Now()
+											input, err := tidbChunkToArrowRecord(childResult.chk, child.Schema())
+											if err != nil {
+												f.curaExec.meetError.Store(true)
+												logutil.CuraLogger.Errorf("1954 pipeline push tidb chunk to arrow record error, pipeline %v, source %v", pipelineIndex, sourceId)
+												return
+											}
+											res, _ := driver.PipelinePush(threadId, sourceId, &input)
+											elapsed1 := time.Since(startTime1)
+											logutil.CuraLogger.Infof("pipeline %v source %v push elapsed %v, rows %v, mem %v", pipelineIndex, sourceId, elapsed1, childResult.chk.NumRows(), childResult.chk.MemoryUsage())
+											//pipelinePushTime++
+											if res < 0 {
+												f.curaExec.meetError.Store(true)
+												logutil.CuraLogger.Errorf("1963 pipeline push error, pipeline %v, source %v", pipelineIndex, sourceId)
+												return
+											}
+										}
+									}
+								}
+							}()
+						}
+						wg.Wait()
+						elapsed := time.Since(startTime)
+						logutil.CuraLogger.Infof("pipeline %v source %v push total elapsed %v", pipelineIndex, sourceId, elapsed)
+					}
+				}(nextSourceId)
+				if !concurrentInputSource {
+					pipelineSourceWG.Wait()
+				}
+			}
+		}
+		if concurrentInputSource {
+			pipelineSourceWG.Wait()
+		}
+		err = driver.FinishPipeline()
+		elapsed := time.Since(startTime)
+		logutil.CuraLogger.Infof("pipeline %v running elapsed: %v", pipelineIndex, elapsed)
+		if err != 0 {
+			f.curaExec.meetError.Store(true)
+			logutil.CuraLogger.Error("1984 finish pipeline error, pipeline %v", pipelineIndex)
+			return
+		}
+		pipelineIndex++
+	}
+}
+
+func (e *CuraExec) Open(ctx context.Context) error {
+	if err := e.baseExecutor.Open(ctx); err != nil {
+		return err
+	}
+	e.prepared = false
+	e.meetError.Store(false)
+	return nil
+}
+
+func (e *CuraExec) prepare(ctx context.Context) {
+	// todo avoid hard code
+	e.curaResultChan = make(chan *curaResult, 10)
+	e.runner = &CuraRunner{curaExec: e}
+	e.wg.Add(1)
+	go e.runner.run(ctx)
+}
+
+func (e *CuraExec) Next(ctx context.Context, req *chunk.Chunk) error {
+	req.GrowAndReset(e.maxChunkSize)
+	if !e.prepared {
+		e.prepare(ctx)
+		e.prepared = true
+	}
+	if e.meetError.Load().(bool) {
+		return errors.New("Meet error during cura exec")
+	}
+	result, ok := <-e.curaResultChan
+	if !ok || result == nil {
+		if e.meetError.Load().(bool) {
+			return errors.New("Meet error during cura exec")
+		}
+		return nil
+	}
+	if result.err != nil {
+		return errors.Trace(result.err)
+	}
+
+	req.SwapColumns(result.chk)
+	return nil
+}
+
+func (e *CuraExec) Close() error {
+	if e.prepared {
+		e.meetError.Store(true)
+		for range e.curaResultChan {
+		}
+		e.wg.Wait()
+	}
+	if e.driver != nil {
+		cura.ReleaseDriver(e.driver)
+		e.driver = nil
+	}
+	return e.baseExecutor.Close()
 }
 
 // ResetContextOfStmt resets the StmtContext and session variables.

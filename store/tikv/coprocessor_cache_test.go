@@ -77,7 +77,7 @@ func (s *testCoprocessorSuite) TestDisable(c *C) {
 	c.Assert(err, IsNil)
 	c.Assert(cache, IsNil)
 
-	v := cache.Set([]byte("foo"), &coprCacheValue{})
+	v := cache.Set([]byte("foo"), &coprCacheValue{}, "")
 	c.Assert(v, Equals, false)
 
 	v2 := cache.Get([]byte("foo"))
@@ -186,7 +186,7 @@ func (s *testCoprocessorSuite) TestGetSet(c *C) {
 		TimeStamp:         0x123,
 		RegionID:          0x1,
 		RegionDataVersion: 0x3,
-	})
+	}, "")
 	c.Assert(v2, Equals, true)
 
 	// See https://github.com/dgraph-io/ristretto/blob/83508260cb49a2c3261c2774c991870fd18b5a1b/cache_test.go#L13

@@ -61,7 +61,7 @@ func CopySelectedJoinRowsDirect(src *Chunk, selected []bool, dst *Chunk) (bool, 
 
 				start, end := srcCol.offsets[i], srcCol.offsets[i+1]
 				dstCol.data = append(dstCol.data, srcCol.data[start:end]...)
-				dstCol.offsets = append(dstCol.offsets, int64(len(dstCol.data)))
+				dstCol.offsets = append(dstCol.offsets, int32(len(dstCol.data)))
 			}
 		}
 	}
@@ -128,7 +128,7 @@ func copySelectedInnerRows(innerColOffset, innerColLen int, src *Chunk, selected
 
 				start, end := srcCol.offsets[i], srcCol.offsets[i+1]
 				dstCol.data = append(dstCol.data, srcCol.data[start:end]...)
-				dstCol.offsets = append(dstCol.offsets, int64(len(dstCol.data)))
+				dstCol.offsets = append(dstCol.offsets, int32(len(dstCol.data)))
 			}
 		}
 	}

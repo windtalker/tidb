@@ -56,12 +56,27 @@ func (c *Column) AppendSet(set types.Set) {
 	c.appendNameValue(set.Name, set.Value)
 }
 
+// GetNullBitMap appends a Set value into this Column.
+func (c *Column) GetNullBitMap() []byte {
+	return c.nullBitmap
+}
+
+// GetRawData appends a Set value into this Column.
+func (c *Column) GetRawData() []byte {
+	return c.data
+}
+
+// GetOffsets appends a Set value into this Column.
+func (c *Column) GetOffsets() []int32 {
+	return c.offsets
+}
+
 // Column stores one column of data in Apache Arrow format.
 // See https://arrow.apache.org/docs/memory_layout.html
 type Column struct {
 	length     int
 	nullBitmap []byte // bit 0 is null, 1 is not null
-	offsets    []int64
+	offsets    []int32
 	data       []byte
 	elemBuf    []byte
 }
@@ -69,6 +84,17 @@ type Column struct {
 // NewColumn creates a new column with the specific length and capacity.
 func NewColumn(ft *types.FieldType, cap int) *Column {
 	return newColumn(getFixedLen(ft), cap)
+}
+
+// NewColumnZeroCopy creates a new column with the specific length and capacity.
+func NewColumnZeroCopy(length int, nullBitMap []byte, offsets []int32, data, elemBuf []byte) *Column {
+	return &Column{
+		length:     length,
+		nullBitmap: nullBitMap,
+		offsets:    offsets,
+		data:       data,
+		elemBuf:    elemBuf,
+	}
 }
 
 func newColumn(typeSize, cap int) *Column {
@@ -128,6 +154,9 @@ func (c *Column) reset() {
 
 // IsNull returns if this row is null.
 func (c *Column) IsNull(rowIdx int) bool {
+	if c.nullBitmap == nil {
+		return false
+	}
 	nullByte := c.nullBitmap[rowIdx/8]
 	return nullByte&(1<<(uint(rowIdx)&7)) == 0
 }
@@ -230,7 +259,7 @@ func (c *Column) AppendFloat64(f float64) {
 
 func (c *Column) finishAppendVar() {
 	c.appendNullBitmap(true)
-	c.offsets = append(c.offsets, int64(len(c.data)))
+	c.offsets = append(c.offsets, int32(len(c.data)))
 	c.length++
 }
 
@@ -333,7 +362,7 @@ func (c *Column) reserve(n, estElemSize int) {
 	if cap(c.offsets) >= sizeOffs {
 		c.offsets = c.offsets[:1]
 	} else {
-		c.offsets = make([]int64, 1, sizeOffs)
+		c.offsets = make([]int32, 1, sizeOffs)
 	}
 
 	c.elemBuf = nil
@@ -617,12 +646,12 @@ func (c *Column) reconstruct(sel []int) {
 			pos := uint(dst & 7)
 			if c.IsNull(src) {
 				c.nullBitmap[idx] &= ^byte(1 << pos)
-				c.offsets[dst+1] = int64(tail)
+				c.offsets[dst+1] = int32(tail)
 			} else {
 				start, end := c.offsets[src], c.offsets[src+1]
 				copy(c.data[tail:], c.data[start:end])
 				tail += int(end - start)
-				c.offsets[dst+1] = int64(tail)
+				c.offsets[dst+1] = int32(tail)
 				c.nullBitmap[idx] |= byte(1 << pos)
 			}
 		}
@@ -685,7 +714,7 @@ func (c *Column) CopyReconstruct(sel []int, dst *Column) *Column {
 			dst.appendNullBitmap(!c.IsNull(i))
 			start, end := c.offsets[i], c.offsets[i+1]
 			dst.data = append(dst.data, c.data[start:end]...)
-			dst.offsets = append(dst.offsets, int64(len(dst.data)))
+			dst.offsets = append(dst.offsets, int32(len(dst.data)))
 			dst.length++
 		}
 	}

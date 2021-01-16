@@ -4,6 +4,7 @@ require (
 	github.com/BurntSushi/toml v0.3.1
 	github.com/HdrHistogram/hdrhistogram-go v0.9.0 // indirect
 	github.com/Jeffail/gabs/v2 v2.5.1
+	github.com/apache/arrow/go/arrow v0.0.0-20200924222040-cadaaa94528c
 	github.com/blacktear23/go-proxyprotocol v0.0.0-20180807104634-af7a81e8dd0d
 	github.com/cheggaaa/pb/v3 v3.0.4 // indirect
 	github.com/codahale/hdrhistogram v0.9.0 // indirect
@@ -63,6 +64,7 @@ require (
 	github.com/uber-go/atomic v1.4.0
 	github.com/uber/jaeger-client-go v2.22.1+incompatible
 	github.com/uber/jaeger-lib v2.4.0+incompatible // indirect
+	github.com/zanmato1984/cura/go/cura v0.0.0-20210113124056-3d1f7c694ff7
 	github.com/zhangjinpeng1987/raft v0.0.0-20200819064223-df31bb68a018 // indirect
 	go.etcd.io/etcd v0.5.0-alpha.5.0.20200824191128-ae9734ed278b
 	go.uber.org/atomic v1.7.0

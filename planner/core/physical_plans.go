@@ -14,11 +14,14 @@
 package core
 
 import (
+	"strconv"
+	"strings"
 	"unsafe"
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/parser/ast"
 	"github.com/pingcap/parser/model"
+	"github.com/pingcap/parser/mysql"
 	"github.com/pingcap/tidb/expression"
 	"github.com/pingcap/tidb/expression/aggregation"
 	"github.com/pingcap/tidb/kv"
@@ -585,6 +588,24 @@ func (p *PhysicalProjection) ExtractCorrelatedCols() []*expression.CorrelatedCol
 	return corCols
 }
 
+// ToCuraJson implements PhysicalPlan interface.
+func (p *PhysicalProjection) ToCuraJson(jsonPlan []byte) ([]byte, error) {
+	jsonPlan = append(jsonPlan, []byte("{\"rel_op\": \"Project\", \"exprs\": ")...)
+	var err error = nil
+	if len(p.Exprs) == 1 {
+		jsonPlan = append(jsonPlan, '[')
+	}
+	jsonPlan, err = ExprsToCuraJson(p.Exprs, jsonPlan)
+	if len(p.Exprs) == 1 {
+		jsonPlan = append(jsonPlan, ']')
+	}
+	if err != nil {
+		return jsonPlan, err
+	}
+	jsonPlan = append(jsonPlan, '}')
+	return jsonPlan, nil
+}
+
 // PhysicalTopN is the physical operator of topN.
 type PhysicalTopN struct {
 	basePhysicalPlan
@@ -617,6 +638,34 @@ func (lt *PhysicalTopN) ExtractCorrelatedCols() []*expression.CorrelatedColumn {
 		corCols = append(corCols, expression.ExtractCorColumns(item.Expr)...)
 	}
 	return corCols
+}
+
+func (lt *PhysicalTopN) ToCuraJson(jsonPlan []byte) ([]byte, error) {
+	jsonPlan = append(jsonPlan, []byte("{\"rel_op\": \"Sort\", \"sort_infos\": [")...)
+	var err error = nil
+	for idx, o := range lt.ByItems {
+		if idx != 0 {
+			jsonPlan = append(jsonPlan, ',')
+		}
+		jsonPlan = append(jsonPlan, []byte("{\"expr\": ")...)
+		jsonPlan, err = ExprToCuraJson(o.Expr, jsonPlan)
+		if err != nil {
+			return nil, err
+		}
+		jsonPlan = append(jsonPlan, []byte(", \"order\": ")...)
+		if o.Desc {
+			jsonPlan = append(jsonPlan, []byte("\"DESC\", \"null_order\": \"NULLS_FIRST\"}")...)
+		} else {
+			jsonPlan = append(jsonPlan, []byte("\"ASC\", \"null_order\": \"NULLS_FIRST\"}")...)
+		}
+	}
+	jsonPlan = append(jsonPlan, []byte("]}, ")...)
+	jsonPlan = append(jsonPlan, []byte("{\"rel_op\": \"Limit\", \"n\": ")...)
+	jsonPlan = append(jsonPlan, []byte(strconv.FormatUint(lt.Count, 10))...)
+	jsonPlan = append(jsonPlan, []byte(", \"offset\": ")...)
+	jsonPlan = append(jsonPlan, []byte(strconv.FormatUint(lt.Offset, 10))...)
+	jsonPlan = append(jsonPlan, []byte("}")...)
+	return jsonPlan, nil
 }
 
 // PhysicalApply represents apply plan, only used for subquery.
@@ -740,6 +789,386 @@ func (p *PhysicalHashJoin) Clone() (PhysicalPlan, error) {
 		cloned.EqualConditions = append(cloned.EqualConditions, c.Clone().(*expression.ScalarFunction))
 	}
 	return cloned, nil
+}
+
+func TypesToCuraJson(types []*types.FieldType, jsonPlan []byte) ([]byte, error) {
+	if len(types) == 1 {
+		return TypeToCuraJson(types[0], jsonPlan)
+	}
+	var err error = nil
+	jsonPlan = append(jsonPlan, '[')
+	for idx, t := range types {
+		if idx != 0 {
+			jsonPlan = append(jsonPlan, ',')
+		}
+		jsonPlan, err = TypeToCuraJson(t, jsonPlan)
+		if err != nil {
+			return jsonPlan, err
+		}
+	}
+	jsonPlan = append(jsonPlan, ']')
+	return jsonPlan, nil
+}
+
+func TypeToCuraJson(t *types.FieldType, jsonPlan []byte) ([]byte, error) {
+	jsonPlan = append(jsonPlan, []byte("{\"type\": ")...)
+	switch t.Tp {
+	case mysql.TypeLong, mysql.TypeLonglong:
+		if t.Flag&mysql.UnsignedFlag == mysql.UnsignedFlag {
+			jsonPlan = append(jsonPlan, []byte("\"UINT64\"")...)
+		} else {
+			jsonPlan = append(jsonPlan, []byte("\"INT64\"")...)
+		}
+	case mysql.TypeString, mysql.TypeVarchar:
+		jsonPlan = append(jsonPlan, []byte("\"STRING\"")...)
+	case mysql.TypeFloat, mysql.TypeDouble:
+		jsonPlan = append(jsonPlan, []byte("\"FLOAT64\"")...)
+	case mysql.TypeDate, mysql.TypeDatetime, mysql.TypeTimestamp:
+		jsonPlan = append(jsonPlan, []byte("\"INT64\"")...)
+	default:
+		return jsonPlan, errors.New("Type not supported by Cura")
+	}
+	jsonPlan = append(jsonPlan, []byte(", \"nullable\": ")...)
+	if t.Flag&mysql.NotNullFlag == mysql.NotNullFlag {
+		jsonPlan = append(jsonPlan, []byte("false")...)
+	} else {
+		jsonPlan = append(jsonPlan, []byte("true")...)
+	}
+	jsonPlan = append(jsonPlan, []byte("}")...)
+	return jsonPlan, nil
+}
+
+func ExprsToCuraJson(exprs expression.CNFExprs, jsonPlan []byte) ([]byte, error) {
+	if len(exprs) == 1 {
+		return ExprToCuraJson(exprs[0], jsonPlan)
+	}
+	var err error = nil
+	jsonPlan = append(jsonPlan, '[')
+	for idx, expr := range exprs {
+		if idx != 0 {
+			jsonPlan = append(jsonPlan, ',')
+		}
+		jsonPlan, err = ExprToCuraJson(expr, jsonPlan)
+		if err != nil {
+			return jsonPlan, err
+		}
+	}
+	jsonPlan = append(jsonPlan, ']')
+	return jsonPlan, nil
+}
+
+func ExprToCuraJson(expr expression.Expression, jsonPlan []byte) ([]byte, error) {
+	return ExprToCuraJsonInternal(expr, jsonPlan, false)
+}
+func ExprToCuraJsonInternal(expr expression.Expression, jsonPlan []byte, forSelection bool) ([]byte, error) {
+	jsonPlan = append(jsonPlan, '{')
+	var err error = nil
+	returnBool := false
+	switch x := expr.(type) {
+	case *expression.ScalarFunction:
+		if len(x.GetArgs()) == 1 {
+			return jsonPlan, errors.New("Cura not supported expr")
+		} else if len(x.GetArgs()) == 2 {
+			if x.FuncName.L == "extract" {
+				firstArg := x.GetArgs()[0]
+				if constColumn, ok := firstArg.(*expression.Constant); ok {
+					if constColumn.Value.GetString() == "YEAR" {
+						jsonPlan = append(jsonPlan, []byte("\"ti_unary_op\": \"EXTRACT_YEAR\"")...)
+						jsonPlan = append(jsonPlan, []byte(", \"operands\": [")...)
+						jsonPlan, err = ExprToCuraJson(x.GetArgs()[1], jsonPlan)
+						if err != nil {
+							return nil, err
+						}
+						jsonPlan = append(jsonPlan, []byte("], \"type\": ")...)
+						jsonPlan, err = TypeToCuraJson(x.RetType, jsonPlan)
+						if err != nil {
+							return nil, err
+						}
+						jsonPlan = append(jsonPlan, '}')
+						return jsonPlan, nil
+					}
+				}
+			}
+			jsonPlan = append(jsonPlan, []byte("\"binary_op\": ")...)
+			name := x.FuncName
+			switch strings.ToLower(name.L) {
+			case "+":
+				jsonPlan = append(jsonPlan, []byte("\"ADD\"")...)
+			case "-", "minus":
+				jsonPlan = append(jsonPlan, []byte("\"SUB\"")...)
+			case "*", "mul":
+				jsonPlan = append(jsonPlan, []byte("\"MUL\"")...)
+			case "/", "div":
+				jsonPlan = append(jsonPlan, []byte("\"DIV\"")...)
+			case "=":
+				jsonPlan = append(jsonPlan, []byte("\"EQUAL\"")...)
+				if forSelection {
+					returnBool = true
+				}
+			case "!=":
+				jsonPlan = append(jsonPlan, []byte("\"NOT_EQUAL\"")...)
+				if forSelection {
+					returnBool = true
+				}
+			case "<", "lt":
+				jsonPlan = append(jsonPlan, []byte("\"LESS\"")...)
+				if forSelection {
+					returnBool = true
+				}
+			case ">", "gt":
+				jsonPlan = append(jsonPlan, []byte("\"GREATER\"")...)
+				if forSelection {
+					returnBool = true
+				}
+			case "<=", "le":
+				jsonPlan = append(jsonPlan, []byte("\"LESS_EQUAL\"")...)
+				if forSelection {
+					returnBool = true
+				}
+			case ">=", "ge":
+				jsonPlan = append(jsonPlan, []byte("\"CREATER_EQUAL\"")...)
+				if forSelection {
+					returnBool = true
+				}
+			case "%":
+				jsonPlan = append(jsonPlan, []byte("\"PMOD\"")...)
+			case "and":
+				jsonPlan = append(jsonPlan, []byte("\"LOGICAL_AND\"")...)
+				if forSelection {
+					returnBool = true
+				}
+			case "or":
+				jsonPlan = append(jsonPlan, []byte("\"LOGICAL_OR\"")...)
+				if forSelection {
+					returnBool = true
+				}
+			default:
+				return jsonPlan, errors.New("Cura not supported expr")
+			}
+			jsonPlan = append(jsonPlan, []byte(", \"operands\": ")...)
+			jsonPlan, err = ExprsToCuraJson(x.GetArgs(), jsonPlan)
+			if err != nil {
+				return jsonPlan, err
+			}
+			jsonPlan = append(jsonPlan, []byte(", \"type\": ")...)
+			if returnBool {
+				jsonPlan = append(jsonPlan, []byte("{\"type\": ")...)
+				jsonPlan = append(jsonPlan, []byte("\"BOOL8\"")...)
+				jsonPlan = append(jsonPlan, []byte(", \"nullable\": ")...)
+				if x.RetType.Flag&mysql.NotNullFlag == mysql.NotNullFlag {
+					jsonPlan = append(jsonPlan, []byte("false")...)
+				} else {
+					jsonPlan = append(jsonPlan, []byte("true")...)
+				}
+				jsonPlan = append(jsonPlan, []byte("}}")...)
+			} else {
+				jsonPlan, err = TypeToCuraJson(x.RetType, jsonPlan)
+				if err != nil {
+					return jsonPlan, err
+				}
+				jsonPlan = append(jsonPlan, '}')
+			}
+			return jsonPlan, nil
+		} else {
+			return jsonPlan, errors.New("Cura not supported expr")
+		}
+	case *expression.Column:
+		jsonPlan = append(jsonPlan, []byte("\"col_ref\": ")...)
+		jsonPlan = append(jsonPlan, []byte(strconv.Itoa(x.Index))...)
+	case *expression.Constant:
+		jsonPlan = append(jsonPlan, []byte("\"type\":")...)
+		switch x.RetType.Tp {
+		case mysql.TypeLonglong:
+			jsonPlan = append(jsonPlan, []byte("\"INT64\", \"literal\": ")...)
+			jsonPlan = append(jsonPlan, []byte(strconv.FormatInt(x.Value.GetInt64(), 10))...)
+		case mysql.TypeDouble, mysql.TypeFloat:
+			jsonPlan = append(jsonPlan, []byte("\"FLOAT64\", \"literal\": ")...)
+			jsonPlan = append(jsonPlan, []byte(strconv.FormatFloat(x.Value.GetFloat64(), 'f', -1, 64))...)
+		case mysql.TypeString:
+			jsonPlan = append(jsonPlan, []byte("\"STRING\", \"literal\": ")...)
+			jsonPlan = append(jsonPlan, []byte(x.Value.GetString())...)
+		default:
+			return jsonPlan, errors.New("Cura not supported expr")
+		}
+	default:
+		return jsonPlan, errors.New("Cura not supported expr")
+	}
+	jsonPlan = append(jsonPlan, '}')
+	return jsonPlan, nil
+}
+
+func joinEqualConditionToCuraJson(leftKey *expression.Column, rightKey *expression.Column, leftOffset int, jsonPlan []byte) ([]byte, bool, error) {
+	jsonPlan = append(jsonPlan, []byte("{\"binary_op\": \"EQUAL\", \"operands\": ")...)
+	operands := make([]expression.Expression, 2, 2)
+	operands[0] = leftKey
+	operands[1] = rightKey
+	var err error = nil
+
+	jsonPlan = append(jsonPlan, '[')
+	jsonPlan, err = ExprToCuraJson(leftKey, jsonPlan)
+	if err != nil {
+		return jsonPlan, false, err
+	}
+	jsonPlan = append(jsonPlan, ',')
+	jsonPlan = append(jsonPlan, '{')
+	jsonPlan = append(jsonPlan, []byte("\"col_ref\": ")...)
+	jsonPlan = append(jsonPlan, []byte(strconv.Itoa(rightKey.Index+leftOffset))...)
+	jsonPlan = append(jsonPlan, '}')
+	jsonPlan = append(jsonPlan, ']')
+
+	jsonPlan = append(jsonPlan, []byte(", \"type\": ")...)
+	jsonPlan = append(jsonPlan, []byte("{\"type\": ")...)
+	jsonPlan = append(jsonPlan, []byte("\"INT64\"")...)
+	jsonPlan = append(jsonPlan, []byte(", \"nullable\": ")...)
+	var nullable bool = false
+	if leftKey.RetType.Flag&mysql.NotNullFlag == mysql.NotNullFlag && rightKey.RetType.Flag&mysql.NotNullFlag == mysql.NotNullFlag {
+		jsonPlan = append(jsonPlan, []byte("false")...)
+		nullable = false
+	} else {
+		jsonPlan = append(jsonPlan, []byte("true")...)
+		nullable = true
+	}
+	jsonPlan = append(jsonPlan, []byte("}}")...)
+	return jsonPlan, nullable, nil
+}
+
+func joinEqualConditionsToCuraJson(leftKeys []*expression.Column, rightKeys []*expression.Column, index, leftOffset int, jsonPlan []byte) ([]byte, bool, error) {
+	var err error = nil
+	var nullable bool = false
+	if index == len(rightKeys)-2 {
+		// last one
+		jsonPlan = append(jsonPlan, []byte("{\"binary_op\": \"LOGICAL_AND\", \"operands\": [")...)
+		var leftNullable bool = false
+		var rightNullable bool = false
+		jsonPlan, leftNullable, err = joinEqualConditionToCuraJson(leftKeys[index], rightKeys[index], leftOffset, jsonPlan)
+		if err != nil {
+			return jsonPlan, false, err
+		}
+		jsonPlan = append(jsonPlan, ',')
+		jsonPlan, rightNullable, err = joinEqualConditionToCuraJson(leftKeys[index+1], rightKeys[index+1], leftOffset, jsonPlan)
+		if err != nil {
+			return jsonPlan, false, err
+		}
+		jsonPlan = append(jsonPlan, []byte("], \"type\": {\"type\": \"INT64\", \"nullable\": ")...)
+		if leftNullable || rightNullable {
+			jsonPlan = append(jsonPlan, []byte("false")...)
+			nullable = false
+		} else {
+			jsonPlan = append(jsonPlan, []byte("true")...)
+			nullable = true
+		}
+		jsonPlan = append(jsonPlan, []byte("}}")...)
+	} else {
+		jsonPlan = append(jsonPlan, []byte("{\"binary_op\": \"LOGICAL_AND\", \"operands\": [")...)
+		var leftNullable bool = false
+		var rightNullable bool = false
+		jsonPlan, leftNullable, err = joinEqualConditionToCuraJson(leftKeys[index], rightKeys[index], leftOffset, jsonPlan)
+		if err != nil {
+			return jsonPlan, false, err
+		}
+		jsonPlan = append(jsonPlan, ',')
+		jsonPlan, rightNullable, err = joinEqualConditionsToCuraJson(leftKeys, rightKeys, index+1, leftOffset, jsonPlan)
+		if err != nil {
+			return jsonPlan, false, err
+		}
+		jsonPlan = append(jsonPlan, []byte("], \"type\": {\"type\": \"INT64\", \"nullable\": ")...)
+		if leftNullable || rightNullable {
+			jsonPlan = append(jsonPlan, []byte("false")...)
+			nullable = false
+		} else {
+			jsonPlan = append(jsonPlan, []byte("true")...)
+			nullable = true
+		}
+		jsonPlan = append(jsonPlan, []byte("}}")...)
+	}
+	return jsonPlan, nullable, nil
+}
+
+func (p *PhysicalHashJoin) ToCuraJson(jsonPlan []byte) ([]byte, error) {
+	if p.JoinType != InnerJoin {
+		return nil, errors.New("Cura not supported join")
+	}
+	if len(p.LeftConditions) > 0 || len(p.RightConditions) > 0 {
+		return nil, errors.New("Cura not supported join")
+	}
+	jsonPlan = append(jsonPlan, []byte("{\"rel_op\": \"HashJoin\",\"type\": \"INNER\", \"condition\":")...)
+	var err error = nil
+	if len(p.LeftJoinKeys) == 1 {
+		jsonPlan, _, err = joinEqualConditionToCuraJson(p.LeftJoinKeys[0], p.RightJoinKeys[0], len(p.children[0].Schema().Columns), jsonPlan)
+		if err != nil {
+			return jsonPlan, err
+		}
+	} else {
+		jsonPlan, _, err = joinEqualConditionsToCuraJson(p.LeftJoinKeys, p.RightJoinKeys, 0, len(p.children[0].Schema().Columns), jsonPlan)
+		if err != nil {
+			return jsonPlan, err
+		}
+	}
+	if p.JoinType == InnerJoin {
+		if p.InnerChildIdx == 0 {
+			jsonPlan = append(jsonPlan, []byte(",\"build_side\": \"LEFT\"")...)
+		} else {
+			jsonPlan = append(jsonPlan, []byte(",\"build_side\": \"RIGHT\"")...)
+		}
+	}
+	jsonPlan = append(jsonPlan, '}')
+	if p.JoinType == InnerJoin && len(p.OtherConditions) > 0 {
+		// convert join other conditions to filter(only inner join support this)
+		jsonPlan = append(jsonPlan, []byte(", {\"rel_op\": \"Filter\", \"condition\": ")...)
+		var err error = nil
+		if len(p.OtherConditions) == 1 {
+			jsonPlan, err = ExprToCuraJsonInternal(p.OtherConditions[0], jsonPlan, true)
+			if err != nil {
+				return nil, err
+			}
+		} else {
+			jsonPlan, _, err = selectionConditionsToJsonPlan(p.OtherConditions, 0, jsonPlan)
+			if err != nil {
+				return nil, err
+			}
+		}
+		jsonPlan = append(jsonPlan, '}')
+	}
+	if len(p.schema.Columns) != len(p.children[0].Schema().Columns)+len(p.children[1].Schema().Columns) {
+		// need to add extra projection
+		jsonPlan = append(jsonPlan, []byte(", {\"rel_op\": \"Project\", \"exprs\": [")...)
+		for i, col := range p.schema.Columns {
+			index := 0
+			found := false
+			for idx, leftCol := range p.children[0].Schema().Columns {
+				if leftCol.UniqueID == col.UniqueID {
+					found = true
+					index = index + idx
+				}
+			}
+			if !found {
+				index = len(p.children[0].Schema().Columns)
+				for idx, rightCol := range p.children[1].Schema().Columns {
+					if rightCol.UniqueID == col.UniqueID {
+						found = true
+						index = index + idx
+					}
+				}
+			}
+			if !found {
+				return nil, errors.New("Could not found join output column from input columns")
+			}
+			if i != 0 {
+				jsonPlan = append(jsonPlan, ',')
+			}
+			jsonPlan = append(jsonPlan, []byte("{\"col_ref\": ")...)
+			jsonPlan = append(jsonPlan, []byte(strconv.Itoa(index))...)
+			jsonPlan = append(jsonPlan, '}')
+		}
+		if len(p.schema.Columns) == 0 {
+			// make at least one column is selected
+			jsonPlan = append(jsonPlan, []byte("{\"col_ref\": ")...)
+			jsonPlan = append(jsonPlan, []byte(strconv.Itoa(0))...)
+			jsonPlan = append(jsonPlan, '}')
+		}
+		jsonPlan = append(jsonPlan, []byte("]}")...)
+	}
+	return jsonPlan, nil
 }
 
 // ExtractCorrelatedCols implements PhysicalPlan interface.
@@ -910,6 +1339,15 @@ func (p *PhysicalLimit) Clone() (PhysicalPlan, error) {
 	return cloned, nil
 }
 
+func (p *PhysicalLimit) ToCuraJson(jsonPlan []byte) ([]byte, error) {
+	jsonPlan = append(jsonPlan, []byte("{\"rel_op\": \"Limit\", \"n\": ")...)
+	jsonPlan = append(jsonPlan, []byte(strconv.FormatUint(p.Count, 10))...)
+	jsonPlan = append(jsonPlan, []byte(", \"offset\": ")...)
+	jsonPlan = append(jsonPlan, []byte(strconv.FormatUint(p.Offset, 10))...)
+	jsonPlan = append(jsonPlan, []byte("}")...)
+	return jsonPlan, nil
+}
+
 // PhysicalUnionAll is the physical operator of UnionAll.
 type PhysicalUnionAll struct {
 	physicalSchemaProducer
@@ -990,6 +1428,284 @@ func (p *PhysicalHashAgg) Clone() (PhysicalPlan, error) {
 	return cloned, nil
 }
 
+func (p *PhysicalHashAgg) ToCuraJson(jsonPlan []byte) ([]byte, error) {
+	var err error = nil
+	hasConstantColumnInAggFunc := false
+	for _, agg := range p.AggFuncs {
+		for _, expr := range agg.Args {
+			if _, isConst := expr.(*expression.Constant); isConst {
+				if strings.ToLower(agg.Name) != "count" {
+					return nil, errors.New("const args for non-count agg func")
+				}
+				hasConstantColumnInAggFunc = true
+				break
+			}
+		}
+	}
+	constColumnIndex := -1
+	if hasConstantColumnInAggFunc {
+		for idx, col := range p.children[0].Schema().Columns {
+			if col.RetType.Flag&mysql.NotNullFlag == mysql.NotNullFlag {
+				constColumnIndex = idx
+				break
+			}
+		}
+	}
+	if constColumnIndex == -1 && hasConstantColumnInAggFunc {
+		// add extra project
+		jsonPlan = append(jsonPlan, []byte("{\"rel_op\": \"Project\", \"exprs\": [")...)
+		for i := range p.children[0].Schema().Columns {
+			if i != 0 {
+				jsonPlan = append(jsonPlan, ',')
+			}
+			jsonPlan = append(jsonPlan, []byte("{\"col_ref\": ")...)
+			jsonPlan = append(jsonPlan, []byte(strconv.Itoa(i))...)
+			jsonPlan = append(jsonPlan, '}')
+		}
+		if len(p.children[0].Schema().Columns) > 0 {
+			jsonPlan = append(jsonPlan, ',')
+		}
+		jsonPlan = append(jsonPlan, []byte("{\"type\": \"UINT64\", \"literal\": ")...)
+		jsonPlan = append(jsonPlan, []byte(strconv.Itoa(42))...)
+		jsonPlan = append(jsonPlan, '}')
+		jsonPlan = append(jsonPlan, []byte("]}, ")...)
+		constColumnIndex = len(p.children[0].Schema().Columns)
+	}
+	jsonPlan = append(jsonPlan, []byte("{\"rel_op\": \"Aggregate\", \"groups\": ")...)
+	if len(p.GroupByItems) == 0 {
+		jsonPlan = append(jsonPlan, []byte("[]")...)
+	} else if len(p.GroupByItems) == 1 {
+		jsonPlan = append(jsonPlan, '[')
+		jsonPlan, err = ExprToCuraJson(p.GroupByItems[0], jsonPlan)
+		jsonPlan = append(jsonPlan, ']')
+	} else {
+		jsonPlan, err = ExprsToCuraJson(p.GroupByItems, jsonPlan)
+	}
+	if err != nil {
+		return jsonPlan, err
+	}
+	skipFirstRowAgg := true
+	aggFuncNum := len(p.AggFuncs) - len(p.GroupByItems)
+	for i := 0; i < len(p.GroupByItems); i++ {
+		origAggFunc := p.AggFuncs[i+aggFuncNum]
+		if strings.ToLower(origAggFunc.Name) != "firstrow" {
+			skipFirstRowAgg = false
+			break
+		}
+		foundGbCol := false
+		if col, ok := origAggFunc.Args[0].(*expression.Column); ok {
+			for _, gbExpr := range p.GroupByItems {
+				if gbCol, gbOk := gbExpr.(*expression.Column); gbOk {
+					if gbCol.Index == col.Index {
+						foundGbCol = true
+					}
+				}
+			}
+		}
+		if !foundGbCol {
+			skipFirstRowAgg = false
+		}
+	}
+	agg_func_idx := 0
+	jsonPlan = append(jsonPlan, []byte(", \"aggs\":[")...)
+	for _, agg := range p.AggFuncs {
+		if skipFirstRowAgg && strings.ToLower(agg.Name) == "firstrow" {
+			continue
+		}
+		if agg_func_idx != 0 {
+			jsonPlan = append(jsonPlan, ',')
+		}
+		curaFunName := ""
+		jsonPlan = append(jsonPlan, []byte("{\"agg\":")...)
+		switch strings.ToLower(agg.Name) {
+		case "count":
+			if agg.HasDistinct {
+				jsonPlan = append(jsonPlan, []byte("\"NUNIQUE\", \"operands\":")...)
+			} else {
+				if agg.Mode == aggregation.CompleteMode {
+					jsonPlan = append(jsonPlan, []byte("\"COUNT_VALID\", \"operands\":")...)
+				} else if agg.Mode == aggregation.FinalMode {
+					jsonPlan = append(jsonPlan, []byte("\"SUM\", \"operands\":")...)
+				} else {
+					return jsonPlan, errors.New("unsupported aggregation mode")
+				}
+			}
+			if len(agg.Args) == 1 {
+				jsonPlan = append(jsonPlan, '[')
+				if _, isConst := agg.Args[0].(*expression.Constant); isConst {
+					jsonPlan = append(jsonPlan, []byte("{\"col_ref\": ")...)
+					jsonPlan = append(jsonPlan, []byte(strconv.Itoa(constColumnIndex))...)
+					jsonPlan = append(jsonPlan, '}')
+				} else {
+					jsonPlan, err = ExprToCuraJson(agg.Args[0], jsonPlan)
+				}
+				jsonPlan = append(jsonPlan, ']')
+			} else {
+				jsonPlan, err = ExprsToCuraJson(agg.Args, jsonPlan)
+			}
+			if err != nil {
+				return jsonPlan, err
+			}
+			jsonPlan = append(jsonPlan, []byte(",\"type\":")...)
+			jsonPlan, err = TypeToCuraJson(agg.RetTp, jsonPlan)
+		case "firstrow":
+			if len(agg.Args) > 1 {
+				return jsonPlan, errors.New("first row only support 1 arg")
+			}
+			if agg.HasDistinct {
+				return jsonPlan, errors.New("agg with distinct not supported")
+			}
+			jsonPlan = append(jsonPlan, []byte("\"NTH_ELEMENT\", \"operands\":")...)
+			jsonPlan = append(jsonPlan, '[')
+			jsonPlan, err = ExprToCuraJson(agg.Args[0], jsonPlan)
+			if err != nil {
+				return jsonPlan, err
+			}
+			jsonPlan = append(jsonPlan, ']')
+			jsonPlan = append(jsonPlan, []byte(",\"n\": 0")...)
+			jsonPlan = append(jsonPlan, []byte(",\"type\":")...)
+			jsonPlan, err = TypeToCuraJson(agg.RetTp, jsonPlan)
+		case "avg":
+			// avg is very special, if current agg is final agg, then need to rewrite is to sum and count
+			// otherwise, push avg to cura is ok
+			if agg.HasDistinct {
+				return jsonPlan, errors.New("agg with distinct not supported")
+			}
+			if agg.Mode == aggregation.FinalMode {
+				jsonPlan = append(jsonPlan, []byte("\"SUM\", \"operands\":")...)
+				jsonPlan = append(jsonPlan, '[')
+				jsonPlan, err = ExprToCuraJson(agg.Args[0], jsonPlan)
+				if err != nil {
+					return jsonPlan, err
+				}
+				jsonPlan = append(jsonPlan, ']')
+				jsonPlan = append(jsonPlan, []byte(",\"type\":")...)
+				jsonPlan, err = TypeToCuraJson(agg.Args[0].GetType(), jsonPlan)
+				jsonPlan = append(jsonPlan, []byte("},")...)
+				jsonPlan = append(jsonPlan, []byte("{\"agg\":")...)
+				jsonPlan = append(jsonPlan, []byte("\"SUM\", \"operands\":")...)
+				jsonPlan = append(jsonPlan, '[')
+				jsonPlan, err = ExprToCuraJson(agg.Args[1], jsonPlan)
+				if err != nil {
+					return jsonPlan, err
+				}
+				jsonPlan = append(jsonPlan, ']')
+				jsonPlan = append(jsonPlan, []byte(",\"type\":")...)
+				jsonPlan, err = TypeToCuraJson(agg.Args[0].GetType(), jsonPlan)
+			} else if agg.Mode == aggregation.CompleteMode {
+				jsonPlan = append(jsonPlan, []byte("\"MEAN\", \"operands\":")...)
+				jsonPlan = append(jsonPlan, '[')
+				jsonPlan, err = ExprToCuraJson(agg.Args[0], jsonPlan)
+				if err != nil {
+					return jsonPlan, err
+				}
+				jsonPlan = append(jsonPlan, ']')
+				jsonPlan = append(jsonPlan, []byte(",\"type\":")...)
+				jsonPlan, err = TypeToCuraJson(agg.RetTp, jsonPlan)
+			} else {
+				return jsonPlan, errors.New("un-supported agg mode")
+			}
+		case "sum":
+			curaFunName = "SUM"
+			fallthrough
+		case "min":
+			if len(curaFunName) == 0 {
+				curaFunName = "MIN"
+			}
+			fallthrough
+		case "max":
+			if len(curaFunName) == 0 {
+				curaFunName = "MAX"
+			}
+			if agg.HasDistinct {
+				return jsonPlan, errors.New("agg with distinct not supported")
+			}
+			jsonPlan = append(jsonPlan, []byte("\""+curaFunName+"\", \"operands\":")...)
+			if len(agg.Args) == 1 {
+				jsonPlan = append(jsonPlan, '[')
+				jsonPlan, err = ExprToCuraJson(agg.Args[0], jsonPlan)
+				jsonPlan = append(jsonPlan, ']')
+			} else {
+				jsonPlan, err = ExprsToCuraJson(agg.Args, jsonPlan)
+			}
+			if err != nil {
+				return jsonPlan, err
+			}
+			jsonPlan = append(jsonPlan, []byte(",\"type\":")...)
+			jsonPlan, err = TypeToCuraJson(agg.RetTp, jsonPlan)
+		default:
+			return jsonPlan, errors.New("Cura not supported agg")
+		}
+		jsonPlan = append(jsonPlan, '}')
+		agg_func_idx++
+	}
+	jsonPlan = append(jsonPlan, []byte("]}, ")...)
+	// add extra project since the output schema for aggregation in cura and tidb is different
+	jsonPlan = append(jsonPlan, []byte("{\"rel_op\": \"Project\", \"exprs\": [")...)
+	gbyColNum := len(p.GroupByItems)
+	aggFuncNum = len(p.AggFuncs) - gbyColNum
+	if !skipFirstRowAgg {
+		aggFuncNum = len(p.AggFuncs)
+	}
+	curaOutputColumn := gbyColNum
+	for i := 0; i < aggFuncNum; i++ {
+		if i != 0 {
+			jsonPlan = append(jsonPlan, ',')
+		}
+		if strings.ToLower(p.AggFuncs[i].Name) == "avg" && len(p.AggFuncs[i].Args) == 2 {
+			//
+			jsonPlan = append(jsonPlan, []byte("{\"binary_op\": \"DIV\", \"operands\": [")...)
+			jsonPlan = append(jsonPlan, []byte("{\"col_ref\": ")...)
+			jsonPlan = append(jsonPlan, []byte(strconv.Itoa(curaOutputColumn+1))...)
+			jsonPlan = append(jsonPlan, []byte("},")...)
+			curaOutputColumn++
+			jsonPlan = append(jsonPlan, []byte("{\"col_ref\": ")...)
+			jsonPlan = append(jsonPlan, []byte(strconv.Itoa(curaOutputColumn-1))...)
+			jsonPlan = append(jsonPlan, []byte("}], \"type\": ")...)
+			jsonPlan, err = TypeToCuraJson(p.AggFuncs[i].RetTp, jsonPlan)
+			if err != nil {
+				return jsonPlan, err
+			}
+			jsonPlan = append(jsonPlan, '}')
+			curaOutputColumn++
+		} else {
+			jsonPlan = append(jsonPlan, []byte("{\"col_ref\": ")...)
+			jsonPlan = append(jsonPlan, []byte(strconv.Itoa(curaOutputColumn))...)
+			jsonPlan = append(jsonPlan, '}')
+			curaOutputColumn++
+		}
+	}
+	if skipFirstRowAgg {
+		for i := 0; i < gbyColNum; i++ {
+			if aggFuncNum != 0 || i != 0 {
+				jsonPlan = append(jsonPlan, ',')
+			}
+			origAggFunc := p.AggFuncs[i+aggFuncNum]
+			if strings.ToLower(origAggFunc.Name) != "firstrow" {
+				return nil, errors.New("not supported agg, should not reach here")
+			}
+			foundGbCol := false
+			if col, ok := origAggFunc.Args[0].(*expression.Column); ok {
+				for idx, gbExpr := range p.GroupByItems {
+					if gbCol, gbOk := gbExpr.(*expression.Column); gbOk {
+						if gbCol.Index == col.Index {
+							jsonPlan = append(jsonPlan, []byte("{\"col_ref\": ")...)
+							jsonPlan = append(jsonPlan, []byte(strconv.Itoa(idx))...)
+							jsonPlan = append(jsonPlan, '}')
+							foundGbCol = true
+						}
+					}
+				}
+			}
+			if !foundGbCol {
+				return nil, errors.New("not supported agg: can not found gb col for fristrow, should not reach here")
+			}
+		}
+	}
+	jsonPlan = append(jsonPlan, []byte("]}")...)
+	return jsonPlan, err
+}
+
 // NewPhysicalHashAgg creates a new PhysicalHashAgg from a LogicalAggregation.
 func NewPhysicalHashAgg(la *LogicalAggregation, newStats *property.StatsInfo, prop *property.PhysicalProperty) *PhysicalHashAgg {
 	agg := basePhysicalAgg{
@@ -1043,6 +1759,29 @@ func (ls *PhysicalSort) ExtractCorrelatedCols() []*expression.CorrelatedColumn {
 		corCols = append(corCols, expression.ExtractCorColumns(item.Expr)...)
 	}
 	return corCols
+}
+
+func (ls *PhysicalSort) ToCuraJson(jsonPlan []byte) ([]byte, error) {
+	jsonPlan = append(jsonPlan, []byte("{\"rel_op\": \"Sort\", \"sort_infos\": [")...)
+	var err error = nil
+	for idx, o := range ls.ByItems {
+		if idx != 0 {
+			jsonPlan = append(jsonPlan, ',')
+		}
+		jsonPlan = append(jsonPlan, []byte("{\"expr\": ")...)
+		jsonPlan, err = ExprToCuraJson(o.Expr, jsonPlan)
+		if err != nil {
+			return nil, err
+		}
+		jsonPlan = append(jsonPlan, []byte(", \"order\": ")...)
+		if o.Desc {
+			jsonPlan = append(jsonPlan, []byte("\"DESC\", \"null_order\": \"NULLS_FIRST\"}")...)
+		} else {
+			jsonPlan = append(jsonPlan, []byte("\"ASC\", \"null_order\": \"NULLS_FIRST\"}")...)
+		}
+	}
+	jsonPlan = append(jsonPlan, []byte("]}")...)
+	return jsonPlan, nil
 }
 
 // NominalSort asks sort properties for its child. It is a fake operator that will not
@@ -1114,6 +1853,76 @@ func (p *PhysicalSelection) ExtractCorrelatedCols() []*expression.CorrelatedColu
 		corCols = append(corCols, expression.ExtractCorColumns(cond)...)
 	}
 	return corCols
+}
+
+func selectionConditionsToJsonPlan(conditions []expression.Expression, index int, jsonPlan []byte) ([]byte, bool, error) {
+	var err error = nil
+	nullable := false
+	if index == len(conditions)-2 {
+		// last one
+		jsonPlan = append(jsonPlan, []byte("{\"binary_op\": \"LOGICAL_AND\", \"operands\": [")...)
+		leftNullable := conditions[index].GetType().Flag&mysql.NotNullFlag != mysql.NotNullFlag
+		rightNullable := conditions[index+1].GetType().Flag&mysql.NotNullFlag != mysql.NotNullFlag
+		jsonPlan, err = ExprToCuraJsonInternal(conditions[index], jsonPlan, true)
+		if err != nil {
+			return nil, false, err
+		}
+		jsonPlan = append(jsonPlan, ',')
+		jsonPlan, err = ExprToCuraJsonInternal(conditions[index+1], jsonPlan, true)
+		if err != nil {
+			return nil, false, err
+		}
+		jsonPlan = append(jsonPlan, []byte("], \"type\": {\"type\": \"BOOL8\", \"nullable\": ")...)
+		if leftNullable || rightNullable {
+			jsonPlan = append(jsonPlan, []byte("false")...)
+			nullable = false
+		} else {
+			jsonPlan = append(jsonPlan, []byte("true")...)
+			nullable = true
+		}
+	} else {
+		jsonPlan = append(jsonPlan, []byte("{\"binary_op\": \"LOGICAL_AND\", \"operands\": [")...)
+		leftNullable := conditions[index].GetType().Flag&mysql.NotNullFlag != mysql.NotNullFlag
+		rightNullable := false
+		jsonPlan, err = ExprToCuraJsonInternal(conditions[index], jsonPlan, true)
+		if err != nil {
+			return nil, false, err
+		}
+		jsonPlan = append(jsonPlan, ',')
+		jsonPlan, rightNullable, err = selectionConditionsToJsonPlan(conditions, index+1, jsonPlan)
+		if err != nil {
+			return jsonPlan, false, err
+		}
+		jsonPlan = append(jsonPlan, []byte("], \"type\": {\"type\": \"BOOL8\", \"nullable\": ")...)
+		if leftNullable || rightNullable {
+			jsonPlan = append(jsonPlan, []byte("false")...)
+			nullable = false
+		} else {
+			jsonPlan = append(jsonPlan, []byte("true")...)
+			nullable = true
+		}
+		jsonPlan = append(jsonPlan, []byte("}}")...)
+	}
+	return jsonPlan, nullable, nil
+}
+
+// ToCuraJson implements PhysicalPlan interface.
+func (p *PhysicalSelection) ToCuraJson(jsonPlan []byte) ([]byte, error) {
+	jsonPlan = append(jsonPlan, []byte("{\"rel_op\": \"Filter\", \"condition\": ")...)
+	var err error = nil
+	if len(p.Conditions) == 1 {
+		jsonPlan, err = ExprToCuraJsonInternal(p.Conditions[0], jsonPlan, true)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		jsonPlan, _, err = selectionConditionsToJsonPlan(p.Conditions, 0, jsonPlan)
+		if err != nil {
+			return nil, err
+		}
+	}
+	jsonPlan = append(jsonPlan, '}')
+	return jsonPlan, nil
 }
 
 // PhysicalMaxOneRow is the physical operator of maxOneRow.

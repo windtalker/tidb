@@ -17,14 +17,23 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"io/ioutil"
 	"math"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"sync"
 	"time"
 	"unsafe"
 
 	"github.com/dgraph-io/ristretto"
+	uuid2 "github.com/google/uuid"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/kvproto/pkg/coprocessor"
 	"github.com/pingcap/tidb/config"
+	"github.com/pingcap/tidb/util/logutil"
+	"go.uber.org/atomic"
 )
 
 type coprCache struct {
@@ -32,14 +41,16 @@ type coprCache struct {
 	admissionMaxRanges      int
 	admissionMaxSize        int
 	admissionMinProcessTime time.Duration
+	fileIndex               *atomic.Int64
+	rw                      sync.RWMutex
 }
 
 type coprCacheValue struct {
-	Key               []byte
-	Data              []byte
-	TimeStamp         uint64
-	RegionID          uint64
-	RegionDataVersion uint64
+	Key               []byte `json:"key"`
+	Data              []byte `json:"data"`
+	TimeStamp         uint64 `json:"timestamp"`
+	RegionID          uint64 `json:"region_id"`
+	RegionDataVersion uint64 `json:"region_data_version"`
 }
 
 func (v *coprCacheValue) String() string {
@@ -85,6 +96,7 @@ func newCoprCache(config *config.CoprocessorCache) (*coprCache, error) {
 		admissionMaxRanges:      int(config.AdmissionMaxRanges),
 		admissionMaxSize:        int(maxEntityInBytes),
 		admissionMinProcessTime: time.Duration(config.AdmissionMinProcessMs) * time.Millisecond,
+		fileIndex:               atomic.NewInt64(0),
 	}
 	return &c, nil
 }
@@ -148,6 +160,8 @@ func (c *coprCache) Get(key []byte) *coprCacheValue {
 	if c == nil {
 		return nil
 	}
+	c.rw.RLock()
+	defer c.rw.RUnlock()
 	value, hit := c.cache.Get(key)
 	if !hit {
 		return nil
@@ -185,14 +199,123 @@ func (c *coprCache) CheckResponseAdmission(dataSize int, processTime time.Durati
 	return true
 }
 
+func (c *coprCache) loadSingleFile(path string, file string) {
+	names := strings.Split(file, "_")
+	if len(names) != 5 {
+		logutil.BgLogger().Warn("failed to load cop cache from " + file + ": file name not valid")
+		return
+	}
+	cacheValue := &coprCacheValue{}
+	var err error
+	cacheValue.TimeStamp, err = strconv.ParseUint(names[0], 10, 64)
+	if err != nil {
+		logutil.BgLogger().Warn("failed to load cop cache from " + file + ": can not extract ts from filename")
+		return
+	}
+	cacheValue.RegionID, err = strconv.ParseUint(names[1], 10, 64)
+	if err != nil {
+		logutil.BgLogger().Warn("failed to load cop cache from " + file + ": can not extract region id from filename")
+		return
+	}
+	cacheValue.RegionDataVersion, err = strconv.ParseUint(names[2], 10, 64)
+	if err != nil {
+		logutil.BgLogger().Warn("failed to load cop cache from " + file + ": can not extract region data version from filename")
+		return
+	}
+	cacheValue.Key, err = ioutil.ReadFile(filepath.Join(path, file))
+	if err != nil {
+		logutil.BgLogger().Warn("failed to load cop cache from " + file + ": can not load key")
+		return
+	}
+	valueFileName := names[0] + "_" + names[1] + "_" + names[2] + "_" + names[3] + "_value"
+	cacheValue.Data, err = ioutil.ReadFile(filepath.Join(path, valueFileName))
+	if err != nil {
+		logutil.BgLogger().Warn("failed to load cop cache from " + file + ": can not load value")
+		return
+	}
+	c.Set(cacheValue.Key, cacheValue, "")
+}
+
+func (c *coprCache) LoadFromFile(loadPath string, loadConcurrency uint64) error {
+	if c == nil {
+		return nil
+	}
+	c.rw.Lock()
+	c.cache.Clear()
+	c.rw.Unlock()
+	if loadConcurrency <= 0 || loadConcurrency >= 20 {
+		loadConcurrency = 15
+	}
+
+	stat, err := os.Stat(loadPath)
+	if err != nil {
+		return err
+	}
+	if !stat.IsDir() {
+		return errors.New(loadPath + " is not a dir")
+	}
+	rd, err := ioutil.ReadDir(loadPath)
+	if err != nil {
+		return err
+	}
+	fileNum := len(rd)
+	filePerThread := fileNum / int(loadConcurrency)
+	remainingFile := fileNum % int(loadConcurrency)
+	var wg sync.WaitGroup
+	for index := 0; index < int(loadConcurrency); index++ {
+		wg.Add(1)
+		go func(indexValue int) {
+			defer wg.Done()
+			extraFile := false
+			if remainingFile > indexValue {
+				extraFile = true
+			}
+			for i := filePerThread * indexValue; i < filePerThread*(indexValue+1); i++ {
+				file := rd[i]
+				if strings.HasSuffix(file.Name(), "_key") {
+					c.loadSingleFile(loadPath, file.Name())
+				}
+			}
+			if extraFile {
+				file := rd[len(rd)-1-indexValue]
+				if strings.HasSuffix(file.Name(), "_key") {
+					c.loadSingleFile(loadPath, file.Name())
+				}
+			}
+		}(index)
+	}
+	wg.Wait()
+	return nil
+}
+
 // Set inserts an item to the cache.
 // It is recommended to call `CheckRequestAdmission` and `CheckResponseAdmission` before inserting
 // the item to the cache.
-func (c *coprCache) Set(key []byte, value *coprCacheValue) bool {
+func (c *coprCache) Set(key []byte, value *coprCacheValue, diskName string) bool {
 	if c == nil {
 		return false
 	}
+	c.rw.RLock()
+	defer c.rw.RUnlock()
 	// Always ensure that the `Key` in `value` is the `key` we received.
 	value.Key = key
+	if len(diskName) > 0 {
+		if uid, err := uuid2.NewUUID(); err == nil {
+			uuidString := uid.String()
+			fileNamePrefix := strconv.FormatUint(value.TimeStamp, 10) + "_" + strconv.FormatUint(value.RegionID, 10) + "_" + strconv.FormatUint(value.RegionDataVersion, 10) + "_" + uuidString
+			keyName := fileNamePrefix + "_key"
+			e := ioutil.WriteFile(filepath.Join(diskName, keyName), value.Key, 0644)
+			if e != nil {
+				logutil.BgLogger().Warn("failed to save cop key to file")
+			}
+			valueName := fileNamePrefix + "_value"
+			e = ioutil.WriteFile(filepath.Join(diskName, valueName), value.Data, 0644)
+			if e != nil {
+				logutil.BgLogger().Warn("failed to save cop key to file")
+			}
+		} else {
+			logutil.BgLogger().Warn("failed to save cop cache to file because uuid is not generated")
+		}
+	}
 	return c.cache.Set(key, value, int64(value.Len()))
 }

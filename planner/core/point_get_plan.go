@@ -239,6 +239,17 @@ func (p *PointGetPlan) GetCost(cols []*expression.Column) float64 {
 	return cost
 }
 
+func (p *PointGetPlan) SetSupportCura(bool) {
+}
+
+func (p *PointGetPlan) SupportCura() bool {
+	return false
+}
+
+func (p *PointGetPlan) ToCuraJson(in []byte) ([]byte, error) {
+	return in, errors.New("ToCuraJson: Not supported")
+}
+
 // BatchPointGetPlan represents a physical plan which contains a bunch of
 // keys reference the same table and use the same `unique key`
 type BatchPointGetPlan struct {
@@ -398,6 +409,17 @@ func (p *BatchPointGetPlan) GetCost(cols []*expression.Column) float64 {
 	cost += rowCount * sessVars.SeekFactor
 	cost /= float64(sessVars.DistSQLScanConcurrency())
 	return cost
+}
+
+func (p *BatchPointGetPlan) SetSupportCura(bool) {
+}
+
+func (p *BatchPointGetPlan) SupportCura() bool {
+	return false
+}
+
+func (p *BatchPointGetPlan) ToCuraJson(in []byte) ([]byte, error) {
+	return in, errors.New("ToCuraJson: Not supported")
 }
 
 // PointPlanKey is used to get point plan that is pre-built for multi-statement query.

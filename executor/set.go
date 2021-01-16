@@ -180,9 +180,16 @@ func (e *SetExecutor) setSysVariable(name string, v *expression.VarAssignment) e
 		if name == variable.TxnIsolationOneShot && sessionVars.InTxn() {
 			return errors.Trace(ErrCantChangeTxCharacteristics)
 		}
+		origLoadCopPath := sessionVars.LoadCopPath
 		err = variable.SetSessionSystemVar(sessionVars, name, value)
 		if err != nil {
 			return err
+		}
+		if origLoadCopPath != sessionVars.LoadCopPath && len(sessionVars.LoadCopPath) != 0 {
+			err = e.ctx.GetStore().LoadCopCache(sessionVars.LoadCopPath, sessionVars.LoadCopConcurrency)
+			if err != nil {
+				return err
+			}
 		}
 		newSnapshotIsSet := sessionVars.SnapshotTS > 0 && sessionVars.SnapshotTS != oldSnapshotTS
 		if newSnapshotIsSet {

@@ -186,6 +186,10 @@ func (s *mockStorage) CurrentVersion(txnScope string) (Version, error) {
 	return NewVersion(1), nil
 }
 
+func (s *mockStorage) LoadCopCache(loadCopPath string, loadConcurrency uint64) error {
+	return nil
+}
+
 func (s *mockStorage) GetClient() Client {
 	return nil
 }

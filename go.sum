@@ -82,6 +82,8 @@ github.com/amsokol/ignite-go-client v0.12.2/go.mod h1:K3tKJGcLQORFD+ds7f0f9fl88t
 github.com/andreyvit/diff v0.0.0-20170406064948-c7f18ee00883/go.mod h1:rCTlJbsFo29Kk6CurOXKm700vrz8f0KW0JNfpkRJY/8=
 github.com/antihax/optional v0.0.0-20180407024304-ca021399b1a6/go.mod h1:V8iCPQYkqmusNa815XgQio277wI47sdRh1dUOLdyC6Q=
 github.com/apache/arrow/go/arrow v0.0.0-20191024131854-af6fa24be0db/go.mod h1:VTxUBvSJ3s3eHAg65PNgrsn5BtqCRPdmyXh6rAfdxN0=
+github.com/apache/arrow/go/arrow v0.0.0-20200924222040-cadaaa94528c h1:pci1bVzmxz0WihVgOqZ89JssWlnwlbx9A18roPLFY1U=
+github.com/apache/arrow/go/arrow v0.0.0-20200924222040-cadaaa94528c/go.mod h1:QNYViu/X0HXDHw7m3KXzWSVXIbfUvJqBFe6Gj8/pYA0=
 github.com/apache/calcite-avatica-go/v4 v4.0.0/go.mod h1:fg6MgnbY4Ta6JI0KuNaL9o/LrOMZdprQSMHWflcNs1c=
 github.com/apache/thrift v0.0.0-20171203172758-327ebb6c2b6d/go.mod h1:cp2SuWMxlEZw2r+iP2GNCdIi4C1qmUzdZFSVb+bacwQ=
 github.com/apple/foundationdb/bindings/go v0.0.0-20200112054404-407dc0907f4f/go.mod h1:OMVSB21p9+xQUIqlGizHPZfjK+SHws1ht+ZytVDoz9U=
@@ -891,6 +893,8 @@ github.com/yuin/goldmark v1.1.27/go.mod h1:3hX8gzYuyVAZsxl0MRgGTJEmQBFcNTphYh9de
 github.com/yuin/goldmark v1.1.32/go.mod h1:3hX8gzYuyVAZsxl0MRgGTJEmQBFcNTphYh9decYSb74=
 github.com/yuin/gopher-lua v0.0.0-20181031023651-12c4817b42c5/go.mod h1:aEV29XrmTYFr3CiRxZeGHpkvbwq+prZduBqMaascyCU=
 github.com/zaf/temp v0.0.0-20170209143821-94e385923345/go.mod h1:sXsZgXwh6DB0qlskmZVB4HE93e5YrktMrgUDPy9iYmY=
+github.com/zanmato1984/cura/go/cura v0.0.0-20210113124056-3d1f7c694ff7 h1:m+B6nZZvD/BYhwZ55hQfCgPxg606uEyU+0Xj60FYETo=
+github.com/zanmato1984/cura/go/cura v0.0.0-20210113124056-3d1f7c694ff7/go.mod h1:pmTAWuCrIsT/qCXKGZxjbNTuFp/wF9x8nJMKpKDn/Do=
 github.com/zhangjinpeng1987/raft v0.0.0-20200819064223-df31bb68a018 h1:T3OrqVdcH6z6SakR7WkECvGpdkfB0MAur/6zf66GPxQ=
 github.com/zhangjinpeng1987/raft v0.0.0-20200819064223-df31bb68a018/go.mod h1:rTSjwgeYU2on64W50csWDlhyy0x9UYVYJUovHlYdt5s=
 github.com/ziutek/mymysql v1.5.4/go.mod h1:LMSpPZ6DbqWFxNCHW77HeMg9I646SAhApZ/wKdgO/C0=

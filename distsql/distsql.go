@@ -73,6 +73,12 @@ func Select(ctx context.Context, sctx sessionctx.Context, kvReq *kv.Request, fie
 	if !sctx.GetSessionVars().EnableStreaming {
 		kvReq.Streaming = false
 	}
+	if sctx.GetSessionVars().CuraChunkSize > 0 {
+		kvReq.ResultTypes = fieldTypes
+		kvReq.CuraChunkSize = sctx.GetSessionVars().CuraChunkSize
+	}
+	kvReq.DumpCopPath = sctx.GetSessionVars().DumpCopPath
+
 	enabledRateLimitAction := sctx.GetSessionVars().EnabledRateLimitAction
 	resp := sctx.GetClient().Send(ctx, kvReq, sctx.GetSessionVars().KVVars, sctx.GetSessionVars().StmtCtx.MemTracker, enabledRateLimitAction)
 	if resp == nil {
