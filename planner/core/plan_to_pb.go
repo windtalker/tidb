@@ -243,8 +243,12 @@ func (e *PhysicalExchangeSender) ToPB(ctx sessionctx.Context, storeType kv.Store
 	}
 
 	hashCols := make([]expression.Expression, 0, len(e.HashCols))
+	types := make([]*tipb.FieldType, 0, len(e.HashCols))
 	for _, col := range e.HashCols {
-		hashCols = append(hashCols, col)
+		hashCols = append(hashCols, col.Col)
+		tp := expression.ToPBFieldType(col.Col.RetType)
+		tp.Collate = col.CollateId
+		types = append(types, tp)
 	}
 	hashColPb, err := expression.ExpressionsToPBList(ctx.GetSessionVars().StmtCtx, hashCols, ctx.GetClient())
 	if err != nil {
@@ -255,6 +259,7 @@ func (e *PhysicalExchangeSender) ToPB(ctx sessionctx.Context, storeType kv.Store
 		EncodedTaskMeta: encodedTask,
 		PartitionKeys:   hashColPb,
 		Child:           child,
+		Types:           types,
 	}
 	executorID := e.ExplainID().String()
 	return &tipb.Executor{
