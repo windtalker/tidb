@@ -16,6 +16,7 @@ package copr
 import (
 	"context"
 	"io"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -307,7 +308,7 @@ func (m *mppIterator) establishMPPConns(bo *tikv.Backoffer, req *kv.MPPDispatchR
 	rpcResp, err := m.store.GetTiKVClient().SendRequest(bo.GetCtx(), req.Meta.GetAddress(), wrappedReq, tikv.ReadTimeoutUltraLong)
 
 	if err != nil {
-		logutil.BgLogger().Error("establish mpp connection meet error", zap.String("error", err.Error()))
+		logutil.BgLogger().Error("establish mpp connection meet error", zap.String("error", err.Error()), zap.String("task ", strconv.FormatInt(taskMeta.TaskId, 10)))
 		// we return timeout to trigger tikv's fallback
 		m.sendError(tikv.ErrTiFlashServerTimeout)
 		return
