@@ -649,6 +649,7 @@ func (iw *indexHashJoinInnerWorker) getMatchedOuterRows(innerRow chunk.Row, task
 	}
 	iw.matchedOuterPtrs = task.lookupMap.Get(h.Sum64())
 	if len(iw.matchedOuterPtrs) == 0 {
+		logutil.CuraLogger.Info("hash look up return empty result")
 		return nil, nil, nil
 	}
 	joinType := JoinerType(iw.joiner)
@@ -678,7 +679,6 @@ func (iw *indexHashJoinInnerWorker) joinMatchedInnerRow2Chunk(ctx context.Contex
 		return false, joinResult
 	}
 	if len(matchedOuterRows) == 0 {
-		logutil.CuraLogger.Info("matched outer rows is zero")
 		return true, joinResult
 	}
 	var (
