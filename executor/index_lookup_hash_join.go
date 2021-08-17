@@ -678,6 +678,7 @@ func (iw *indexHashJoinInnerWorker) joinMatchedInnerRow2Chunk(ctx context.Contex
 		return false, joinResult
 	}
 	if len(matchedOuterRows) == 0 {
+		logutil.CuraLogger.Info("matched outer rows is zero")
 		return true, joinResult
 	}
 	var (
