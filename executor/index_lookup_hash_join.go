@@ -664,6 +664,7 @@ func (iw *indexHashJoinInnerWorker) getMatchedOuterRows(innerRow chunk.Row, task
 			return nil, nil, err
 		}
 		if !ok || (task.outerRowStatus[ptr.ChkIdx][ptr.RowIdx] == outerRowMatched && isSemiJoin) {
+			logutil.CuraLogger.Info("equal chunk fails")
 			continue
 		}
 		matchedRows = append(matchedRows, outerRow)
