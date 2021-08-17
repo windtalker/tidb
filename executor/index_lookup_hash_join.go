@@ -660,6 +660,7 @@ func (iw *indexHashJoinInnerWorker) getMatchedOuterRows(innerRow chunk.Row, task
 		outerRow := task.outerResult.GetRow(ptr)
 		ok, err := codec.EqualChunkRow(iw.ctx.GetSessionVars().StmtCtx, innerRow, iw.rowTypes, iw.keyCols, outerRow, iw.outerCtx.rowTypes, iw.outerCtx.keyCols)
 		if err != nil {
+			logutil.CuraLogger.Info("equal chunk fails")
 			return nil, nil, err
 		}
 		if !ok || (task.outerRowStatus[ptr.ChkIdx][ptr.RowIdx] == outerRowMatched && isSemiJoin) {
