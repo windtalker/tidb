@@ -669,6 +669,7 @@ func (iw *innerWorker) fetchInnerResults(ctx context.Context, task *lookUpJoinTa
 		default:
 		}
 		err := Next(ctx, innerExec, iw.executorChk)
+		logutil.CuraLogger.Info("lookup results row num: " + strconv.Itoa(iw.executorChk.NumRows()))
 		if err != nil {
 			return err
 		}

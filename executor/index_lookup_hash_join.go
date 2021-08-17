@@ -537,7 +537,6 @@ func (iw *indexHashJoinInnerWorker) buildHashTableForOuterResult(ctx context.Con
 	for chkIdx := 0; chkIdx < numChks; chkIdx++ {
 		chk := task.outerResult.GetChunk(chkIdx)
 		numRows := chk.NumRows()
-		logutil.CuraLogger.Info("build hash table: chunk with " + strconv.Itoa(numRows) + " rows")
 	OUTER:
 		for rowIdx := 0; rowIdx < numRows; rowIdx++ {
 			if task.outerMatch != nil && !task.outerMatch[chkIdx][rowIdx] {
