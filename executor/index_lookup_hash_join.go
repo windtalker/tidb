@@ -19,6 +19,7 @@ import (
 	"hash"
 	"hash/fnv"
 	"runtime/trace"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -30,6 +31,7 @@ import (
 	"github.com/pingcap/tidb/util"
 	"github.com/pingcap/tidb/util/chunk"
 	"github.com/pingcap/tidb/util/codec"
+	"github.com/pingcap/tidb/util/logutil"
 	"github.com/pingcap/tidb/util/memory"
 	"github.com/pingcap/tidb/util/ranger"
 )
@@ -222,6 +224,7 @@ func (e *IndexNestedLoopHashJoin) wait4JoinWorkers() {
 
 // Next implements the IndexNestedLoopHashJoin Executor interface.
 func (e *IndexNestedLoopHashJoin) Next(ctx context.Context, req *chunk.Chunk) error {
+	logutil.CuraLogger.Warn("begin read from index lookup join")
 	req.Reset()
 	if e.keepOuterOrder {
 		return e.runInOrder(ctx, req)
@@ -234,16 +237,20 @@ func (e *IndexNestedLoopHashJoin) Next(ctx context.Context, req *chunk.Chunk) er
 	select {
 	case result, ok = <-e.resultCh:
 		if !ok {
+			logutil.CuraLogger.Info("index look up join finished with no more result")
 			return nil
 		}
 		if result.err != nil {
+			logutil.CuraLogger.Info("index look up join finished with err result")
 			return result.err
 		}
 	case <-ctx.Done():
+		logutil.CuraLogger.Info("index look up join finished with ctx err")
 		return ctx.Err()
 	}
 	req.SwapColumns(result.chk)
 	result.src <- result.chk
+	logutil.CuraLogger.Warn("return rows from index lookup join is " + strconv.Itoa(req.NumRows()))
 	return nil
 }
 
@@ -530,15 +537,18 @@ func (iw *indexHashJoinInnerWorker) buildHashTableForOuterResult(ctx context.Con
 	for chkIdx := 0; chkIdx < numChks; chkIdx++ {
 		chk := task.outerResult.GetChunk(chkIdx)
 		numRows := chk.NumRows()
+		logutil.CuraLogger.Info("build hash table: chunk with " + strconv.Itoa(numRows) + " rows")
 	OUTER:
 		for rowIdx := 0; rowIdx < numRows; rowIdx++ {
 			if task.outerMatch != nil && !task.outerMatch[chkIdx][rowIdx] {
+				logutil.CuraLogger.Info("build hash table: skip rows because not match")
 				continue
 			}
 			row := chk.GetRow(rowIdx)
 			keyColIdx := iw.outerCtx.keyCols
 			for _, i := range keyColIdx {
 				if row.IsNull(i) {
+					logutil.CuraLogger.Info("build hash table: skip rows because row is null")
 					continue OUTER
 				}
 			}
