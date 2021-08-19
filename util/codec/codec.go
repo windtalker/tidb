@@ -696,8 +696,12 @@ func EqualChunkRow(sc *stmtctx.StatementContext,
 			return false, errors.Trace(err)
 		}
 		if !(flag1 == flag2 && bytes.Equal(b1, b2)) {
-				logutil.CuraLogger.Info("flag1 = " + bytesKeyToHex([]byte{flag1}) + ", flag2 = " + bytesKeyToHex([]byte{flag2}) + ", b1 = " + bytesKeyToHex(b1) + ", b2 = " + bytesKeyToHex(b2))
+				logutil.CuraLogger.Info("not matched: flag1 = " + bytesKeyToHex([]byte{flag1}) + ", flag2 = " + bytesKeyToHex([]byte{flag2}) + ", b1 = " + bytesKeyToHex(b1) + ", b2 = " + bytesKeyToHex(b2))
 			return false, nil
+		} else {
+			if i == 0 {
+				logutil.CuraLogger.Info("matched: flag1 = " + bytesKeyToHex([]byte{flag1}) + ", flag2 = " + bytesKeyToHex([]byte{flag2}) + ", b1 = " + bytesKeyToHex(b1) + ", b2 = " + bytesKeyToHex(b2))
+			}
 		}
 	}
 	return true, nil
