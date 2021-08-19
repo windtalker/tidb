@@ -16,10 +16,12 @@ package codec
 import (
 	"bytes"
 	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"github.com/pingcap/tidb/util/logutil"
 	"hash"
 	"io"
+	"strings"
 	"time"
 	"unsafe"
 
@@ -674,6 +676,9 @@ func HashChunkRow(sc *stmtctx.StatementContext, w io.Writer, row chunk.Row, allT
 	return err
 }
 
+func bytesKeyToHex(key []byte) string {
+	return strings.ToUpper(hex.EncodeToString(key))
+}
 // EqualChunkRow returns a boolean reporting whether row1 and row2
 // with their types and column index are logically equal.
 func EqualChunkRow(sc *stmtctx.StatementContext,
@@ -691,7 +696,7 @@ func EqualChunkRow(sc *stmtctx.StatementContext,
 			return false, errors.Trace(err)
 		}
 		if !(flag1 == flag2 && bytes.Equal(b1, b2)) {
-				logutil.CuraLogger.Info("flag1 = " + string(flag1) + ", flag2 = " + string(flag2) + ", b1 = " + string(b1) + ", b2 = " + string(b2))
+				logutil.CuraLogger.Info("flag1 = " + bytesKeyToHex([]byte{flag1}) + ", flag2 = " + bytesKeyToHex([]byte{flag2}) + ", b1 = " + bytesKeyToHex(b1) + ", b2 = " + bytesKeyToHex(b2))
 			return false, nil
 		}
 	}
