@@ -17,6 +17,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"github.com/pingcap/tidb/util/logutil"
 	"hash"
 	"io"
 	"time"
@@ -690,6 +691,7 @@ func EqualChunkRow(sc *stmtctx.StatementContext,
 			return false, errors.Trace(err)
 		}
 		if !(flag1 == flag2 && bytes.Equal(b1, b2)) {
+				logutil.CuraLogger.Info("flag1 = " + string(flag1) + ", flag2 = " + string(flag2) + ", b1 = " + string(b1) + ", b2 = " + string(b2))
 			return false, nil
 		}
 	}

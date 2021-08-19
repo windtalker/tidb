@@ -652,6 +652,7 @@ func (iw *indexHashJoinInnerWorker) getMatchedOuterRows(innerRow chunk.Row, task
 		logutil.CuraLogger.Info("hash look up return empty result")
 		return nil, nil, nil
 	}
+	logutil.CuraLogger.Info("hash look up return " + strconv.Itoa(len(iw.matchedOuterPtrs)) + " rows")
 	joinType := JoinerType(iw.joiner)
 	isSemiJoin := joinType == plannercore.SemiJoin || joinType == plannercore.LeftOuterSemiJoin
 	matchedRows = make([]chunk.Row, 0, len(iw.matchedOuterPtrs))
@@ -660,11 +661,9 @@ func (iw *indexHashJoinInnerWorker) getMatchedOuterRows(innerRow chunk.Row, task
 		outerRow := task.outerResult.GetRow(ptr)
 		ok, err := codec.EqualChunkRow(iw.ctx.GetSessionVars().StmtCtx, innerRow, iw.rowTypes, iw.keyCols, outerRow, iw.outerCtx.rowTypes, iw.outerCtx.keyCols)
 		if err != nil {
-			logutil.CuraLogger.Info("equal chunk fails")
 			return nil, nil, err
 		}
 		if !ok || (task.outerRowStatus[ptr.ChkIdx][ptr.RowIdx] == outerRowMatched && isSemiJoin) {
-			logutil.CuraLogger.Info("equal chunk fails")
 			continue
 		}
 		matchedRows = append(matchedRows, outerRow)
