@@ -1556,6 +1556,8 @@ type CuraExec struct {
 	meetError      atomic.Value
 	runner         *CuraRunner
 	wg             sync.WaitGroup
+	cachedMu          sync.Mutex
+	cachedArrowRecord []*cura.OutputRecord
 }
 
 type CuraRunner struct {
@@ -1805,6 +1807,9 @@ func (f *CuraRunner) run(ctx context.Context) {
 								return
 							} else {
 								// send out record to tidb
+								f.curaExec.cachedMu.Lock()
+								f.curaExec.cachedArrowRecord = append(f.curaExec.cachedArrowRecord, outRecord)
+								f.curaExec.cachedMu.Unlock()
 								res := &curaResult{chk: retChk, err: nil}
 								f.curaExec.curaResultChan <- res
 							}
@@ -1895,6 +1900,9 @@ func (f *CuraRunner) run(ctx context.Context) {
 												return
 											} else {
 												// send out record to tidb
+												f.curaExec.cachedMu.Lock()
+												f.curaExec.cachedArrowRecord = append(f.curaExec.cachedArrowRecord, arrowOutput)
+												f.curaExec.cachedMu.Unlock()
 												res := &curaResult{chk: retChk, err: nil}
 												f.curaExec.curaResultChan <- res
 											}
