@@ -571,6 +571,7 @@ var tokenMap = map[string]int{
 	"RECENT":                   recent,
 	"RECOVER":                  recover,
 	"RECURSIVE":                recursive,
+	"REDISTRIBUTED":            redistributed,
 	"REDUNDANT":                redundant,
 	"REFERENCES":               references,
 	"REGEXP":                   regexpKwd,

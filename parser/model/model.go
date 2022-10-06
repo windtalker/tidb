@@ -1394,12 +1394,13 @@ type IndexInfo struct {
 	Columns       []*IndexColumn `json:"idx_cols"` // Index columns.
 	State         SchemaState    `json:"state"`
 	BackfillState BackfillState  `json:"backfill_state"`
-	Comment       string         `json:"comment"`      // Comment
-	Tp            IndexType      `json:"index_type"`   // Index type: Btree, Hash or Rtree
-	Unique        bool           `json:"is_unique"`    // Whether the index is unique.
-	Primary       bool           `json:"is_primary"`   // Whether the index is primary key.
-	Invisible     bool           `json:"is_invisible"` // Whether the index is invisible.
-	Global        bool           `json:"is_global"`    // Whether the index is global.
+	Comment       string         `json:"comment"`          // Comment
+	Tp            IndexType      `json:"index_type"`       // Index type: Btree, Hash or Rtree
+	Unique        bool           `json:"is_unique"`        // Whether the index is unique.
+	Primary       bool           `json:"is_primary"`       // Whether the index is primary key.
+	Invisible     bool           `json:"is_invisible"`     // Whether the index is invisible.
+	Global        bool           `json:"is_global"`        // Whether the index is global.
+	Redistributed bool           `json:"is_redistributed"` // Whether the index is redistributed.
 }
 
 // Clone clones IndexInfo.
