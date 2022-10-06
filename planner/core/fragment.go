@@ -39,6 +39,7 @@ import (
 type Fragment struct {
 	// following field are filled during getPlanFragment.
 	TableScan         *PhysicalTableScan          // result physical table scan
+	IndexScans        []*PhysicalIndexScan        // result physical table scan
 	ExchangeReceivers []*PhysicalExchangeReceiver // data receivers
 
 	// following fields are filled after scheduling.
@@ -127,6 +128,8 @@ func (f *Fragment) init(p PhysicalPlan) error {
 			return errors.New("one task contains at most one table scan")
 		}
 		f.TableScan = x
+	case *PhysicalIndexScan:
+		f.IndexScans = append(f.IndexScans, x)
 	case *PhysicalExchangeReceiver:
 		// TODO: after we support partial merge, we should check whether all the target exchangeReceiver is same.
 		f.singleton = f.singleton || x.children[0].(*PhysicalExchangeSender).ExchangeType == tipb.ExchangeType_PassThrough
@@ -154,7 +157,7 @@ func (f *Fragment) init(p PhysicalPlan) error {
 func untwistPlanAndRemoveUnionAll(stack []PhysicalPlan, forest *[]*PhysicalExchangeSender) error {
 	cur := stack[len(stack)-1]
 	switch x := cur.(type) {
-	case *PhysicalTableScan, *PhysicalExchangeReceiver: // This should be the leave node.
+	case *PhysicalTableScan, *PhysicalExchangeReceiver, *PhysicalIndexScan: // This should be the leave node.
 		p, err := stack[0].Clone()
 		if err != nil {
 			return errors.Trace(err)
@@ -255,6 +258,13 @@ func (e *mppTaskGenerator) generateMPPTasksForFragment(f *Fragment) (tasks []*kv
 				"In mpp mode, the number of tasks for table scan should not be zero. " +
 					"Please set tidb_allow_mpp = 0, and then rerun sql.")
 		}
+	} else if len(f.IndexScans) > 0 {
+		tasks, err = e.constructMPPTasksImplForIndexScans(context.Background(), f.IndexScans)
+		if err == nil && len(tasks) == 0 {
+			err = errors.New(
+				"In mpp mode, the number of tasks for index scan should not be zero. " +
+					"Please set tidb_allow_mpp = 0, and then rerun sql.")
+		}
 	} else {
 		childrenTasks := make([]*kv.MPPTask, 0)
 		for _, r := range f.ExchangeReceivers {
@@ -314,6 +324,39 @@ func partitionPruning(ctx sessionctx.Context, tbl table.PartitionedTable, conds 
 		}
 	}
 	return ret, nil
+}
+
+func (e *mppTaskGenerator) constructMPPTasksImplForIndexScans(ctx context.Context, iss []*PhysicalIndexScan) ([]*kv.MPPTask, error) {
+	var req *kv.MPPBuildTasksRequest
+	var totalMetas [][]kv.MPPTaskMeta
+	var err error
+	for _, is := range iss {
+		splitedRanges, _ := distsql.SplitRangesAcrossInt64Boundary(is.Ranges, false, false, is.Table.IsCommonHandle)
+		if is.Table.GetPartitionInfo() != nil {
+			return nil, errors.New("partition table not supported")
+		} else {
+			kvRanges, err := distsql.IndexRangesToKVRanges(e.ctx.GetSessionVars().StmtCtx, is.Table.ID, is.Index.ID, splitedRanges, nil)
+			if err != nil {
+				return nil, errors.Trace(err)
+			}
+			req = &kv.MPPBuildTasksRequest{KeyRanges: kvRanges}
+		}
+		if err != nil {
+			return nil, errors.Trace(err)
+		}
+
+		ttl, err := time.ParseDuration(e.ctx.GetSessionVars().MPPStoreFailTTL)
+		if err != nil {
+			logutil.BgLogger().Warn("MPP store fail ttl is invalid", zap.Error(err))
+			ttl = 30 * time.Second
+		}
+		metas, err := e.ctx.GetMPPClient().ConstructMPPTasks(ctx, req, e.ctx.GetSessionVars().MPPStoreLastFailTime, ttl)
+		if err != nil {
+			return nil, err
+		}
+		totalMetas = append(totalMetas, metas)
+	}
+	return nil, nil
 }
 
 // single physical table means a table without partitions or a single partition in a partition table.

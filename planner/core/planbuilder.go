@@ -1179,7 +1179,12 @@ func getPossibleAccessPaths(ctx sessionctx.Context, tableHints *tableHintInfo, i
 					continue
 				}
 			}
-			publicPaths = append(publicPaths, &util.AccessPath{Index: index})
+			if index.Redistributed {
+				// redistributed index is for TiFlash
+				publicPaths = append(publicPaths, &util.AccessPath{Index: index, StoreType: kv.TiFlash})
+			} else {
+				publicPaths = append(publicPaths, &util.AccessPath{Index: index})
+			}
 		}
 	}
 

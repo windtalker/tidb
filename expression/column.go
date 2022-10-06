@@ -612,6 +612,9 @@ func IndexCol2Col(colInfos []*model.ColumnInfo, cols []*Column, col *model.Index
 // the return value will be only the 1st corresponding *Column and its length.
 // TODO: Use a struct to represent {*Column, int}. And merge IndexInfo2PrefixCols and IndexInfo2Cols.
 func IndexInfo2PrefixCols(colInfos []*model.ColumnInfo, cols []*Column, index *model.IndexInfo) ([]*Column, []int) {
+	if index.Redistributed {
+		return IndexInfo2Cols(colInfos, cols, index)
+	}
 	retCols := make([]*Column, 0, len(index.Columns))
 	lengths := make([]int, 0, len(index.Columns))
 	for _, c := range index.Columns {
@@ -634,6 +637,15 @@ func IndexInfo2PrefixCols(colInfos []*model.ColumnInfo, cols []*Column, index *m
 // If this index has three IndexColumn that the 1st and 3rd IndexColumn has corresponding *Column,
 // the return value will be [col1, nil, col2].
 func IndexInfo2Cols(colInfos []*model.ColumnInfo, cols []*Column, index *model.IndexInfo) ([]*Column, []int) {
+	if index.Redistributed {
+		retCols := make([]*Column, 0, len(colInfos))
+		lens := make([]int, 0, len(colInfos))
+		for _, col := range cols {
+			retCols = append(retCols, col)
+			lens = append(lens, types.UnspecifiedLength)
+		}
+		return retCols, lens
+	}
 	retCols := make([]*Column, 0, len(index.Columns))
 	lens := make([]int, 0, len(index.Columns))
 	for _, c := range index.Columns {
