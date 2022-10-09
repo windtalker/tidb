@@ -328,14 +328,16 @@ func partitionPruning(ctx sessionctx.Context, tbl table.PartitionedTable, conds 
 
 func (e *mppTaskGenerator) constructMPPTasksImplForIndexScans(ctx context.Context, iss []*PhysicalIndexScan) ([]*kv.MPPTask, error) {
 	var req *kv.MPPBuildTasksRequest
-	var totalMetas [][]kv.MPPTaskMeta
+	var totalMetas map[string]map[string]kv.MPPTaskMeta
+	var allPartitionsIDs []int64
 	var err error
 	for _, is := range iss {
+		executor_id := is.ExplainID().String()
 		splitedRanges, _ := distsql.SplitRangesAcrossInt64Boundary(is.Ranges, false, false, is.Table.IsCommonHandle)
 		if is.Table.GetPartitionInfo() != nil {
 			return nil, errors.New("partition table not supported")
 		} else {
-			kvRanges, err := distsql.IndexRangesToKVRanges(e.ctx.GetSessionVars().StmtCtx, is.Table.ID, is.Index.ID, splitedRanges, nil)
+			kvRanges, err := distsql.RedistributedIndexRangesToKVRanges(e.ctx.GetSessionVars().StmtCtx, is.Table.ID, is.Index.ID, splitedRanges, nil)
 			if err != nil {
 				return nil, errors.Trace(err)
 			}
@@ -354,9 +356,19 @@ func (e *mppTaskGenerator) constructMPPTasksImplForIndexScans(ctx context.Contex
 		if err != nil {
 			return nil, err
 		}
-		totalMetas = append(totalMetas, metas)
+		for _, meta := range metas {
+			totalMetas[meta.GetAddress()][executor_id] = meta
+		}
 	}
-	return nil, nil
+	tasks := make([]*kv.MPPTask, 0, len(totalMetas))
+	for _, metas := range totalMetas {
+		for _, meta := range metas {
+			task := &kv.MPPTask{Meta: meta, MetaMap: metas, ID: e.ctx.GetSessionVars().AllocMPPTaskID(e.startTS), StartTs: e.startTS, TableID: iss[0].Table.ID, PartitionTableIDs: allPartitionsIDs}
+			tasks = append(tasks, task)
+			break
+		}
+	}
+	return tasks, nil
 }
 
 // single physical table means a table without partitions or a single partition in a partition table.

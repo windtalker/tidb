@@ -352,7 +352,17 @@ func (e *PhysicalExchangeReceiver) ToPB(ctx sessionctx.Context, _ kv.StoreType) 
 }
 
 // ToPB implements PhysicalPlan ToPB interface.
-func (p *PhysicalIndexScan) ToPB(_ sessionctx.Context, _ kv.StoreType) (*tipb.Executor, error) {
+func (p *PhysicalIndexScan) ToPB(_ sessionctx.Context, storeType kv.StoreType) (*tipb.Executor, error) {
+	if storeType == kv.TiFlash {
+		if !p.Index.Redistributed {
+			return nil, errors.New("TiFlash index scan only support redistributed index")
+		}
+		tsExec := tables.BuildTableScanFromInfos(p.Table, p.Columns)
+		tsExec.Desc = false
+		tsExec.TableId = p.Index.ID<<32 | p.Table.ID
+		executorID := p.ExplainID().String()
+		return &tipb.Executor{Tp: tipb.ExecType_TypeTableScan, TblScan: tsExec, ExecutorId: &executorID}, nil
+	}
 	columns := make([]*model.ColumnInfo, 0, p.schema.Len())
 	tableColumns := p.Table.Cols()
 	for _, col := range p.schema.Columns {

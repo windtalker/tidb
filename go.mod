@@ -16,6 +16,7 @@ require (
 	github.com/aws/aws-sdk-go v1.44.48
 	github.com/blacktear23/go-proxyprotocol v1.0.2
 	github.com/carlmjohnson/flagext v0.21.0
+	github.com/cespare/xxhash v1.1.0
 	github.com/charithe/durationcheck v0.0.9
 	github.com/cheggaaa/pb/v3 v3.0.8
 	github.com/cheynewallace/tabby v1.1.1
@@ -132,7 +133,6 @@ require (
 	github.com/apache/thrift v0.13.1-0.20201008052519-daf620915714 // indirect
 	github.com/benbjohnson/clock v1.3.0 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
-	github.com/cespare/xxhash v1.1.0 // indirect
 	github.com/cespare/xxhash/v2 v2.1.2 // indirect
 	github.com/chavacava/garif v0.0.0-20220630083739-93517212f375 // indirect
 	github.com/cockroachdb/errors v1.8.1 // indirect
@@ -243,3 +243,5 @@ replace (
 	github.com/pingcap/tidb/parser => ./parser
 	go.opencensus.io => go.opencensus.io v0.23.1-0.20220331163232-052120675fac
 )
+
+replace github.com/pingcap/kvproto => github.com/zanmato1984/kvproto v0.0.0-20221020073821-af5dfbb7c003

@@ -657,6 +657,18 @@ func Unflatten(datum types.Datum, ft *types.FieldType, loc *time.Location) (type
 	return datum, nil
 }
 
+// EncodeRedistributedIndexSeekKey encodes an index value to kv.Key.
+func EncodeRedistributedIndexSeekKey(hash uint64, tableID int64, idxID int64, encodedValue []byte) kv.Key {
+	key := make([]byte, 0, prefixLen+len(encodedValue))
+	key = append(key, tablePrefix...)
+	value := 0x1_00_0000_0000_0000 | hash<<48 | uint64(idxID)<<32 | uint64(tableID)
+	key = codec.EncodeUint(key, value)
+	key = append(key, recordPrefixSep...)
+	key = appendTableIndexPrefix(key, tableID)
+	key = append(key, encodedValue...)
+	return key
+}
+
 // EncodeIndexSeekKey encodes an index value to kv.Key.
 func EncodeIndexSeekKey(tableID int64, idxID int64, encodedValue []byte) kv.Key {
 	key := make([]byte, 0, RecordRowKeyLen+len(encodedValue))

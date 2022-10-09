@@ -31,7 +31,8 @@ type MPPTaskMeta interface {
 // MPPTask means the minimum execution unit of a mpp computation job.
 type MPPTask struct {
 	Meta    MPPTaskMeta // on which store this task will execute
-	ID      int64       // mppTaskID
+	MetaMap map[string]MPPTaskMeta
+	ID      int64 // mppTaskID
 	StartTs uint64
 	TableID int64 // physical table id
 
@@ -66,10 +67,11 @@ const (
 
 // MPPDispatchRequest stands for a dispatching task.
 type MPPDispatchRequest struct {
-	Data    []byte      // data encodes the dag coprocessor request.
-	Meta    MPPTaskMeta // mpp store is the location of tiflash store.
-	IsRoot  bool        // root task returns data to tidb directly.
-	Timeout uint64      // If task is assigned but doesn't receive a connect request during timeout, the task should be destroyed.
+	Data    []byte                 // data encodes the dag coprocessor request.
+	Meta    MPPTaskMeta            // mpp store is the location of tiflash store.
+	MetaMap map[string]MPPTaskMeta // mpp store is the location of tiflash store.
+	IsRoot  bool                   // root task returns data to tidb directly.
+	Timeout uint64                 // If task is assigned but doesn't receive a connect request during timeout, the task should be destroyed.
 	// SchemaVer is for any schema-ful storage (like tiflash) to validate schema correctness if necessary.
 	SchemaVar int64
 	StartTs   uint64
