@@ -80,7 +80,7 @@ type Index interface {
 	// Exist supports check index exists or not.
 	Exist(sc *stmtctx.StatementContext, txn kv.Transaction, indexedValues []types.Datum, h kv.Handle) (bool, kv.Handle, error)
 	// GenIndexKey generates an index key.
-	GenIndexKey(sc *stmtctx.StatementContext, indexedValues []types.Datum, h kv.Handle, buf []byte, rowValue []byte) (key []byte, distinct bool, err error)
+	GenIndexKey(sc *stmtctx.StatementContext, indexedValues []types.Datum, h kv.Handle, buf []byte) (key []byte, distinct bool, err error)
 	// GenIndexValue generates an index value.
 	GenIndexValue(sc *stmtctx.StatementContext, distinct bool, indexedValues []types.Datum, h kv.Handle, restoredData []types.Datum) ([]byte, error)
 	// FetchValues fetched index column values in a row.

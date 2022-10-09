@@ -164,7 +164,7 @@ func (e *SplitIndexRegionExec) getSplitIdxPhysicalKeysFromValueList(physicalID i
 	keys = e.getSplitIdxPhysicalStartAndOtherIdxKeys(physicalID, keys)
 	index := tables.NewIndex(physicalID, e.tableInfo, e.indexInfo)
 	for _, v := range e.valueLists {
-		idxKey, _, err := index.GenIndexKey(e.ctx.GetSessionVars().StmtCtx, v, kv.IntHandle(math.MinInt64), nil, nil)
+		idxKey, _, err := index.GenIndexKey(e.ctx.GetSessionVars().StmtCtx, v, kv.IntHandle(math.MinInt64), nil)
 		if err != nil {
 			return nil, err
 		}
@@ -225,13 +225,13 @@ func (e *SplitIndexRegionExec) getSplitIdxPhysicalKeysFromBound(physicalID int64
 	keys = e.getSplitIdxPhysicalStartAndOtherIdxKeys(physicalID, keys)
 	index := tables.NewIndex(physicalID, e.tableInfo, e.indexInfo)
 	// Split index regions by lower, upper value and calculate the step by (upper - lower)/num.
-	lowerIdxKey, _, err := index.GenIndexKey(e.ctx.GetSessionVars().StmtCtx, e.lower, kv.IntHandle(math.MinInt64), nil, nil)
+	lowerIdxKey, _, err := index.GenIndexKey(e.ctx.GetSessionVars().StmtCtx, e.lower, kv.IntHandle(math.MinInt64), nil)
 	if err != nil {
 		return nil, err
 	}
 	// Use math.MinInt64 as handle_id for the upper index key to avoid affecting calculate split point.
 	// If use math.MaxInt64 here, test of `TestSplitIndex` will report error.
-	upperIdxKey, _, err := index.GenIndexKey(e.ctx.GetSessionVars().StmtCtx, e.upper, kv.IntHandle(math.MinInt64), nil, nil)
+	upperIdxKey, _, err := index.GenIndexKey(e.ctx.GetSessionVars().StmtCtx, e.upper, kv.IntHandle(math.MinInt64), nil)
 	if err != nil {
 		return nil, err
 	}

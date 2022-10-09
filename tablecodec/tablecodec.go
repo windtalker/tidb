@@ -1104,7 +1104,7 @@ func GetIndexKeyBuf(buf []byte, defaultCap int) []byte {
 
 // GenIndexKey generates index key using input physical table id
 func GenIndexKey(sc *stmtctx.StatementContext, tblInfo *model.TableInfo, idxInfo *model.IndexInfo,
-	phyTblID int64, indexedValues []types.Datum, h kv.Handle, buf []byte, rowValue []byte, redistributed bool) (key []byte, distinct bool, err error) {
+	phyTblID int64, indexedValues []types.Datum, h kv.Handle, buf []byte, redistributed bool) (key []byte, distinct bool, err error) {
 	if idxInfo.Unique {
 		// See https://dev.mysql.com/doc/refman/5.7/en/create-index.html
 		// A UNIQUE index creates a constraint such that all values in the index must be distinct.
