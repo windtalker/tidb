@@ -3973,6 +3973,7 @@ func (n *PartitionOptions) Accept(v Visitor) (Node, bool) {
 type RedistributedOptions struct {
 	node
 	ColumnNames []*ColumnName
+	GroupName   model.CIStr
 }
 
 func (n *RedistributedOptions) Validate() error {
@@ -3989,6 +3990,8 @@ func (n *RedistributedOptions) Restore(ctx *format.RestoreCtx) error {
 		ctx.WritePlain(colName.Name.O)
 	}
 	ctx.WritePlain(")")
+	ctx.WriteKeyWord(" TO GROUP ")
+	ctx.WriteName(n.GroupName.O)
 	return nil
 }
 

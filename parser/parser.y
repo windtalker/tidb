@@ -96,6 +96,7 @@ import (
 	constraint        "CONSTRAINT"
 	convert           "CONVERT"
 	create            "CREATE"
+	collocate         "COLLOCATE"
 	cross             "CROSS"
 	cumeDist          "CUME_DIST"
 	currentDate       "CURRENT_DATE"
@@ -867,6 +868,7 @@ import (
 	BRIEStmt                   "BACKUP or RESTORE statement"
 	CommitStmt                 "COMMIT statement"
 	CreateTableStmt            "CREATE TABLE statement"
+	CreateCollocateGroupStmt   "CREATE Collocate Group statement"
 	CreateViewStmt             "CREATE VIEW  statement"
 	CreateUserStmt             "CREATE User statement"
 	CreateRoleStmt             "CREATE Role statement"
@@ -3964,10 +3966,11 @@ RedistributedOpt:
 	{
 		$$ = nil
 	}
-|	"REDISTRIBUTED" "BY" '(' ColumnNameList ')'
+|	"REDISTRIBUTED" "BY" '(' ColumnNameList ')' "TO" "GROUP" Identifier
 	{
 		$$ = &ast.RedistributedOptions{
 			ColumnNames: $4.([]*ast.ColumnName),
+			GroupName:   model.NewCIStr($7),
 		}
 	}
 
@@ -11311,6 +11314,7 @@ Statement:
 |	CreateTableStmt
 |	CreateViewStmt
 |	CreateUserStmt
+|	CreateCollocateGroupStmt
 |	CreateRoleStmt
 |	CreateBindingStmt
 |	CreatePolicyStmt
@@ -12589,6 +12593,15 @@ CreateUserStmt:
 			TLSOptions:            $5.([]*ast.TLSOption),
 			ResourceOptions:       $6.([]*ast.ResourceOption),
 			PasswordOrLockOptions: $7.([]*ast.PasswordOrLockOption),
+		}
+	}
+
+CreateCollocateGroupStmt:
+	"CREATE" "COLLOCATE" "GROUP" IfNotExists Identifier
+	{
+		$$ = &ast.CreateCollocateGroupStmt{
+			IfNotExists: $4.(bool),
+			GroupName:   model.NewCIStr($5),
 		}
 	}
 

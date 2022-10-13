@@ -662,7 +662,7 @@ func EncodeRedistributedIndexSeekKey(hash uint64, tableID int64, idxID int64, en
 	key := make([]byte, 0, prefixLen+len(encodedValue))
 	key = append(key, tablePrefix...)
 	value := 0x1_00_0000_0000_0000 | hash<<48 | uint64(idxID)<<32 | uint64(tableID)
-	key = codec.EncodeUint(key, value)
+	key = codec.EncodeInt(key, int64(value))
 	key = append(key, recordPrefixSep...)
 	key = appendTableIndexPrefix(key, tableID)
 	key = append(key, encodedValue...)

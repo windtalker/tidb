@@ -86,6 +86,11 @@ func (d SchemaTracker) CreateSchema(ctx sessionctx.Context, stmt *ast.CreateData
 	return d.CreateSchemaWithInfo(ctx, dbInfo, onExist)
 }
 
+// CreateCollocateGroup implements the DDL interface.
+func (d SchemaTracker) CreateCollocateGroup(ctx sessionctx.Context, stmt *ast.CreateCollocateGroupStmt) error {
+	return nil
+}
+
 // CreateTestDB creates the `test` database, which is the default behavior of TiDB.
 func (d SchemaTracker) CreateTestDB() {
 	_ = d.CreateSchema(nil, &ast.CreateDatabaseStmt{

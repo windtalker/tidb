@@ -1566,6 +1566,31 @@ func (n *CreateUserStmt) SecureText() string {
 	return buf.String()
 }
 
+type CreateCollocateGroupStmt struct {
+	ddlNode
+
+	IfNotExists bool
+	GroupName   model.CIStr
+}
+
+func (n *CreateCollocateGroupStmt) Restore(ctx *format.RestoreCtx) error {
+	ctx.WriteKeyWord("CREATE COLLOCATE GROUP ")
+	if n.IfNotExists {
+		ctx.WriteKeyWord("IF NOT EXISTS ")
+	}
+	ctx.WriteName(n.GroupName.O)
+	return nil
+}
+
+func (n *CreateCollocateGroupStmt) Accept(v Visitor) (Node, bool) {
+	newNode, skipChildren := v.Enter(n)
+	if skipChildren {
+		return v.Leave(newNode)
+	}
+	n = newNode.(*CreateCollocateGroupStmt)
+	return v.Leave(n)
+}
+
 // AlterUserStmt modifies user account.
 // See https://dev.mysql.com/doc/refman/5.7/en/alter-user.html
 type AlterUserStmt struct {

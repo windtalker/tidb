@@ -328,7 +328,7 @@ func partitionPruning(ctx sessionctx.Context, tbl table.PartitionedTable, conds 
 
 func (e *mppTaskGenerator) constructMPPTasksImplForIndexScans(ctx context.Context, iss []*PhysicalIndexScan) ([]*kv.MPPTask, error) {
 	var req *kv.MPPBuildTasksRequest
-	var totalMetas map[string]map[string]kv.MPPTaskMeta
+	totalMetas := make(map[string]map[string]kv.MPPTaskMeta)
 	var allPartitionsIDs []int64
 	var err error
 	for _, is := range iss {
@@ -357,6 +357,9 @@ func (e *mppTaskGenerator) constructMPPTasksImplForIndexScans(ctx context.Contex
 			return nil, err
 		}
 		for _, meta := range metas {
+			if totalMetas[meta.GetAddress()] == nil {
+				totalMetas[meta.GetAddress()] = make(map[string]kv.MPPTaskMeta)
+			}
 			totalMetas[meta.GetAddress()][executor_id] = meta
 		}
 	}
