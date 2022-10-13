@@ -65,6 +65,9 @@ const (
 	// If we can't estimate the size of one side of join child, we will check if its row number exceeds this limitation.
 	TiDBBCJThresholdCount = "tidb_broadcast_join_threshold_count"
 
+	// TiDBMPPEnableRedistributedIndex is xxx
+	TiDBMPPEnableRedistributedIndex = "tidb_mpp_enable_redistributed_index"
+
 	// TiDBOptWriteRowID is used to enable/disable the operations of insert、replace and update to _tidb_rowid.
 	TiDBOptWriteRowID = "tidb_opt_write_row_id"
 
@@ -920,6 +923,7 @@ const (
 	DefTiDBProjectionConcurrency                   = ConcurrencyUnset
 	DefBroadcastJoinThresholdSize                  = 100 * 1024 * 1024
 	DefBroadcastJoinThresholdCount                 = 10 * 1024
+	DefMPPEnableRedistributedIndex                 = true
 	DefTiDBOptimizerSelectivityLevel               = 0
 	DefTiDBOptimizerEnableNewOFGB                  = false
 	DefTiDBEnableOuterJoinReorder                  = false

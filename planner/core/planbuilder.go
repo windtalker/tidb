@@ -1180,11 +1180,13 @@ func getPossibleAccessPaths(ctx sessionctx.Context, tableHints *tableHintInfo, i
 				}
 			}
 			if index.Redistributed {
-				// redistributed index can be used for TiFlash
-				publicPaths = append(publicPaths, &util.AccessPath{Index: index, StoreType: kv.TiFlash})
-				tikvIndex := *index
-				tikvIndex.Redistributed = false
-				publicPaths = append(publicPaths, &util.AccessPath{Index: &tikvIndex})
+				if ctx.GetSessionVars().MPPEnableRedistributedIndex {
+					// redistributed index can be used for TiFlash
+					publicPaths = append(publicPaths, &util.AccessPath{Index: index, StoreType: kv.TiFlash})
+					tikvIndex := *index
+					tikvIndex.Redistributed = false
+					publicPaths = append(publicPaths, &util.AccessPath{Index: &tikvIndex})
+				}
 			} else {
 				publicPaths = append(publicPaths, &util.AccessPath{Index: index})
 			}
