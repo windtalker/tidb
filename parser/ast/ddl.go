@@ -3972,8 +3972,7 @@ func (n *PartitionOptions) Accept(v Visitor) (Node, bool) {
 // RedistributedOptions specifies the redistributed options.
 type RedistributedOptions struct {
 	node
-	ColumnNames []*ColumnName
-	GroupName   model.CIStr
+	RedistributedKeys []*RedistributedKey
 }
 
 func (n *RedistributedOptions) Validate() error {
@@ -3982,6 +3981,30 @@ func (n *RedistributedOptions) Validate() error {
 
 func (n *RedistributedOptions) Restore(ctx *format.RestoreCtx) error {
 	ctx.WriteKeyWord("REDISTRIBUTED BY ")
+	for i, key := range n.RedistributedKeys {
+		if i != 0 {
+			ctx.WritePlain(", ")
+		}
+		err := key.Restore(ctx)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// RedistributedKey specifies the redistributed options.
+type RedistributedKey struct {
+	node
+	ColumnNames []*ColumnName
+	GroupName   model.CIStr
+}
+
+func (n *RedistributedKey) Validate() error {
+	return nil
+}
+
+func (n *RedistributedKey) Restore(ctx *format.RestoreCtx) error {
 	ctx.WritePlain("(")
 	for i, colName := range n.ColumnNames {
 		if i > 0 {
@@ -3995,7 +4018,7 @@ func (n *RedistributedOptions) Restore(ctx *format.RestoreCtx) error {
 	return nil
 }
 
-func (n *RedistributedOptions) Accept(v Visitor) (Node, bool) {
+func (n *RedistributedKey) Accept(v Visitor) (Node, bool) {
 	newNode, _ := v.Enter(n)
 	for _, colName := range n.ColumnNames {
 		colName.Accept(v)
