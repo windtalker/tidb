@@ -984,17 +984,20 @@ func IsPointGetWithPKOrUniqueKeyByAutoCommit(ctx sessionctx.Context, p Plan) (bo
 		indexScan := v.IndexPlans[0].(*PhysicalIndexScan)
 		return indexScan.IsPointGetByUniqueKey(ctx), nil
 	case *PhysicalTableReader:
-		tableScan := v.TablePlans[0].(*PhysicalTableScan)
-		isPointRange := len(tableScan.Ranges) == 1 && tableScan.Ranges[0].IsPointNonNullable(ctx)
-		if !isPointRange {
-			return false, nil
+		tableScan, ok := v.TablePlans[0].(*PhysicalTableScan)
+		if ok {
+			isPointRange := len(tableScan.Ranges) == 1 && tableScan.Ranges[0].IsPointNonNullable(ctx)
+			if !isPointRange {
+				return false, nil
+			}
+			pkLength := 1
+			if tableScan.Table.IsCommonHandle {
+				pkIdx := tables.FindPrimaryIndex(tableScan.Table)
+				pkLength = len(pkIdx.Columns)
+			}
+			return len(tableScan.Ranges[0].LowVal) == pkLength, nil
 		}
-		pkLength := 1
-		if tableScan.Table.IsCommonHandle {
-			pkIdx := tables.FindPrimaryIndex(tableScan.Table)
-			pkLength = len(pkIdx.Columns)
-		}
-		return len(tableScan.Ranges[0].LowVal) == pkLength, nil
+		return false, nil
 	case *PointGetPlan:
 		// If the PointGetPlan needs to read data using unique index (double read), we
 		// can't use max uint64, because using math.MaxUint64 can't guarantee repeatable-read
