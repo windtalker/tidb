@@ -521,6 +521,9 @@ func (p *PhysicalIndexScan) GetPlanCost(_ property.TaskType, option *PlanCostOpt
 	if option.tracer != nil {
 		setPhysicalTableOrIndexScanCostDetail(p, option.tracer, rowCount, rowSize, scanFactor, costModelVersion)
 	}
+	if p.Index.Redistributed {
+		selfCost = 0
+	}
 	p.planCost = selfCost
 	p.planCostInit = true
 	return p.planCost, nil
