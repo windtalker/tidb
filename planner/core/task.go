@@ -469,6 +469,13 @@ func (p *PhysicalHashJoin) attach2TaskForMpp(tasks ...task) task {
 		if len(lTask.hashCols) != len(rTask.hashCols) || len(lTask.hashCols) == 0 {
 			return invalidTask
 		}
+		if lTask.hashFromStorage != rTask.hashFromStorage {
+			if lTask.hashFromStorage {
+				lTask = lTask.enforceExchangerImpl(&property.PhysicalProperty{TaskTp: property.MppTaskType, MPPPartitionTp: lTask.partTp, MPPPartitionCols: lTask.hashCols})
+			} else {
+				rTask = rTask.enforceExchangerImpl(&property.PhysicalProperty{TaskTp: property.MppTaskType, MPPPartitionTp: rTask.partTp, MPPPartitionCols: rTask.hashCols})
+			}
+		}
 		lTask, rTask = p.convertPartitionKeysIfNeed(lTask, rTask)
 	}
 	p.SetChildren(lTask.plan(), rTask.plan())
@@ -494,9 +501,10 @@ func (p *PhysicalHashJoin) attach2TaskForMpp(tasks ...task) task {
 		outerTask = rTask
 	}
 	task := &mppTask{
-		p:        p,
-		partTp:   outerTask.partTp,
-		hashCols: outerTask.hashCols,
+		p:               p,
+		partTp:          outerTask.partTp,
+		hashCols:        outerTask.hashCols,
+		hashFromStorage: outerTask.hashFromStorage,
 	}
 	return task
 }
@@ -1862,8 +1870,9 @@ func (p *PhysicalWindow) attach2Task(tasks ...task) task {
 type mppTask struct {
 	p PhysicalPlan
 
-	partTp   property.MPPPartitionType
-	hashCols []*property.MPPPartitionColumn
+	partTp          property.MPPPartitionType
+	hashCols        []*property.MPPPartitionColumn
+	hashFromStorage bool
 }
 
 func (t *mppTask) count() float64 {
@@ -1985,8 +1994,9 @@ func (t *mppTask) enforceExchangerImpl(prop *property.PhysicalProperty) *mppTask
 	receiver := PhysicalExchangeReceiver{}.Init(ctx, t.p.statsInfo())
 	receiver.SetChildren(sender)
 	return &mppTask{
-		p:        receiver,
-		partTp:   prop.MPPPartitionTp,
-		hashCols: prop.MPPPartitionCols,
+		p:               receiver,
+		partTp:          prop.MPPPartitionTp,
+		hashCols:        prop.MPPPartitionCols,
+		hashFromStorage: false,
 	}
 }
