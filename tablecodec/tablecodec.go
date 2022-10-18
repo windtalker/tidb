@@ -22,7 +22,6 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/cespare/xxhash"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/tidb/errno"
 	"github.com/pingcap/tidb/kv"
@@ -1102,6 +1101,8 @@ func GetIndexKeyBuf(buf []byte, defaultCap int) []byte {
 	return make([]byte, 0, defaultCap)
 }
 
+func crc32Uint64Hash(crc uint32, data uint64) uint32
+
 // GenIndexKey generates index key using input physical table id
 func GenIndexKey(sc *stmtctx.StatementContext, tblInfo *model.TableInfo, idxInfo *model.IndexInfo,
 	phyTblID int64, indexedValues []types.Datum, h kv.Handle, buf []byte, redistributed bool) (key []byte, distinct bool, err error) {
@@ -1123,16 +1124,11 @@ func GenIndexKey(sc *stmtctx.StatementContext, tblInfo *model.TableInfo, idxInfo
 	TruncateIndexValues(tblInfo, idxInfo, indexedValues)
 	key = GetIndexKeyBuf(buf, RecordRowKeyLen+len(indexedValues)*9+9)
 	if redistributed {
-		xh := xxhash.New()
+		crc := ^uint32(0)
 		for _, v := range indexedValues {
-			var b []byte
-			b, err = v.ToBytes()
-			if err != nil {
-				return
-			}
-			xh.Write(b)
+			crc = crc32Uint64Hash(crc, v.GetUint64())
 		}
-		hash := xh.Sum64() % 256
+		hash := uint64(crc % 256)
 
 		key = append(key, tablePrefix...)
 		value := 0x1_00_0000_0000_0000 | hash<<48 | uint64(idxInfo.ID)<<32 | uint64(phyTblID)
