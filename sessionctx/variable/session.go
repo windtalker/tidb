@@ -792,6 +792,9 @@ type SessionVars struct {
 	// MPPEnableRedistributedIndex is xxx
 	MPPEnableRedistributedIndex bool
 
+	// MPPEnableBucketJoin is xxx
+	MPPEnableBucketJoin bool
+
 	// LimitPushDownThreshold determines if push Limit or TopN down to TiKV forcibly.
 	LimitPushDownThreshold int64
 
@@ -1508,6 +1511,7 @@ func NewSessionVars() *SessionVars {
 		BroadcastJoinThresholdSize:    DefBroadcastJoinThresholdSize,
 		BroadcastJoinThresholdCount:   DefBroadcastJoinThresholdSize,
 		MPPEnableRedistributedIndex:   DefMPPEnableRedistributedIndex,
+		MPPEnableBucketJoin:           DefMPPEnableBucketJoin,
 		OptimizerSelectivityLevel:     DefTiDBOptimizerSelectivityLevel,
 		EnableOuterJoinReorder:        DefTiDBEnableOuterJoinReorder,
 		RetryLimit:                    DefTiDBRetryLimit,

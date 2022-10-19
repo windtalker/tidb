@@ -469,11 +469,13 @@ func (p *PhysicalHashJoin) attach2TaskForMpp(tasks ...task) task {
 		if len(lTask.hashCols) != len(rTask.hashCols) || len(lTask.hashCols) == 0 {
 			return invalidTask
 		}
-		if lTask.hashFromStorage != rTask.hashFromStorage {
-			if lTask.hashFromStorage {
-				lTask = lTask.enforceExchangerImpl(&property.PhysicalProperty{TaskTp: property.MppTaskType, MPPPartitionTp: lTask.partTp, MPPPartitionCols: lTask.hashCols})
-			} else {
-				rTask = rTask.enforceExchangerImpl(&property.PhysicalProperty{TaskTp: property.MppTaskType, MPPPartitionTp: rTask.partTp, MPPPartitionCols: rTask.hashCols})
+		if !p.ctx.GetSessionVars().MPPEnableBucketJoin {
+			if lTask.hashFromStorage != rTask.hashFromStorage {
+				if lTask.hashFromStorage {
+					lTask = lTask.enforceExchangerImpl(&property.PhysicalProperty{TaskTp: property.MppTaskType, MPPPartitionTp: lTask.partTp, MPPPartitionCols: lTask.hashCols})
+				} else {
+					rTask = rTask.enforceExchangerImpl(&property.PhysicalProperty{TaskTp: property.MppTaskType, MPPPartitionTp: rTask.partTp, MPPPartitionCols: rTask.hashCols})
+				}
 			}
 		}
 		lTask, rTask = p.convertPartitionKeysIfNeed(lTask, rTask)

@@ -68,6 +68,9 @@ const (
 	// TiDBMPPEnableRedistributedIndex is xxx
 	TiDBMPPEnableRedistributedIndex = "tidb_mpp_enable_redistributed_index"
 
+	// TiDBMPPEnableBucketJoin is xxx
+	TiDBMPPEnableBucketJoin = "tidb_mpp_enable_bucket_join"
+
 	// TiDBOptWriteRowID is used to enable/disable the operations of insert、replace and update to _tidb_rowid.
 	TiDBOptWriteRowID = "tidb_opt_write_row_id"
 
@@ -924,6 +927,7 @@ const (
 	DefBroadcastJoinThresholdSize                  = 100 * 1024 * 1024
 	DefBroadcastJoinThresholdCount                 = 10 * 1024
 	DefMPPEnableRedistributedIndex                 = true
+	DefMPPEnableBucketJoin                         = true
 	DefTiDBOptimizerSelectivityLevel               = 0
 	DefTiDBOptimizerEnableNewOFGB                  = false
 	DefTiDBEnableOuterJoinReorder                  = false
