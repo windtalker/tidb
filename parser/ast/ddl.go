@@ -756,6 +756,7 @@ const (
 	ConstraintForeignKey
 	ConstraintFulltext
 	ConstraintCheck
+	ConstraintRedistributedIndex
 )
 
 // Constraint is constraint for table definition.
@@ -790,6 +791,8 @@ func (n *Constraint) Restore(ctx *format.RestoreCtx) error {
 	switch n.Tp {
 	case ConstraintNoConstraint:
 		return nil
+	case ConstraintRedistributedIndex:
+		ctx.WriteKeyWord("REDISTRIBUTED KEY")
 	case ConstraintPrimaryKey:
 		ctx.WriteKeyWord("PRIMARY KEY")
 	case ConstraintKey:
@@ -1004,6 +1007,7 @@ type CreateTableStmt struct {
 	Constraints    []*Constraint
 	Options        []*TableOption
 	Partition      *PartitionOptions
+	Redistributed  *RedistributedOptions
 	OnDuplicate    OnDuplicateKeyHandlingType
 	Select         ResultSetNode
 }
@@ -1066,6 +1070,13 @@ func (n *CreateTableStmt) Restore(ctx *format.RestoreCtx) error {
 		ctx.WritePlain(" ")
 		if err := n.Partition.Restore(ctx); err != nil {
 			return errors.Annotate(err, "An error occurred while splicing CreateTableStmt Partition")
+		}
+	}
+
+	if n.Redistributed != nil {
+		ctx.WritePlain(" ")
+		if err := n.Redistributed.Restore(ctx); err != nil {
+			return errors.Annotate(err, "An error occurred while splicing CreateTableStmt Redistributed")
 		}
 	}
 
@@ -3956,6 +3967,37 @@ func (n *PartitionOptions) Accept(v Visitor) (Node, bool) {
 		}
 	}
 	return v.Leave(n)
+}
+
+// RedistributedOptions specifies the redistributed options.
+type RedistributedOptions struct {
+	node
+	ColumnNames []*ColumnName
+}
+
+func (n *RedistributedOptions) Validate() error {
+	return nil
+}
+
+func (n *RedistributedOptions) Restore(ctx *format.RestoreCtx) error {
+	ctx.WriteKeyWord("REDISTRIBUTED BY ")
+	ctx.WritePlain("(")
+	for i, colName := range n.ColumnNames {
+		if i > 0 {
+			ctx.WritePlain(",")
+		}
+		ctx.WritePlain(colName.Name.O)
+	}
+	ctx.WritePlain(")")
+	return nil
+}
+
+func (n *RedistributedOptions) Accept(v Visitor) (Node, bool) {
+	newNode, _ := v.Enter(n)
+	for _, colName := range n.ColumnNames {
+		colName.Accept(v)
+	}
+	return v.Leave(newNode)
 }
 
 // RecoverTableStmt is a statement to recover dropped table.

@@ -1059,6 +1059,8 @@ func ConstructResultOfShowCreateTable(ctx sessionctx.Context, tableInfo *model.T
 			buf.WriteString("  PRIMARY KEY ")
 		} else if idxInfo.Unique {
 			fmt.Fprintf(buf, "  UNIQUE KEY %s ", stringutil.Escape(idxInfo.Name.O, sqlMode))
+		} else if idxInfo.Redistributed {
+			fmt.Fprintf(buf, "  REDISTRIBUTED KEY %s ", stringutil.Escape(idxInfo.Name.O, sqlMode))
 		} else {
 			fmt.Fprintf(buf, "  KEY %s ", stringutil.Escape(idxInfo.Name.O, sqlMode))
 		}

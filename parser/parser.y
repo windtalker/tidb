@@ -209,6 +209,7 @@ import (
 	outer             "OUTER"
 	over              "OVER"
 	partition         "PARTITION"
+	redistributed     "REDISTRIBUTED"
 	percentRank       "PERCENT_RANK"
 	precisionType     "PRECISION"
 	primary           "PRIMARY"
@@ -1118,6 +1119,7 @@ import (
 	PartitionKeyAlgorithmOpt               "ALGORITHM = n option for KEY partition"
 	PartitionMethod                        "Partition method"
 	PartitionOpt                           "Partition option"
+	RedistributedOpt                       "Redistributed option"
 	PartitionNameList                      "Partition name list"
 	PartitionNameListOpt                   "table partition names list optional"
 	PartitionNumOpt                        "PARTITION NUM option"
@@ -3876,7 +3878,7 @@ DatabaseOptionList:
  *      )
  *******************************************************************/
 CreateTableStmt:
-	"CREATE" OptTemporary "TABLE" IfNotExists TableName TableElementListOpt CreateTableOptionListOpt PartitionOpt DuplicateOpt AsOpt CreateTableSelectOpt OnCommitOpt
+	"CREATE" OptTemporary "TABLE" IfNotExists TableName TableElementListOpt CreateTableOptionListOpt PartitionOpt DuplicateOpt RedistributedOpt AsOpt CreateTableSelectOpt OnCommitOpt
 	{
 		stmt := $6.(*ast.CreateTableStmt)
 		stmt.Table = $5.(*ast.TableName)
@@ -3887,12 +3889,15 @@ CreateTableStmt:
 			stmt.Partition = $8.(*ast.PartitionOptions)
 		}
 		stmt.OnDuplicate = $9.(ast.OnDuplicateKeyHandlingType)
-		stmt.Select = $11.(*ast.CreateTableStmt).Select
-		if ($12 != nil && stmt.TemporaryKeyword != ast.TemporaryGlobal) || (stmt.TemporaryKeyword == ast.TemporaryGlobal && $12 == nil) {
+		if $10 != nil {
+			stmt.Redistributed = $10.(*ast.RedistributedOptions)
+		}
+		stmt.Select = $12.(*ast.CreateTableStmt).Select
+		if ($13 != nil && stmt.TemporaryKeyword != ast.TemporaryGlobal) || (stmt.TemporaryKeyword == ast.TemporaryGlobal && $13 == nil) {
 			yylex.AppendError(yylex.Errorf("GLOBAL TEMPORARY and ON COMMIT DELETE ROWS must appear together"))
 		} else {
 			if stmt.TemporaryKeyword == ast.TemporaryGlobal {
-				stmt.OnCommitDelete = $12.(bool)
+				stmt.OnCommitDelete = $13.(bool)
 			}
 		}
 		$$ = stmt
@@ -3953,6 +3958,17 @@ PartitionOpt:
 			return 1
 		}
 		$$ = opt
+	}
+
+RedistributedOpt:
+	{
+		$$ = nil
+	}
+|	"REDISTRIBUTED" "BY" '(' ColumnNameList ')'
+	{
+		$$ = &ast.RedistributedOptions{
+			ColumnNames: $4.([]*ast.ColumnName),
+		}
 	}
 
 SubPartitionMethod:
