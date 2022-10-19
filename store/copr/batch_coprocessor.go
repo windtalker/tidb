@@ -45,6 +45,7 @@ import (
 // batchCopTask comprises of multiple copTask that will send to same store.
 type batchCopTask struct {
 	storeAddr string
+	storeId   uint64
 	cmdType   tikvrpc.CmdType
 	ctx       *tikv.RPCContext
 
@@ -108,6 +109,7 @@ func deepCopyStoreTaskMap(storeTaskMap map[uint64]*batchCopTask) map[uint64]*bat
 	for storeID, task := range storeTaskMap {
 		t := batchCopTask{
 			storeAddr: task.storeAddr,
+			storeId:   task.storeId,
 			cmdType:   task.cmdType,
 			ctx:       task.ctx,
 		}
@@ -316,6 +318,7 @@ func balanceBatchCopTask(ctx context.Context, kvStore *kvStore, originalTasks []
 			taskStoreID := task.regionInfos[0].AllStores[0]
 			batchTask := &batchCopTask{
 				storeAddr:   task.storeAddr,
+				storeId:     task.storeId,
 				cmdType:     task.cmdType,
 				ctx:         task.ctx,
 				regionInfos: []RegionInfo{task.regionInfos[0]},
@@ -375,6 +378,7 @@ func balanceBatchCopTask(ctx context.Context, kvStore *kvStore, originalTasks []
 				defer mu.Unlock()
 				storeTaskMap[s.StoreID()] = &batchCopTask{
 					storeAddr: s.GetAddr(),
+					storeId:   s.StoreID(),
 					cmdType:   originalTasks[0].cmdType,
 					ctx:       &tikv.RPCContext{Addr: s.GetAddr(), Store: s},
 				}
@@ -597,6 +601,7 @@ func buildBatchCopTasksCore(bo *backoff.Backoffer, store *kvStore, rangesForEach
 			} else {
 				batchTask := &batchCopTask{
 					storeAddr:   rpcCtx.Addr,
+					storeId:     rpcCtx.Store.StoreID(),
 					cmdType:     cmdType,
 					ctx:         rpcCtx,
 					regionInfos: []RegionInfo{{Region: task.region, Meta: rpcCtx.Meta, Ranges: task.ranges, AllStores: allStores, PartitionIndex: task.partitionIndex}},

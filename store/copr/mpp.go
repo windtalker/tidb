@@ -52,10 +52,15 @@ func (c *batchCopTask) GetAddress() string {
 	return c.storeAddr
 }
 
+// GetStoreId returns the network address.
+func (c *batchCopTask) GetStoreId() uint64 {
+	return c.storeId
+}
+
 func (c *MPPClient) selectAllTiFlashStore() []kv.MPPTaskMeta {
 	resultTasks := make([]kv.MPPTaskMeta, 0)
 	for _, s := range c.store.GetRegionCache().GetTiFlashStores() {
-		task := &batchCopTask{storeAddr: s.GetAddr(), cmdType: tikvrpc.CmdMPPTask}
+		task := &batchCopTask{storeAddr: s.GetAddr(), storeId: s.StoreID(), cmdType: tikvrpc.CmdMPPTask}
 		resultTasks = append(resultTasks, task)
 	}
 	return resultTasks

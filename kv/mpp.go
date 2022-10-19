@@ -26,6 +26,7 @@ import (
 type MPPTaskMeta interface {
 	// GetAddress indicates which node this task should execute on.
 	GetAddress() string
+	GetStoreId() uint64
 }
 
 // MPPTask means the minimum execution unit of a mpp computation job.

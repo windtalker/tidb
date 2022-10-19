@@ -2739,13 +2739,15 @@ func (la *LogicalAggregation) getHashAggs(prop *property.PhysicalProperty) []Phy
 				hashAggs = append(hashAggs, mppAggs...)
 			}
 			if !prop.IsFlashProp() {
-				mppProp := prop
+				mppProp := *prop
 				mppProp.TaskTp = property.MppTaskType
 				mppProp.MPPPartitionTp = property.HashType
 				mppProp.MPPPartitionCols = la.GetPotentialPartitionKeys()
-				mppAggs := la.tryToGetMppHashAggs(prop)
-				if len(mppAggs) > 0 {
-					hashAggs = append(hashAggs, mppAggs...)
+				if len(mppProp.MPPPartitionCols) > 0 {
+					mppAggs := la.tryToGetMppHashAggs(&mppProp)
+					if len(mppAggs) > 0 {
+						hashAggs = append(hashAggs, mppAggs...)
+					}
 				}
 			}
 		} else {
