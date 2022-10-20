@@ -41,6 +41,7 @@ type index struct {
 	// the collation global variable is initialized *after* `NewIndex()`.
 	initNeedRestoreData sync.Once
 	needRestoredData    bool
+	redistributed bool
 }
 
 // NeedRestoredData checks whether the index columns needs restored data.
@@ -65,11 +66,15 @@ func NewIndex(physicalID int64, tblInfo *model.TableInfo, indexInfo *model.Index
 		// Otherwise, start with physicalID.
 		prefix = tablecodec.EncodeTableIndexPrefix(physicalID, indexInfo.ID)
 	}
+	if indexInfo.Redistributed {
+		prefix = tablecodec.EncodeTableIndexPrefix(physicalID, indexInfo.ID)
+	}
 	index := &index{
 		idxInfo:  indexInfo,
 		tblInfo:  tblInfo,
 		prefix:   prefix,
 		phyTblID: physicalID,
+		redistributed: indexInfo.Redistributed,
 	}
 	return index
 }
@@ -86,7 +91,7 @@ func (c *index) GenIndexKey(sc *stmtctx.StatementContext, indexedValues []types.
 	if c.idxInfo.Global {
 		idxTblID = c.tblInfo.ID
 	}
-	return tablecodec.GenIndexKey(sc, c.tblInfo, c.idxInfo, idxTblID, indexedValues, h, buf)
+	return tablecodec.GenIndexKey(sc, c.tblInfo, c.idxInfo, idxTblID, indexedValues, h, buf, c.redistributed)
 }
 
 // GenIndexValue generates the index value.

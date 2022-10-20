@@ -327,7 +327,7 @@ func buildIndexKeyValue(index table.Index, rowToInsert []types.Datum, sessVars *
 		return nil, nil, err
 	}
 	key, distinct, err := tablecodec.GenIndexKey(
-		sessVars.StmtCtx, &tableInfo, indexInfo, 1, indexedValues, handle, nil,
+		sessVars.StmtCtx, &tableInfo, indexInfo, 1, indexedValues, handle, nil, indexInfo.Redistributed,
 	)
 	if err != nil {
 		return nil, nil, err

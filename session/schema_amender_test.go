@@ -193,7 +193,7 @@ func prepareTestData(
 			}
 			kvHandle := kv.IntHandle(inputRow[0].GetInt64())
 			idxKey, _, err := tablecodec.GenIndexKey(se.sessionVars.StmtCtx, newTblInfo.Meta(),
-				info.indexInfoAtCommit.Meta(), newTblInfo.Meta().ID, indexDatums, kvHandle, nil)
+				info.indexInfoAtCommit.Meta(), newTblInfo.Meta().ID, indexDatums, kvHandle, nil, info.indexInfoAtCommit.Meta().Redistributed)
 			require.NoError(t, err)
 			idxVal, err = tablecodec.GenIndexValuePortal(se.sessionVars.StmtCtx, newTblInfo.Meta(), info.indexInfoAtCommit.Meta(), false, info.indexInfoAtCommit.Meta().Unique, false, indexDatums, kvHandle, 0, nil)
 			require.NoError(t, err)
