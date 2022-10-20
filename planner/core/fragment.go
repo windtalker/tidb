@@ -124,7 +124,7 @@ func (e *mppTaskGenerator) constructMPPTasksByChildrenTasks(tasks []*kv.MPPTask)
 		}
 	}
 	sort.Slice(newTasks, func(i, j int) bool {
-		return newTasks[i].Meta.GetStoreId() > newTasks[j].Meta.GetStoreId()
+		return newTasks[i].Meta.GetStoreId() < newTasks[j].Meta.GetStoreId()
 	})
 	for _, task := range newTasks {
 		task.ID = e.ctx.GetSessionVars().AllocMPPTaskID(e.startTS)
@@ -383,7 +383,7 @@ func (e *mppTaskGenerator) constructMPPTasksImplForIndexScans(ctx context.Contex
 		}
 	}
 	sort.Slice(tasks, func(i, j int) bool {
-		return tasks[i].Meta.GetStoreId() > tasks[j].Meta.GetStoreId()
+		return tasks[i].Meta.GetStoreId() < tasks[j].Meta.GetStoreId()
 	})
 	for _, task := range tasks {
 		task.ID = e.ctx.GetSessionVars().AllocMPPTaskID(e.startTS)
@@ -440,7 +440,7 @@ func (e *mppTaskGenerator) constructMPPTasksImpl(ctx context.Context, ts *Physic
 		tasks = append(tasks, task)
 	}
 	sort.Slice(tasks, func(i, j int) bool {
-		return tasks[i].Meta.GetStoreId() > tasks[j].Meta.GetStoreId()
+		return tasks[i].Meta.GetStoreId() < tasks[j].Meta.GetStoreId()
 	})
 	for _, task := range tasks {
 		task.ID = e.ctx.GetSessionVars().AllocMPPTaskID(e.startTS)
