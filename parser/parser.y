@@ -1122,6 +1122,8 @@ import (
 	PartitionMethod                        "Partition method"
 	PartitionOpt                           "Partition option"
 	RedistributedOpt                       "Redistributed option"
+	RedistributedKeyList                   "Redistributed key list"
+	RedistributedKey                       "Redistributed key"
 	PartitionNameList                      "Partition name list"
 	PartitionNameListOpt                   "table partition names list optional"
 	PartitionNumOpt                        "PARTITION NUM option"
@@ -3962,15 +3964,33 @@ PartitionOpt:
 		$$ = opt
 	}
 
+RedistributedKey:
+	'(' ColumnNameList ')' "TO" "GROUP" Identifier
+	{
+		$$ = &ast.RedistributedKey{
+			ColumnNames: $2.([]*ast.ColumnName),
+			GroupName:   model.NewCIStr($6),
+		}
+	}
+
+RedistributedKeyList:
+	RedistributedKey
+	{
+		$$ = []*ast.RedistributedKey{$1.(*ast.RedistributedKey)}
+	}
+|	RedistributedKeyList ',' RedistributedKey
+	{
+		$$ = append($1.([]*ast.RedistributedKey), $3.(*ast.RedistributedKey))
+	}
+
 RedistributedOpt:
 	{
 		$$ = nil
 	}
-|	"REDISTRIBUTED" "BY" '(' ColumnNameList ')' "TO" "GROUP" Identifier
+|	"REDISTRIBUTED" "BY" RedistributedKeyList
 	{
 		$$ = &ast.RedistributedOptions{
-			ColumnNames: $4.([]*ast.ColumnName),
-			GroupName:   model.NewCIStr($7),
+			RedistributedKeys: $3.([]*ast.RedistributedKey),
 		}
 	}
 

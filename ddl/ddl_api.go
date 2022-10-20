@@ -2212,16 +2212,18 @@ func BuildTableInfoWithStmt(ctx sessionctx.Context, s *ast.CreateTableStmt, dbCh
 	// The column charset haven't been resolved here.
 	cols, newConstraints, err := buildColumnsAndConstraints(ctx, colDefs, s.Constraints, tableCharset, tableCollate)
 	if s.Redistributed != nil {
-		length := types.UnspecifiedLength
-		keys := make([]*ast.IndexPartSpecification, len(s.Redistributed.ColumnNames))
-		for i, colName := range s.Redistributed.ColumnNames {
-			keys[i] = &ast.IndexPartSpecification{
-				Column: colName,
-				Length: length,
+		for _, redistributedKey := range s.Redistributed.RedistributedKeys {
+			length := types.UnspecifiedLength
+			keys := make([]*ast.IndexPartSpecification, len(redistributedKey.ColumnNames))
+			for i, colName := range redistributedKey.ColumnNames {
+				keys[i] = &ast.IndexPartSpecification{
+					Column: colName,
+					Length: length,
+				}
 			}
+			constraint := &ast.Constraint{Tp: ast.ConstraintRedistributedIndex, Keys: keys}
+			newConstraints = append(newConstraints, constraint)
 		}
-		constraint := &ast.Constraint{Tp: ast.ConstraintRedistributedIndex, Keys: keys}
-		newConstraints = append(newConstraints, constraint)
 	}
 	if err != nil {
 		return nil, errors.Trace(err)
