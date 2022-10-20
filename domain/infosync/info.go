@@ -1126,15 +1126,33 @@ func CloseTiFlashManager(ctx context.Context) {
 	is.tiflashPlacementManager.Close(ctx)
 }
 
-// ConfigureTiFlashPDForTable configures pd rule for unpartitioned tables.
-func ConfigureTiFlashPDForTable(id int64, count uint64, locationLabels *[]string) error {
+// ConfigureTiFlashPDForRedistributedIndex configures pd rule for unpartitioned tables.
+func ConfigureTiFlashPDForRedistributedIndex(tid int64, idxid int64, count uint64, locationLabels *[]string) error {
 	is, err := getGlobalInfoSyncer()
 	if err != nil {
 		return errors.Trace(err)
 	}
 	ctx := context.Background()
-	logutil.BgLogger().Info("ConfigureTiFlashPDForTable", zap.Int64("tableID", id), zap.Uint64("count", count))
-	ruleNew := MakeNewRule(id, count, *locationLabels)
+	logutil.BgLogger().Info("ConfigureTiFlashPDForTable", zap.Int64("tableID", tid), zap.Uint64("count", count))
+	for i := 0; i < 256; i++ {
+		nid := (((0x01<<8+int64(i))<<16)+idxid)<<32 + tid
+		ruleNew := MakeNewRule(nid, count, *locationLabels)
+		if e := is.tiflashPlacementManager.SetPlacementRule(ctx, *ruleNew); e != nil {
+			return errors.Trace(e)
+		}
+	}
+	return nil
+}
+
+// ConfigureTiFlashPDForTable configures pd rule for unpartitioned tables.
+func ConfigureTiFlashPDForTable(tid int64, count uint64, locationLabels *[]string) error {
+	is, err := getGlobalInfoSyncer()
+	if err != nil {
+		return errors.Trace(err)
+	}
+	ctx := context.Background()
+	logutil.BgLogger().Info("ConfigureTiFlashPDForTable", zap.Int64("tableID", tid), zap.Uint64("count", count))
+	ruleNew := MakeNewRule(tid, count, *locationLabels)
 	if e := is.tiflashPlacementManager.SetPlacementRule(ctx, *ruleNew); e != nil {
 		return errors.Trace(e)
 	}

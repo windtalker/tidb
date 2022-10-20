@@ -1203,6 +1203,16 @@ func (w *worker) onSetTableFlashReplica(d *ddlCtx, t *meta.Meta, job *model.Job)
 		}
 	}
 
+	for _, idx := range tblInfo.Indices {
+		if idx.Redistributed {
+			logutil.BgLogger().Info("Set Redistributed index's Tiflash replica pd rule", zap.Int64("tableID", tblInfo.ID))
+			if e := infosync.ConfigureTiFlashPDForRedistributedIndex(tblInfo.ID, idx.ID, replicaInfo.Count, &replicaInfo.Labels); e != nil {
+				job.State = model.JobStateCancelled
+				return ver, errors.Trace(e)
+			}
+		}
+	}
+
 	if replicaInfo.Count > 0 {
 		tblInfo.TiFlashReplica = &model.TiFlashReplicaInfo{
 			Count:          replicaInfo.Count,
