@@ -1136,7 +1136,7 @@ func GenIndexKey(sc *stmtctx.StatementContext, tblInfo *model.TableInfo, idxInfo
 
 		key = append(key, tablePrefix...)
 		value := 0x1_00_0000_0000_0000 | hash<<48 | uint64(idxInfo.ID)<<32 | uint64(phyTblID)
-		key = codec.EncodeUint(key, value)
+		key = codec.EncodeInt(key, int64(value))
 		key = append(key, recordPrefixSep...)
 
 		if h.IsInt() {
