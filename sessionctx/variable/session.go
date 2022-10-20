@@ -789,6 +789,9 @@ type SessionVars struct {
 	// If we can't estimate the size of one side of join child, we will check if its row number exceeds this limitation.
 	BroadcastJoinThresholdCount int64
 
+	// MPPEnableRedistributedIndex is xxx
+	MPPEnableRedistributedIndex bool
+
 	// LimitPushDownThreshold determines if push Limit or TopN down to TiKV forcibly.
 	LimitPushDownThreshold int64
 
@@ -1504,6 +1507,7 @@ func NewSessionVars() *SessionVars {
 		MPPOuterJoinFixedBuildSide:    DefOptMPPOuterJoinFixedBuildSide,
 		BroadcastJoinThresholdSize:    DefBroadcastJoinThresholdSize,
 		BroadcastJoinThresholdCount:   DefBroadcastJoinThresholdSize,
+		MPPEnableRedistributedIndex:   DefMPPEnableRedistributedIndex,
 		OptimizerSelectivityLevel:     DefTiDBOptimizerSelectivityLevel,
 		EnableOuterJoinReorder:        DefTiDBEnableOuterJoinReorder,
 		RetryLimit:                    DefTiDBRetryLimit,
