@@ -583,6 +583,23 @@ func PartitionHandlesToKVRanges(handles []kv.Handle) []kv.KeyRange {
 	return krs
 }
 
+// RedistributedIndexRangesToKVRanges converts redistributed index ranges to "KeyRange".
+func RedistributedIndexRangesToKVRanges(sc *stmtctx.StatementContext, tid, idxID int64, ranges []*ranger.Range, fb *statistics.QueryFeedback) ([]kv.KeyRange, error) {
+	krs := make([]kv.KeyRange, 0, len(ranges)*256)
+	for _, ran := range ranges {
+		low, high, err := EncodeIndexKey(sc, ran)
+		if err != nil {
+			return nil, err
+		}
+		for j := 0; j < 256; j++ {
+			startKey := tablecodec.EncodeRedistributedIndexSeekKey(uint64(j), tid, idxID, low)
+			endKey := tablecodec.EncodeRedistributedIndexSeekKey(uint64(j), tid, idxID, high)
+			krs = append(krs, kv.KeyRange{StartKey: startKey, EndKey: endKey})
+		}
+	}
+	return krs, nil
+}
+
 // IndexRangesToKVRanges converts index ranges to "KeyRange".
 func IndexRangesToKVRanges(sc *stmtctx.StatementContext, tid, idxID int64, ranges []*ranger.Range, fb *statistics.QueryFeedback) ([]kv.KeyRange, error) {
 	return IndexRangesToKVRangesWithInterruptSignal(sc, tid, idxID, ranges, fb, nil, nil)

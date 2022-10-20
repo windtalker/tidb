@@ -234,6 +234,25 @@ func (m *mppIterator) handleDispatchReq(ctx context.Context, bo *Backoffer, req 
 			mppReq.Regions = nil
 		}
 	}
+	if len(req.MetaMap) != 0 {
+		mppReq.Regions = nil
+		mppReq.TableRegions = nil
+		var executorRegions []*coprocessor.ExecutorRegionInfos
+		for executorID, meta := range req.MetaMap {
+			currentExecutorRegions := &coprocessor.ExecutorRegionInfos{ExecutorId: executorID}
+			batchTask, ok := meta.(*batchCopTask)
+			if !ok {
+				m.sendError(errors.New("must batch cop task"))
+			}
+			var regionInfos []*coprocessor.RegionInfo
+			for _, region := range batchTask.regionInfos {
+				regionInfos = append(regionInfos, region.toCoprocessorRegionInfo())
+			}
+			currentExecutorRegions.Regions = regionInfos
+			executorRegions = append(executorRegions, currentExecutorRegions)
+		}
+		mppReq.ExecutorRegions = executorRegions
+	}
 
 	wrappedReq := tikvrpc.NewRequest(tikvrpc.CmdMPPTask, mppReq, kvrpcpb.Context{})
 	wrappedReq.StoreTp = tikvrpc.TiFlash
