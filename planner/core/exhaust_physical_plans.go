@@ -2737,6 +2737,16 @@ func (la *LogicalAggregation) getHashAggs(prop *property.PhysicalProperty) []Phy
 			if len(mppAggs) > 0 {
 				hashAggs = append(hashAggs, mppAggs...)
 			}
+			if !prop.IsFlashProp() {
+				mppProp := prop
+				mppProp.TaskTp = property.MppTaskType
+				mppProp.MPPPartitionTp = property.HashType
+				mppProp.MPPPartitionCols = la.GetPotentialPartitionKeys()
+				mppAggs := la.tryToGetMppHashAggs(prop)
+				if len(mppAggs) > 0 {
+					hashAggs = append(hashAggs, mppAggs...)
+				}
+			}
 		} else {
 			agg := NewPhysicalHashAgg(la, la.stats.ScaleByExpectCnt(prop.ExpectedCnt), &property.PhysicalProperty{ExpectedCnt: math.MaxFloat64, TaskTp: taskTp})
 			agg.SetSchema(la.schema.Clone())
