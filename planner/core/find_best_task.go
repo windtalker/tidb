@@ -589,6 +589,16 @@ func compareCandidates(lhs, rhs *candidatePath) int {
 	return 0
 }
 
+func compareTiFlashCandidates(lhs, rhs *candidatePath) int {
+	if lhs.isMatchProp {
+		return 1
+	}
+	if rhs.isMatchProp {
+		return -1
+	}
+	return 0
+}
+
 func (ds *DataSource) isMatchProp(path *util.AccessPath, prop *property.PhysicalProperty) bool {
 	var isMatchProp bool
 	if path.IsIntHandlePath {
@@ -649,7 +659,7 @@ func (ds *DataSource) getTableCandidate(path *util.AccessPath, prop *property.Ph
 
 func (ds *DataSource) getIndexCandidate(path *util.AccessPath, prop *property.PhysicalProperty) *candidatePath {
 	candidate := &candidatePath{path: path}
-	candidate.isMatchProp = ds.isMatchProp(path, prop)
+	candidate.isMatchProp = path.Index.Redistributed || ds.isMatchProp(path, prop)
 	candidate.accessCondsColMap = util.ExtractCol2Len(path.AccessConds, path.IdxCols, path.IdxColLens)
 	candidate.indexCondsColMap = util.ExtractCol2Len(append(path.AccessConds, path.IndexFilters...), path.FullIdxCols, path.FullIdxColLens)
 	return candidate
@@ -681,23 +691,36 @@ func (ds *DataSource) skylinePruning(prop *property.PhysicalProperty) []*candida
 		if path.IsTablePath() {
 			currentCandidate = ds.getTableCandidate(path, prop)
 		} else {
-			if len(path.AccessConds) > 0 || !prop.IsSortItemEmpty() || path.Forced || path.IsSingleScan {
-				// We will use index to generate physical plan if any of the following conditions is satisfied:
-				// 1. This path's access cond is not nil.
-				// 2. We have a non-empty prop to match.
-				// 3. This index is forced to choose.
-				// 4. The needed columns are all covered by index columns(and handleCol).
-				currentCandidate = ds.getIndexCandidate(path, prop)
+			if path.Index.Redistributed {
+				if ds.isRedistributedIndexMatchProp(path.Index, prop) {
+					currentCandidate = ds.getIndexCandidate(path, prop)
+				} else {
+					continue
+				}
 			} else {
-				continue
+				if len(path.AccessConds) > 0 || !prop.IsSortItemEmpty() || path.Forced || path.IsSingleScan {
+					// We will use index to generate physical plan if any of the following conditions is satisfied:
+					// 1. This path's access cond is not nil.
+					// 2. We have a non-empty prop to match.
+					// 3. This index is forced to choose.
+					// 4. The needed columns are all covered by index columns(and handleCol).
+					currentCandidate = ds.getIndexCandidate(path, prop)
+				} else {
+					continue
+				}
 			}
 		}
 		pruned := false
 		for i := len(candidates) - 1; i >= 0; i-- {
-			if candidates[i].path.StoreType == kv.TiFlash {
+			if candidates[i].path.StoreType == kv.TiFlash && currentCandidate.path.StoreType != kv.TiFlash {
 				continue
 			}
-			result := compareCandidates(candidates[i], currentCandidate)
+			result := 0
+			if currentCandidate.path.StoreType == kv.TiFlash {
+				result = compareTiFlashCandidates(candidates[i], currentCandidate)
+			} else {
+				result = compareCandidates(candidates[i], currentCandidate)
+			}
 			if result == 1 {
 				pruned = true
 				// We can break here because the current candidate cannot prune others anymore.
@@ -797,6 +820,23 @@ func (ds *DataSource) isPointGetConvertableSchema() bool {
 	return true
 }
 
+func (ds *DataSource) isRedistributedIndexMatchProp(index *model.IndexInfo, prop *property.PhysicalProperty) bool {
+	if index.Redistributed && len(index.Columns) == len(prop.MPPPartitionCols) {
+		partitionColSet := make(map[int64]struct{})
+		for _, partitionCol := range prop.MPPPartitionCols {
+			partitionColSet[partitionCol.Col.UniqueID] = struct{}{}
+		}
+		for _, indexCol := range index.Columns {
+			delete(partitionColSet, ds.TblCols[indexCol.Offset].UniqueID)
+		}
+		hasMatchedRI := len(partitionColSet) == 0
+		if hasMatchedRI {
+			return true
+		}
+	}
+	return false
+}
+
 // findBestTask implements the PhysicalPlan interface.
 // It will enumerate all the available indices and choose a plan with least cost.
 func (ds *DataSource) findBestTask(prop *property.PhysicalProperty, planCounter *PlanCounterTp, opt *physicalOptimizeOp) (t task, cntPlan int64, err error) {
@@ -833,8 +873,19 @@ func (ds *DataSource) findBestTask(prop *property.PhysicalProperty, planCounter 
 		// Next, get the bestTask with enforced prop
 		prop.SortItems = []property.SortItem{}
 		prop.MPPPartitionTp = property.AnyType
-	} else if prop.MPPPartitionTp != property.AnyType {
+	} else if prop.MPPPartitionTp == property.BroadcastType || prop.MPPPartitionTp == property.SinglePartitionType {
 		return invalidTask, 0, nil
+	} else if prop.MPPPartitionTp == property.HashType {
+		hasMatchedRI := false
+		for _, index := range ds.tableInfo.Indices {
+			hasMatchedRI = ds.isRedistributedIndexMatchProp(index, prop)
+			if hasMatchedRI {
+				break
+			}
+		}
+		if !hasMatchedRI {
+			return invalidTask, 0, nil
+		}
 	}
 	defer func() {
 		if err != nil {
@@ -1025,7 +1076,7 @@ func (ds *DataSource) findBestTask(prop *property.PhysicalProperty, planCounter 
 			continue
 		}
 		// TiFlash storage do not support index scan.
-		if ds.preferStoreType&preferTiFlash != 0 {
+		if !path.Index.Redistributed && ds.preferStoreType&preferTiFlash != 0 {
 			continue
 		}
 		idxTask, err := ds.convertToIndexScan(prop, candidate, opt)
@@ -1343,6 +1394,19 @@ func (ds *DataSource) addSelection4PlanCache(task *rootTask, stats *property.Sta
 // convertToIndexScan converts the DataSource to index scan with idx.
 func (ds *DataSource) convertToIndexScan(prop *property.PhysicalProperty,
 	candidate *candidatePath, _ *physicalOptimizeOp) (task task, err error) {
+	if prop.IsFlashProp() {
+		if !candidate.path.Index.Redistributed {
+			return invalidTask, nil
+		}
+		is := ds.getOriginalPhysicalIndexScan(prop, candidate.path, candidate.isMatchProp, candidate.path.IsSingleScan)
+		mppTask := &mppTask{
+			p:        is,
+			partTp:   prop.MPPPartitionTp,
+			hashCols: prop.MPPPartitionCols,
+		}
+		mppTask = is.addPushedDownSelectionToMPPTask(mppTask, ds, candidate.path, ds.stats.ScaleByExpectCnt(prop.ExpectedCnt))
+		return mppTask, nil
+	}
 	if !candidate.path.IsSingleScan {
 		// If it's parent requires single read task, return max cost.
 		if prop.TaskTp == property.CopSingleReadTaskType {
@@ -1510,6 +1574,44 @@ func (is *PhysicalIndexScan) initSchema(idxExprCols []*expression.Column, isDoub
 	}
 
 	is.SetSchema(expression.NewSchema(indexCols...))
+}
+
+func (is *PhysicalIndexScan) addPushedDownSelectionToMPPTask(mpp *mppTask, p *DataSource, path *util.AccessPath, finalStats *property.StatsInfo) *mppTask {
+	// Add filter condition to table plan now.
+	indexConds, tableConds := path.IndexFilters, path.TableFilters
+	var newRootConds []expression.Expression
+	tableConds, newRootConds = SplitSelCondsWithVirtualColumn(tableConds)
+	if len(newRootConds) > 0 {
+		return &mppTask{}
+	}
+
+	indexConds, newRootConds = expression.PushDownExprs(is.ctx.GetSessionVars().StmtCtx, indexConds, is.ctx.GetClient(), kv.TiFlash)
+	if len(newRootConds) > 0 {
+		return &mppTask{}
+	}
+
+	tableConds, newRootConds = expression.PushDownExprs(is.ctx.GetSessionVars().StmtCtx, tableConds, is.ctx.GetClient(), kv.TiFlash)
+	if len(newRootConds) > 0 {
+		return &mppTask{}
+	}
+
+	if indexConds != nil {
+		var selectivity float64
+		if path.CountAfterAccess > 0 {
+			selectivity = path.CountAfterIndex / path.CountAfterAccess
+		}
+		count := is.stats.RowCount * selectivity
+		stats := p.tableStats.ScaleByExpectCnt(count)
+		indexSel := PhysicalSelection{Conditions: indexConds}.Init(is.ctx, stats, is.blockOffset)
+		indexSel.SetChildren(mpp.p)
+		mpp.p = indexSel
+	}
+	if len(tableConds) > 0 {
+		tableSel := PhysicalSelection{Conditions: tableConds}.Init(is.ctx, finalStats, is.blockOffset)
+		tableSel.SetChildren(mpp.p)
+		mpp.p = tableSel
+	}
+	return mpp
 }
 
 func (is *PhysicalIndexScan) addPushedDownSelection(copTask *copTask, p *DataSource, path *util.AccessPath, finalStats *property.StatsInfo) {
@@ -2253,7 +2355,7 @@ func (ds *DataSource) getOriginalPhysicalIndexScan(prop *property.PhysicalProper
 		}
 	}
 	is.stats = ds.tableStats.ScaleByExpectCnt(rowCount)
-	if isMatchProp {
+	if isMatchProp && len(prop.SortItems) > 0 {
 		is.Desc = prop.SortItems[0].Desc
 		is.KeepOrder = true
 	}

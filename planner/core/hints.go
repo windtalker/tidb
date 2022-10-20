@@ -174,20 +174,22 @@ func genHintsFromSingle(p PhysicalPlan, nodeType utilhint.NodeType, res []*ast.T
 	}
 	switch pp := p.(type) {
 	case *PhysicalTableReader:
-		tbl := pp.TablePlans[0].(*PhysicalTableScan)
-		if tbl.StoreType == kv.TiFlash {
-			res = append(res, &ast.TableOptimizerHint{
-				QBName:   qbName,
-				HintName: model.NewCIStr(HintReadFromStorage),
-				HintData: model.NewCIStr(kv.TiFlash.Name()),
-				Tables:   []ast.HintTable{{DBName: tbl.DBName, TableName: getTableName(tbl.Table.Name, tbl.TableAsName)}},
-			})
-		} else {
-			res = append(res, &ast.TableOptimizerHint{
-				QBName:   qbName,
-				HintName: model.NewCIStr(HintUseIndex),
-				Tables:   []ast.HintTable{{DBName: tbl.DBName, TableName: getTableName(tbl.Table.Name, tbl.TableAsName)}},
-			})
+		tbl, ok := pp.TablePlans[0].(*PhysicalTableScan)
+		if ok {
+			if tbl.StoreType == kv.TiFlash {
+				res = append(res, &ast.TableOptimizerHint{
+					QBName:   qbName,
+					HintName: model.NewCIStr(HintReadFromStorage),
+					HintData: model.NewCIStr(kv.TiFlash.Name()),
+					Tables:   []ast.HintTable{{DBName: tbl.DBName, TableName: getTableName(tbl.Table.Name, tbl.TableAsName)}},
+				})
+			} else {
+				res = append(res, &ast.TableOptimizerHint{
+					QBName:   qbName,
+					HintName: model.NewCIStr(HintUseIndex),
+					Tables:   []ast.HintTable{{DBName: tbl.DBName, TableName: getTableName(tbl.Table.Name, tbl.TableAsName)}},
+				})
+			}
 		}
 	case *PhysicalIndexLookUpReader:
 		index := pp.IndexPlans[0].(*PhysicalIndexScan)
