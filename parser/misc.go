@@ -223,6 +223,7 @@ var tokenMap = map[string]int{
 	"CMSKETCH":                 cmSketch,
 	"COALESCE":                 coalesce,
 	"COLLATE":                  collate,
+	"COLLOCATE":                collocate,
 	"COLLATION":                collation,
 	"COLUMN_FORMAT":            columnFormat,
 	"COLUMN_STATS_USAGE":       columnStatsUsage,

@@ -87,6 +87,11 @@ const (
 	tiflashCheckPendingTablesRetry = 7
 )
 
+// CreateCollocateGroup implements the DDL interface.
+func (d *ddl) CreateCollocateGroup(ctx sessionctx.Context, stmt *ast.CreateCollocateGroupStmt) (err error) {
+	return nil
+}
+
 func (d *ddl) CreateSchema(ctx sessionctx.Context, stmt *ast.CreateDatabaseStmt) (err error) {
 	var placementPolicyRef *model.PolicyRefInfo
 	sessionVars := ctx.GetSessionVars()

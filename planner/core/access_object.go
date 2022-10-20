@@ -396,16 +396,19 @@ func (p *PhysicalTableReader) accessObject(sctx sessionctx.Context) AccessObject
 		return DynamicPartitionAccessObjects(nil)
 	}
 	if len(p.PartitionInfos) == 0 {
-		ts := p.TablePlans[0].(*PhysicalTableScan)
-		asName := ""
-		if ts.TableAsName != nil && len(ts.TableAsName.O) > 0 {
-			asName = ts.TableAsName.O
+		ts, ok := p.TablePlans[0].(*PhysicalTableScan)
+		if ok {
+			asName := ""
+			if ts.TableAsName != nil && len(ts.TableAsName.O) > 0 {
+				asName = ts.TableAsName.O
+			}
+			res := getDynamicAccessPartition(sctx, ts.Table, &p.PartitionInfo, asName)
+			if res == nil {
+				return DynamicPartitionAccessObjects(nil)
+			}
+			return DynamicPartitionAccessObjects{res}
 		}
-		res := getDynamicAccessPartition(sctx, ts.Table, &p.PartitionInfo, asName)
-		if res == nil {
-			return DynamicPartitionAccessObjects(nil)
-		}
-		return DynamicPartitionAccessObjects{res}
+		return DynamicPartitionAccessObjects(nil)
 	}
 	if len(p.PartitionInfos) == 1 {
 		ts := p.PartitionInfos[0].tableScan

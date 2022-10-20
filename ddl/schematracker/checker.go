@@ -165,6 +165,11 @@ func (d Checker) checkTableInfo(ctx sessionctx.Context, dbName, tableName model.
 	}
 }
 
+// CreateCollocateGroup implements the DDL interface.
+func (d Checker) CreateCollocateGroup(ctx sessionctx.Context, stmt *ast.CreateCollocateGroupStmt) error {
+	return nil
+}
+
 // CreateSchema implements the DDL interface.
 func (d Checker) CreateSchema(ctx sessionctx.Context, stmt *ast.CreateDatabaseStmt) error {
 	err := d.realDDL.CreateSchema(ctx, stmt)
