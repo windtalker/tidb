@@ -41,7 +41,7 @@ type index struct {
 	// the collation global variable is initialized *after* `NewIndex()`.
 	initNeedRestoreData sync.Once
 	needRestoredData    bool
-	redistributed bool
+	redistributed       bool
 }
 
 // NeedRestoredData checks whether the index columns needs restored data.
@@ -70,10 +70,10 @@ func NewIndex(physicalID int64, tblInfo *model.TableInfo, indexInfo *model.Index
 		prefix = tablecodec.EncodeTableIndexPrefix(physicalID, indexInfo.ID)
 	}
 	index := &index{
-		idxInfo:  indexInfo,
-		tblInfo:  tblInfo,
-		prefix:   prefix,
-		phyTblID: physicalID,
+		idxInfo:       indexInfo,
+		tblInfo:       tblInfo,
+		prefix:        prefix,
+		phyTblID:      physicalID,
 		redistributed: indexInfo.Redistributed,
 	}
 	return index
@@ -86,12 +86,12 @@ func (c *index) Meta() *model.IndexInfo {
 
 // GenIndexKey generates storage key for index values. Returned distinct indicates whether the
 // indexed values should be distinct in storage (i.e. whether handle is encoded in the key).
-func (c *index) GenIndexKey(sc *stmtctx.StatementContext, indexedValues []types.Datum, h kv.Handle, buf []byte) (key []byte, distinct bool, err error) {
+func (c *index) GenIndexKey(sc *stmtctx.StatementContext, indexedValues []types.Datum, h kv.Handle, buf []byte, rowValue []byte) (key []byte, distinct bool, err error) {
 	idxTblID := c.phyTblID
 	if c.idxInfo.Global {
 		idxTblID = c.tblInfo.ID
 	}
-	return tablecodec.GenIndexKey(sc, c.tblInfo, c.idxInfo, idxTblID, indexedValues, h, buf, c.redistributed)
+	return tablecodec.GenIndexKey(sc, c.tblInfo, c.idxInfo, idxTblID, indexedValues, h, buf, rowValue, c.redistributed)
 }
 
 // GenIndexValue generates the index value.
@@ -116,7 +116,7 @@ func (c *index) Create(sctx sessionctx.Context, txn kv.Transaction, indexedValue
 	vars := sctx.GetSessionVars()
 	writeBufs := vars.GetWriteStmtBufs()
 	skipCheck := vars.StmtCtx.BatchCheck
-	key, distinct, err := c.GenIndexKey(vars.StmtCtx, indexedValues, h, writeBufs.IndexKeyBuf)
+	key, distinct, err := c.GenIndexKey(vars.StmtCtx, indexedValues, h, writeBufs.IndexKeyBuf, writeBufs.RowValBuf)
 	if err != nil {
 		return nil, err
 	}
@@ -277,7 +277,7 @@ var (
 
 // Delete removes the entry for handle h and indexedValues from KV index.
 func (c *index) Delete(sc *stmtctx.StatementContext, txn kv.Transaction, indexedValues []types.Datum, h kv.Handle) error {
-	key, distinct, err := c.GenIndexKey(sc, indexedValues, h, nil)
+	key, distinct, err := c.GenIndexKey(sc, indexedValues, h, nil, nil)
 	if err != nil {
 		return err
 	}
@@ -356,7 +356,7 @@ func genTempIdxKeyByState(indexInfo *model.IndexInfo, indexKey kv.Key) (key, tem
 }
 
 func (c *index) Exist(sc *stmtctx.StatementContext, txn kv.Transaction, indexedValues []types.Datum, h kv.Handle) (bool, kv.Handle, error) {
-	key, distinct, err := c.GenIndexKey(sc, indexedValues, h, nil)
+	key, distinct, err := c.GenIndexKey(sc, indexedValues, h, nil, nil)
 	if err != nil {
 		return false, nil, err
 	}

@@ -398,7 +398,7 @@ func (e *RecoverIndexExec) batchMarkDup(txn kv.Transaction, rows []recoverRows) 
 	sc := e.ctx.GetSessionVars().StmtCtx
 	distinctFlags := make([]bool, len(rows))
 	for i, row := range rows {
-		idxKey, distinct, err := e.index.GenIndexKey(sc, row.idxVals, row.handle, e.idxKeyBufs[i])
+		idxKey, distinct, err := e.index.GenIndexKey(sc, row.idxVals, row.handle, e.idxKeyBufs[i], nil)
 		if err != nil {
 			return err
 		}
@@ -640,7 +640,7 @@ func (e *CleanupIndexExec) fetchIndex(ctx context.Context, txn kv.Transaction) e
 			} else {
 				e.idxValues.Set(handle, [][]types.Datum{idxVals})
 			}
-			idxKey, _, err := e.index.GenIndexKey(sc, idxVals, handle, nil)
+			idxKey, _, err := e.index.GenIndexKey(sc, idxVals, handle, nil, nil)
 			if err != nil {
 				return err
 			}
@@ -771,7 +771,7 @@ func (e *CleanupIndexExec) init() error {
 	e.batchKeys = make([]kv.Key, 0, e.batchSize)
 	e.idxValsBufs = make([][]types.Datum, e.batchSize)
 	sc := e.ctx.GetSessionVars().StmtCtx
-	idxKey, _, err := e.index.GenIndexKey(sc, []types.Datum{{}}, kv.IntHandle(math.MinInt64), nil)
+	idxKey, _, err := e.index.GenIndexKey(sc, []types.Datum{{}}, kv.IntHandle(math.MinInt64), nil, nil)
 	if err != nil {
 		return err
 	}

@@ -451,7 +451,7 @@ func (a *amendOperationAddIndexInfo) genIndexKeyValue(ctx context.Context, sctx 
 
 	// Generate index key buf.
 	newIdxKey, distinct, err := tablecodec.GenIndexKey(sctx.GetSessionVars().StmtCtx,
-		a.tblInfoAtCommit.Meta(), a.indexInfoAtCommit.Meta(), a.tblInfoAtCommit.Meta().ID, idxVals, kvHandle, nil, a.indexInfoAtCommit.Meta().Redistributed)
+		a.tblInfoAtCommit.Meta(), a.indexInfoAtCommit.Meta(), a.tblInfoAtCommit.Meta().ID, idxVals, kvHandle, nil, val, a.indexInfoAtCommit.Meta().Redistributed)
 	if err != nil {
 		logutil.Logger(ctx).Warn("amend generate index key failed", zap.Error(err))
 		return nil, nil, errors.Trace(err)

@@ -22,6 +22,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/cespare/xxhash"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/tidb/errno"
 	"github.com/pingcap/tidb/kv"
@@ -46,11 +47,10 @@ var (
 )
 
 var (
-	tablePrefix                 = []byte{'t'}
-	recordPrefixSep             = []byte("_r")
-	indexPrefixSep              = []byte("_i")
-	redistributedIndexPrefixSep = []byte("_d")
-	metaPrefix                  = []byte{'m'}
+	tablePrefix     = []byte{'t'}
+	recordPrefixSep = []byte("_r")
+	indexPrefixSep  = []byte("_i")
+	metaPrefix      = []byte{'m'}
 )
 
 const (
@@ -251,7 +251,7 @@ func DecodeKeyHead(key kv.Key) (tableID int64, indexID int64, isRecordKey bool, 
 		isRecordKey = true
 		return
 	}
-	if !key.HasPrefix(indexPrefixSep) && !key.HasPrefix(redistributedIndexPrefixSep) {
+	if !key.HasPrefix(indexPrefixSep) {
 		err = errInvalidKey.GenWithStack("invalid key - %q", k)
 		return
 	}
@@ -1005,14 +1005,6 @@ func appendTableIndexPrefix(buf []byte, tableID int64) []byte {
 	return buf
 }
 
-// appendRedistributedTableIndexPrefix appends table index prefix  "t[tableID]_r".
-func appendRedistributedTableIndexPrefix(buf []byte, tableID int64) []byte {
-	buf = append(buf, tablePrefix...)
-	buf = codec.EncodeInt(buf, tableID)
-	buf = append(buf, redistributedIndexPrefixSep...)
-	return buf
-}
-
 // GenTableRecordPrefix composes record prefix with tableID: "t[tableID]_r".
 func GenTableRecordPrefix(tableID int64) kv.Key {
 	buf := make([]byte, 0, len(tablePrefix)+8+len(recordPrefixSep))
@@ -1100,7 +1092,7 @@ func GetIndexKeyBuf(buf []byte, defaultCap int) []byte {
 
 // GenIndexKey generates index key using input physical table id
 func GenIndexKey(sc *stmtctx.StatementContext, tblInfo *model.TableInfo, idxInfo *model.IndexInfo,
-	phyTblID int64, indexedValues []types.Datum, h kv.Handle, buf []byte, redistributed bool) (key []byte, distinct bool, err error) {
+	phyTblID int64, indexedValues []types.Datum, h kv.Handle, buf []byte, rowValue []byte, redistributed bool) (key []byte, distinct bool, err error) {
 	if idxInfo.Unique {
 		// See https://dev.mysql.com/doc/refman/5.7/en/create-index.html
 		// A UNIQUE index creates a constraint such that all values in the index must be distinct.
@@ -1119,10 +1111,31 @@ func GenIndexKey(sc *stmtctx.StatementContext, tblInfo *model.TableInfo, idxInfo
 	TruncateIndexValues(tblInfo, idxInfo, indexedValues)
 	key = GetIndexKeyBuf(buf, RecordRowKeyLen+len(indexedValues)*9+9)
 	if redistributed {
-		key = appendRedistributedTableIndexPrefix(key, phyTblID)
-	} else {
-		key = appendTableIndexPrefix(key, phyTblID)
+		xh := xxhash.New()
+		for _, v := range indexedValues {
+			var b []byte
+			b, err = v.ToBytes()
+			if err != nil {
+				return
+			}
+			xh.Write(b)
+		}
+		hash := xh.Sum64() % 256
+
+		key = append(key, tablePrefix...)
+		value := 0x1_00_0000_0000_0000 | hash<<48 | uint64(idxInfo.ID)<<32 | uint64(phyTblID)
+		key = codec.EncodeUint(key, value)
+		key = append(key, recordPrefixSep...)
+
+		if h.IsInt() {
+			key, err = codec.EncodeKey(sc, key, types.NewDatum(h.IntValue()))
+		} else {
+			key = append(key, h.Encoded()...)
+		}
+		return
 	}
+
+	key = appendTableIndexPrefix(key, phyTblID)
 	key = codec.EncodeInt(key, idxInfo.ID)
 	key, err = codec.EncodeKey(sc, key, indexedValues...)
 	if err != nil {
