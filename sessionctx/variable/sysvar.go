@@ -1147,6 +1147,10 @@ var defaultSysVars = []*SysVar{
 		s.MPPEnableRedistributedIndex = TiDBOptOn(val)
 		return nil
 	}},
+	{Scope: ScopeGlobal | ScopeSession, Name: TiDBMPPEnableBucketJoin, Value: BoolToOnOff(DefMPPEnableBucketJoin), Type: TypeBool, SetSession: func(s *SessionVars, val string) error {
+		s.MPPEnableBucketJoin = TiDBOptOn(val)
+		return nil
+	}},
 	{Scope: ScopeGlobal | ScopeSession, Name: TiDBBCJThresholdSize, Value: strconv.Itoa(DefBroadcastJoinThresholdSize), Type: TypeInt, MinValue: 0, MaxValue: math.MaxInt64, SetSession: func(s *SessionVars, val string) error {
 		s.BroadcastJoinThresholdSize = TidbOptInt64(val, DefBroadcastJoinThresholdSize)
 		return nil
