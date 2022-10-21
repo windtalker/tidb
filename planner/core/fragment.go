@@ -16,6 +16,7 @@ package core
 
 import (
 	"context"
+	"sort"
 	"time"
 
 	"github.com/pingcap/errors"
@@ -93,30 +94,40 @@ func (e *mppTaskGenerator) generateMPPTasks(s *PhysicalExchangeSender) ([]*Fragm
 
 type mppAddr struct {
 	addr string
+	id   uint64
 }
 
 func (m *mppAddr) GetAddress() string {
 	return m.addr
 }
 
+func (m *mppAddr) GetStoreId() uint64 {
+	return m.id
+}
+
 // for the task without table scan, we construct tasks according to the children's tasks.
 // That's for avoiding assigning to the failed node repeatly. We assumes that the chilren node must be workable.
 func (e *mppTaskGenerator) constructMPPTasksByChildrenTasks(tasks []*kv.MPPTask) []*kv.MPPTask {
-	addressMap := make(map[string]struct{})
+	addressMap := make(map[string]uint64)
 	newTasks := make([]*kv.MPPTask, 0, len(tasks))
 	for _, task := range tasks {
 		addr := task.Meta.GetAddress()
-		_, ok := addressMap[addr]
+		id, ok := addressMap[addr]
 		if !ok {
 			mppTask := &kv.MPPTask{
-				Meta:    &mppAddr{addr: addr},
-				ID:      e.ctx.GetSessionVars().AllocMPPTaskID(e.startTS),
+				Meta:    &mppAddr{addr: addr, id: id},
 				StartTs: e.startTS,
 				TableID: -1,
 			}
 			newTasks = append(newTasks, mppTask)
-			addressMap[addr] = struct{}{}
+			addressMap[addr] = task.Meta.GetStoreId()
 		}
+	}
+	sort.Slice(newTasks, func(i, j int) bool {
+		return newTasks[i].Meta.GetStoreId() > newTasks[j].Meta.GetStoreId()
+	})
+	for _, task := range newTasks {
+		task.ID = e.ctx.GetSessionVars().AllocMPPTaskID(e.startTS)
 	}
 	return newTasks
 }
@@ -366,10 +377,16 @@ func (e *mppTaskGenerator) constructMPPTasksImplForIndexScans(ctx context.Contex
 	tasks := make([]*kv.MPPTask, 0, len(totalMetas))
 	for _, metas := range totalMetas {
 		for _, meta := range metas {
-			task := &kv.MPPTask{Meta: meta, MetaMap: metas, ID: e.ctx.GetSessionVars().AllocMPPTaskID(e.startTS), StartTs: e.startTS, TableID: iss[0].Table.ID, PartitionTableIDs: allPartitionsIDs}
+			task := &kv.MPPTask{Meta: meta, MetaMap: metas, StartTs: e.startTS, TableID: iss[0].Table.ID, PartitionTableIDs: allPartitionsIDs}
 			tasks = append(tasks, task)
 			break
 		}
+	}
+	sort.Slice(tasks, func(i, j int) bool {
+		return tasks[i].Meta.GetStoreId() > tasks[j].Meta.GetStoreId()
+	})
+	for _, task := range tasks {
+		task.ID = e.ctx.GetSessionVars().AllocMPPTaskID(e.startTS)
 	}
 	return tasks, nil
 }
@@ -419,8 +436,14 @@ func (e *mppTaskGenerator) constructMPPTasksImpl(ctx context.Context, ts *Physic
 
 	tasks := make([]*kv.MPPTask, 0, len(metas))
 	for _, meta := range metas {
-		task := &kv.MPPTask{Meta: meta, ID: e.ctx.GetSessionVars().AllocMPPTaskID(e.startTS), StartTs: e.startTS, TableID: ts.Table.ID, PartitionTableIDs: allPartitionsIDs}
+		task := &kv.MPPTask{Meta: meta, StartTs: e.startTS, TableID: ts.Table.ID, PartitionTableIDs: allPartitionsIDs}
 		tasks = append(tasks, task)
+	}
+	sort.Slice(tasks, func(i, j int) bool {
+		return tasks[i].Meta.GetStoreId() > tasks[j].Meta.GetStoreId()
+	})
+	for _, task := range tasks {
+		task.ID = e.ctx.GetSessionVars().AllocMPPTaskID(e.startTS)
 	}
 	return tasks, nil
 }
