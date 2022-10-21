@@ -1401,9 +1401,10 @@ func (ds *DataSource) convertToIndexScan(prop *property.PhysicalProperty,
 		}
 		is := ds.getOriginalPhysicalIndexScan(prop, candidate.path, candidate.isMatchProp, candidate.path.IsSingleScan)
 		mppTask := &mppTask{
-			p:        is,
-			partTp:   prop.MPPPartitionTp,
-			hashCols: prop.MPPPartitionCols,
+			p:               is,
+			partTp:          prop.MPPPartitionTp,
+			hashCols:        prop.MPPPartitionCols,
+			hashFromStorage: true,
 		}
 		mppTask = is.addPushedDownSelectionToMPPTask(mppTask, ds, candidate.path, ds.stats.ScaleByExpectCnt(prop.ExpectedCnt))
 		return mppTask, nil
