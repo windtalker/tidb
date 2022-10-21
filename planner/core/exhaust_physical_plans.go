@@ -1998,16 +1998,17 @@ func (p *LogicalJoin) tryToGetMppHashJoin(prop *property.PhysicalProperty, useBC
 			expCnt = p.children[1-preferredBuildIndex].statsInfo().RowCount * expCntScale
 		}
 		if prop.MPPPartitionTp == property.HashType {
-			lPartitionKeys, rPartitionKeys := p.GetPotentialPartitionKeys()
-			hashKeys := rPartitionKeys
-			if preferredBuildIndex == 1 {
-				hashKeys = lPartitionKeys
-			}
-			if matches := prop.IsSubsetOf(hashKeys); len(matches) != 0 {
-				childrenProps[1-preferredBuildIndex] = &property.PhysicalProperty{TaskTp: property.MppTaskType, ExpectedCnt: expCnt, MPPPartitionTp: property.HashType, MPPPartitionCols: prop.MPPPartitionCols, RejectSort: true}
-			} else {
-				return nil
-			}
+			//lPartitionKeys, rPartitionKeys := p.GetPotentialPartitionKeys()
+			//hashKeys := rPartitionKeys
+			//if preferredBuildIndex == 1 {
+			//	hashKeys = lPartitionKeys
+			//}
+			childrenProps[1-preferredBuildIndex] = &property.PhysicalProperty{TaskTp: property.MppTaskType, ExpectedCnt: expCnt, MPPPartitionTp: property.HashType, MPPPartitionCols: prop.MPPPartitionCols, RejectSort: true}
+			//if matches := prop.IsSubsetOf(hashKeys); len(matches) != 0 {
+			//	childrenProps[1-preferredBuildIndex] = &property.PhysicalProperty{TaskTp: property.MppTaskType, ExpectedCnt: expCnt, MPPPartitionTp: property.HashType, MPPPartitionCols: prop.MPPPartitionCols, RejectSort: true}
+			//} else {
+			//	return nil
+			//}
 		} else {
 			childrenProps[1-preferredBuildIndex] = &property.PhysicalProperty{TaskTp: property.MppTaskType, ExpectedCnt: expCnt, MPPPartitionTp: property.AnyType, RejectSort: true}
 		}
