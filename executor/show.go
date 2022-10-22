@@ -1079,6 +1079,13 @@ func ConstructResultOfShowCreateTable(ctx sessionctx.Context, tableInfo *model.T
 			cols = append(cols, colInfo)
 		}
 		fmt.Fprintf(buf, "(%s)", strings.Join(cols, ","))
+		if idxInfo.Redistributed {
+			if len(idxInfo.Group) == 0 {
+				buf.WriteString(" TO GROUP g1")
+			} else {
+				fmt.Fprintf(buf, " TO GROUP %s", idxInfo.Group)
+			}
+		}
 		if idxInfo.Invisible {
 			fmt.Fprintf(buf, ` /*!80000 INVISIBLE */`)
 		}

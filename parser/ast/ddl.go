@@ -669,6 +669,7 @@ type IndexOption struct {
 	ParserName   model.CIStr
 	Visibility   IndexVisibility
 	PrimaryKeyTp model.PrimaryKeyType
+	GroupName    model.CIStr
 }
 
 // Restore implements Node interface.
@@ -727,6 +728,11 @@ func (n *IndexOption) Restore(ctx *format.RestoreCtx) error {
 		case IndexVisibilityInvisible:
 			ctx.WriteKeyWord("INVISIBLE")
 		}
+	}
+
+	if n.GroupName.O != "" {
+		ctx.WriteKeyWord("TO GROUP ")
+		ctx.WriteString(n.GroupName.O)
 	}
 	return nil
 }

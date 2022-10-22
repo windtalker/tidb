@@ -1892,6 +1892,7 @@ func BuildTableInfo(
 		)
 		if constr.Tp == ast.ConstraintRedistributedIndex {
 			idxInfo.Redistributed = true
+			idxInfo.Group = constr.Option.GroupName.O
 		}
 		if err != nil {
 			return nil, errors.Trace(err)
@@ -2221,7 +2222,7 @@ func BuildTableInfoWithStmt(ctx sessionctx.Context, s *ast.CreateTableStmt, dbCh
 					Length: length,
 				}
 			}
-			constraint := &ast.Constraint{Tp: ast.ConstraintRedistributedIndex, Keys: keys}
+			constraint := &ast.Constraint{Tp: ast.ConstraintRedistributedIndex, Keys: keys, Option: &ast.IndexOption{GroupName: redistributedKey.GroupName}}
 			newConstraints = append(newConstraints, constraint)
 		}
 	}

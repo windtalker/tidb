@@ -1401,6 +1401,7 @@ type IndexInfo struct {
 	Invisible     bool           `json:"is_invisible"`     // Whether the index is invisible.
 	Global        bool           `json:"is_global"`        // Whether the index is global.
 	Redistributed bool           `json:"is_redistributed"` // Whether the index is redistributed.
+	Group         string         `json:"group_name"`       // Whether the index group.
 }
 
 // Clone clones IndexInfo.
