@@ -1346,7 +1346,7 @@ func (ds *DataSource) Convert2Gathers() (gathers []LogicalPlan) {
 }
 
 func (ds *DataSource) detachCondAndBuildRangeForPath(path *util.AccessPath, conds []expression.Expression) error {
-	if len(path.IdxCols) == 0 {
+	if len(path.IdxCols) == 0 || path.Index.Redistributed {
 		path.TableFilters = conds
 		return nil
 	}
