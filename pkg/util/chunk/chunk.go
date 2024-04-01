@@ -714,3 +714,10 @@ func (c *Chunk) AppendPartialRows(colOff int, rows []Row) {
 func (c *Chunk) Destroy(initCap int, fields []*types.FieldType) {
 	putChunkFromPool(initCap, fields, c)
 }
+
+func (c *Chunk) ShallowCopyWithNewSel(sel []int) *Chunk {
+	ret := *c
+	ret.sel = sel
+	ret.numVirtualRows = len(sel)
+	return &ret
+}

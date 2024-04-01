@@ -416,13 +416,13 @@ func (b *rowTableBuilder) ResetBuffer(chk *chunk.Chunk) {
 		}
 		b.usedRows = b.selRows
 	}
-	if cap(b.serializedKeyVectorBuffer) >= logicalRows {
-		b.serializedKeyVectorBuffer = b.serializedKeyVectorBuffer[:logicalRows]
-		for i := 0; i < logicalRows; i++ {
+	if cap(b.serializedKeyVectorBuffer) >= physicalRows {
+		b.serializedKeyVectorBuffer = b.serializedKeyVectorBuffer[:physicalRows]
+		for i := 0; i < physicalRows; i++ {
 			b.serializedKeyVectorBuffer[i] = b.serializedKeyVectorBuffer[i][:0]
 		}
 	} else {
-		b.serializedKeyVectorBuffer = make([][]byte, logicalRows)
+		b.serializedKeyVectorBuffer = make([][]byte, physicalRows)
 	}
 	if cap(b.partIdxVector) >= logicalRows {
 		b.partIdxVector = b.partIdxVector[:logicalRows]
@@ -515,12 +515,12 @@ func (builder *rowTableBuilder) appendToRowTable(typeCtx types.Context, chk *chu
 		length := uint64(0)
 		// if join_key is not fixed length: `key_length` need to be written in rawData
 		if !rowTableMeta.isJoinKeysFixedLength {
-			length = uint64(len(builder.serializedKeyVectorBuffer[logicalRowIndex]))
+			length = uint64(len(builder.serializedKeyVectorBuffer[physicalRowIndex]))
 			seg.rawData = append(seg.rawData, unsafe.Slice((*byte)(unsafe.Pointer(&length)), SizeOfLengthField)...)
 		}
 		if !rowTableMeta.isJoinKeysInlined {
 			// if join_key is not inlined: `serialized_key` need to be written in rawData
-			seg.rawData = append(seg.rawData, builder.serializedKeyVectorBuffer[logicalRowIndex]...)
+			seg.rawData = append(seg.rawData, builder.serializedKeyVectorBuffer[physicalRowIndex]...)
 		}
 
 		for index, colIdx := range builder.rowColumnsOrder {

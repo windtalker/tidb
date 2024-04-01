@@ -28,7 +28,7 @@ type leftOuterJoinProbe struct {
 	rowIter *rowIter
 }
 
-func (j *leftOuterJoinProbe) SetChunkForProbe(chunk *chunk.Chunk) (err error) {
+func (j *leftOuterJoinProbe) SetChunkForProbe(chunk *PartitionedChunk) (err error) {
 	err = j.innerJoinProbe.SetChunkForProbe(chunk)
 	if err != nil {
 		return err
@@ -116,7 +116,7 @@ func (j *leftOuterJoinProbe) buildResultForMatchedRowsAfterOtherCondition(chk, j
 			chunk.CopySelectedRows(dstCol, srcCol, j.selected)
 		} else {
 			markedJoined = true
-			srcCol := j.currentChunk.Column(colIndex)
+			srcCol := j.currentChunk.Chk.Column(colIndex)
 			chunk.CopySelectedRowsWithRowIdFunc(dstCol, srcCol, j.selected, 0, len(j.selected), func(i int) int {
 				ret := j.rowIndexInfos[i].probeRowIndex
 				j.isNotMatchedRows[ret] = false
@@ -127,7 +127,7 @@ func (j *leftOuterJoinProbe) buildResultForMatchedRowsAfterOtherCondition(chk, j
 	hasRemainCols := false
 	for index, colIndex := range j.rUsed {
 		dstCol := chk.Column(index + len(j.lUsed))
-		srcCol := joinedChk.Column(colIndex + j.currentChunk.NumCols())
+		srcCol := joinedChk.Column(colIndex + j.currentChunk.Chk.NumCols())
 		if srcCol.Rows() > 0 {
 			// build column that is already in joinedChk
 			chunk.CopySelectedRows(dstCol, srcCol, j.selected)
@@ -165,7 +165,7 @@ func (j *leftOuterJoinProbe) buildResultForNotMatchedRows(chk *chunk.Chunk, star
 	prevRows, afterRows := 0, 0
 	for index, colIndex := range j.lUsed {
 		dstCol := chk.Column(index)
-		srcCol := j.currentChunk.Column(colIndex)
+		srcCol := j.currentChunk.Chk.Column(colIndex)
 		prevRows = dstCol.Rows()
 		chunk.CopySelectedRowsWithRowIdFunc(dstCol, srcCol, j.isNotMatchedRows, startProbeRow, j.currentProbeRow, func(i int) int {
 			return j.usedRows[i]
@@ -199,7 +199,7 @@ func (j *leftOuterJoinProbe) probeForRightBuild(chk, joinedChk *chunk.Chunk, rem
 		if j.matchedRowsHeaders[j.currentProbeRow] != 0 {
 			// hash value match
 			candidateRow := j.matchedRowsHeaders[j.currentProbeRow]
-			if isKeyMatched(meta.keyMode, j.serializedKeys[j.currentProbeRow], candidateRow, meta) {
+			if isKeyMatched(meta.keyMode, j.currentChunk.serializedKeys[j.usedRows[j.currentProbeRow]], candidateRow, meta) {
 				// join key match
 				j.appendBuildRowToCachedBuildRowsAndConstructBuildRowsIfNeeded(rowIndexInfo{probeRowIndex: j.currentProbeRow, buildRowStart: candidateRow}, joinedChk, 0, hasOtherCondition)
 				if !hasOtherCondition {
@@ -223,7 +223,7 @@ func (j *leftOuterJoinProbe) probeForRightBuild(chk, joinedChk *chunk.Chunk, rem
 		j.batchConstructBuildRows(joinedChk, 0, true)
 	}
 	j.appendOffsetAndLength(j.currentProbeRow, length)
-	j.appendProbeRowToChunk(joinedChk, j.currentChunk)
+	j.appendProbeRowToChunk(joinedChk, j.currentChunk.Chk)
 
 	if j.ctx.hasOtherCondition() {
 		if joinedChk.NumRows() > 0 {
@@ -252,7 +252,7 @@ func (j *leftOuterJoinProbe) probeForLeftBuild(chk, joinedChk *chunk.Chunk, rema
 		if j.matchedRowsHeaders[j.currentProbeRow] != 0 {
 			// hash value match
 			candidateRow := j.matchedRowsHeaders[j.currentProbeRow]
-			if isKeyMatched(meta.keyMode, j.serializedKeys[j.currentProbeRow], candidateRow, meta) {
+			if isKeyMatched(meta.keyMode, j.currentChunk.serializedKeys[j.usedRows[j.currentProbeRow]], candidateRow, meta) {
 				// join key match
 				j.appendBuildRowToCachedBuildRowsAndConstructBuildRowsIfNeeded(rowIndexInfo{probeRowIndex: j.currentProbeRow, buildRowStart: candidateRow}, joinedChk, 0, hasOtherCondition)
 				if !hasOtherCondition {
@@ -273,7 +273,7 @@ func (j *leftOuterJoinProbe) probeForLeftBuild(chk, joinedChk *chunk.Chunk, rema
 		j.batchConstructBuildRows(joinedChk, 0, hasOtherCondition)
 	}
 	j.appendOffsetAndLength(j.currentProbeRow, length)
-	j.appendProbeRowToChunk(joinedChk, j.currentChunk)
+	j.appendProbeRowToChunk(joinedChk, j.currentChunk.Chk)
 
 	if j.ctx.hasOtherCondition() && joinedChk.NumRows() > 0 {
 		j.selected, err = expression.VectorizedFilter(j.ctx.SessCtx.GetExprCtx(), j.ctx.SessCtx.GetSessionVars().EnableVectorizedExpression, j.ctx.OtherCondition, chunk.NewIterator4Chunk(joinedChk), j.selected)

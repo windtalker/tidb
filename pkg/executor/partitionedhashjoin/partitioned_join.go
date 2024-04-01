@@ -387,7 +387,7 @@ func (w *BuildWorker) splitPartitionAndAppendToRowTable(typeCtx types.Context, s
 				fakePartIndex = (fakePartIndex + 1) % partitionNumber
 				continue
 			}
-			h.Write(builder.serializedKeyVectorBuffer[logicalRowIndex])
+			h.Write(builder.serializedKeyVectorBuffer[physicalRowIndex])
 			hash := h.Sum64()
 			builder.hashValue[logicalRowIndex] = hash
 			builder.partIdxVector[logicalRowIndex] = int(hash % uint64(partitionNumber))
@@ -580,22 +580,34 @@ func (w *ProbeWorker) scanRowTableAfterProbeDone() {
 
 func (w *ProbeWorker) processOneProbeChunk(probeChunk *chunk.Chunk, joinResult *internalutil.HashjoinWorkerResult) (ok bool, waitTime int64, _ *internalutil.HashjoinWorkerResult) {
 	waitTime = 0
-	joinResult.Err = w.JoinProbe.SetChunkForProbe(probeChunk)
-	if joinResult.Err != nil {
-		return false, waitTime, joinResult
-	}
-	for !w.JoinProbe.IsCurrentChunkProbeDone() {
-		ok, joinResult = w.JoinProbe.Probe(joinResult)
-		if !ok || joinResult.Err != nil {
-			return ok, waitTime, joinResult
+	partitionedChunks, err := w.JoinProbe.PartitionChunk(probeChunk)
+	if err != nil {
+		joinResult.Err = err
+		if joinResult.Err != nil {
+			return false, waitTime, joinResult
 		}
-		if joinResult.Chk.IsFull() {
-			waitStart := time.Now()
-			w.HashJoinCtx.joinResultCh <- joinResult
-			ok, joinResult = w.getNewJoinResult()
-			waitTime += int64(time.Since(waitStart))
-			if !ok {
-				return false, waitTime, joinResult
+	}
+	for _, partitionedChunk := range partitionedChunks {
+		if partitionedChunk.Chk.NumRows() == 0 {
+			continue
+		}
+		joinResult.Err = w.JoinProbe.SetChunkForProbe(partitionedChunk)
+		if joinResult.Err != nil {
+			return false, waitTime, joinResult
+		}
+		for !w.JoinProbe.IsCurrentChunkProbeDone() {
+			ok, joinResult = w.JoinProbe.Probe(joinResult)
+			if !ok || joinResult.Err != nil {
+				return ok, waitTime, joinResult
+			}
+			if joinResult.Chk.IsFull() {
+				waitStart := time.Now()
+				w.HashJoinCtx.joinResultCh <- joinResult
+				ok, joinResult = w.getNewJoinResult()
+				waitTime += int64(time.Since(waitStart))
+				if !ok {
+					return false, waitTime, joinResult
+				}
 			}
 		}
 	}

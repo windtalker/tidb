@@ -40,7 +40,7 @@ func (j *innerJoinProbe) Probe(joinResult *util.HashjoinWorkerResult) (ok bool, 
 	for remainCap > 0 && j.currentProbeRow < j.chunkRows {
 		if j.matchedRowsHeaders[j.currentProbeRow] != 0 {
 			candidateRow := j.matchedRowsHeaders[j.currentProbeRow]
-			if isKeyMatched(meta.keyMode, j.serializedKeys[j.currentProbeRow], candidateRow, meta) {
+			if isKeyMatched(meta.keyMode, j.currentChunk.serializedKeys[j.usedRows[j.currentProbeRow]], candidateRow, meta) {
 				// key matched, convert row to column for build side
 				j.appendBuildRowToCachedBuildRowsAndConstructBuildRowsIfNeeded(rowIndexInfo{probeRowIndex: j.currentProbeRow, buildRowStart: candidateRow}, joinedChk, 0, hasOtherCondition)
 				length++
@@ -58,7 +58,7 @@ func (j *innerJoinProbe) Probe(joinResult *util.HashjoinWorkerResult) (ok bool, 
 		j.batchConstructBuildRows(joinedChk, 0, hasOtherCondition)
 	}
 	j.appendOffsetAndLength(j.currentProbeRow, length)
-	j.appendProbeRowToChunk(joinedChk, j.currentChunk)
+	j.appendProbeRowToChunk(joinedChk, j.currentChunk.Chk)
 
 	if j.ctx.hasOtherCondition() && joinedChk.NumRows() > 0 {
 		// eval other condition, and construct final chunk
@@ -110,13 +110,13 @@ func (j *innerJoinProbe) buildResultAfterOtherCondition(chk *chunk.Chunk, joined
 			chunk.CopySelectedRows(dstCol, srcCol, j.selected)
 		} else {
 			// probe column that is not in joinedChk
-			srcCol := j.currentChunk.Column(colIndex)
+			srcCol := j.currentChunk.Chk.Column(colIndex)
 			chunk.CopySelectedRowsWithRowIdFunc(dstCol, srcCol, j.selected, 0, len(j.selected), func(i int) int {
 				return j.usedRows[j.rowIndexInfos[i].probeRowIndex]
 			})
 		}
 	}
-	buildUsedColumns, buildColOffset, buildColOffsetInJoinedChk := j.rUsed, len(j.lUsed), j.currentChunk.NumCols()
+	buildUsedColumns, buildColOffset, buildColOffsetInJoinedChk := j.rUsed, len(j.lUsed), j.currentChunk.Chk.NumCols()
 	if !j.rightAsBuildSide {
 		buildUsedColumns, buildColOffset, buildColOffsetInJoinedChk = j.lUsed, 0, 0
 	}

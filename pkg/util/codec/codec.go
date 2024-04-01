@@ -417,22 +417,22 @@ func SerializeKeys(typeCtx types.Context, chk *chunk.Chunk, tp *types.FieldType,
 	switch tp.GetType() {
 	case mysql.TypeTiny, mysql.TypeShort, mysql.TypeInt24, mysql.TypeLong, mysql.TypeLonglong, mysql.TypeYear:
 		i64s := column.Int64s()
-		for logicalRowIndex, physicalRowindex := range usedRows {
+		for _, physicalRowindex := range usedRows {
 			if canSkip(physicalRowindex) {
 				continue
 			}
 			if serializeMode == NeedSignFlag {
 				if !mysql.HasUnsignedFlag(tp.GetFlag()) && i64s[physicalRowindex] < 0 {
-					serializedKeysVector[logicalRowIndex] = append(serializedKeysVector[logicalRowIndex], intFlag)
+					serializedKeysVector[physicalRowindex] = append(serializedKeysVector[physicalRowindex], intFlag)
 				} else {
-					serializedKeysVector[logicalRowIndex] = append(serializedKeysVector[logicalRowIndex], uintFlag)
+					serializedKeysVector[physicalRowindex] = append(serializedKeysVector[physicalRowindex], uintFlag)
 				}
 			}
-			serializedKeysVector[logicalRowIndex] = append(serializedKeysVector[logicalRowIndex], column.GetRaw(physicalRowindex)...)
+			serializedKeysVector[physicalRowindex] = append(serializedKeysVector[physicalRowindex], column.GetRaw(physicalRowindex)...)
 		}
 	case mysql.TypeFloat:
 		f32s := column.Float32s()
-		for logicalRowIndex, physicalRowindex := range usedRows {
+		for _, physicalRowindex := range usedRows {
 			if canSkip(physicalRowindex) {
 				continue
 			}
@@ -442,11 +442,11 @@ func SerializeKeys(typeCtx types.Context, chk *chunk.Chunk, tp *types.FieldType,
 			if d == 0 {
 				d = 0
 			}
-			serializedKeysVector[logicalRowIndex] = append(serializedKeysVector[logicalRowIndex], unsafe.Slice((*byte)(unsafe.Pointer(&d)), sizeFloat64)...)
+			serializedKeysVector[physicalRowindex] = append(serializedKeysVector[physicalRowindex], unsafe.Slice((*byte)(unsafe.Pointer(&d)), sizeFloat64)...)
 		}
 	case mysql.TypeDouble:
 		f64s := column.Float64s()
-		for logicalRowIndex, physicalRowindex := range usedRows {
+		for _, physicalRowindex := range usedRows {
 			if canSkip(physicalRowindex) {
 				continue
 			}
@@ -456,23 +456,23 @@ func SerializeKeys(typeCtx types.Context, chk *chunk.Chunk, tp *types.FieldType,
 			if f == 0 {
 				f = 0
 			}
-			serializedKeysVector[logicalRowIndex] = append(serializedKeysVector[logicalRowIndex], unsafe.Slice((*byte)(unsafe.Pointer(&f)), sizeFloat64)...)
+			serializedKeysVector[physicalRowindex] = append(serializedKeysVector[physicalRowindex], unsafe.Slice((*byte)(unsafe.Pointer(&f)), sizeFloat64)...)
 		}
 	case mysql.TypeVarchar, mysql.TypeVarString, mysql.TypeString, mysql.TypeBlob, mysql.TypeTinyBlob, mysql.TypeMediumBlob, mysql.TypeLongBlob:
-		for logicalRowIndex, physicalRowIndex := range usedRows {
+		for _, physicalRowIndex := range usedRows {
 			if canSkip(physicalRowIndex) {
 				continue
 			}
 			data := ConvertByCollation(column.GetBytes(physicalRowIndex), tp)
 			size := uint64(len(data))
 			if serializeMode == KeepStringLength {
-				serializedKeysVector[logicalRowIndex] = append(serializedKeysVector[logicalRowIndex], unsafe.Slice((*byte)(unsafe.Pointer(&size)), sizeUint64)...)
+				serializedKeysVector[physicalRowIndex] = append(serializedKeysVector[physicalRowIndex], unsafe.Slice((*byte)(unsafe.Pointer(&size)), sizeUint64)...)
 			}
-			serializedKeysVector[logicalRowIndex] = append(serializedKeysVector[logicalRowIndex], data...)
+			serializedKeysVector[physicalRowIndex] = append(serializedKeysVector[physicalRowIndex], data...)
 		}
 	case mysql.TypeDate, mysql.TypeDatetime, mysql.TypeTimestamp:
 		ts := column.Times()
-		for logicalRowIndex, physicalRowIndex := range usedRows {
+		for _, physicalRowIndex := range usedRows {
 			if canSkip(physicalRowIndex) {
 				continue
 			}
@@ -481,18 +481,18 @@ func SerializeKeys(typeCtx types.Context, chk *chunk.Chunk, tp *types.FieldType,
 			if err != nil {
 				return err
 			}
-			serializedKeysVector[logicalRowIndex] = append(serializedKeysVector[logicalRowIndex], unsafe.Slice((*byte)(unsafe.Pointer(&v)), sizeUint64)...)
+			serializedKeysVector[physicalRowIndex] = append(serializedKeysVector[physicalRowIndex], unsafe.Slice((*byte)(unsafe.Pointer(&v)), sizeUint64)...)
 		}
 	case mysql.TypeDuration:
-		for logicalRowIndex, physicalRowIndex := range usedRows {
+		for _, physicalRowIndex := range usedRows {
 			if canSkip(physicalRowIndex) {
 				continue
 			}
-			serializedKeysVector[logicalRowIndex] = append(serializedKeysVector[logicalRowIndex], column.GetRaw(physicalRowIndex)...)
+			serializedKeysVector[physicalRowIndex] = append(serializedKeysVector[physicalRowIndex], column.GetRaw(physicalRowIndex)...)
 		}
 	case mysql.TypeNewDecimal:
 		ds := column.Decimals()
-		for logicalRowIndex, physicalRowindex := range usedRows {
+		for _, physicalRowindex := range usedRows {
 			if canSkip(physicalRowindex) {
 				continue
 			}
@@ -501,26 +501,26 @@ func SerializeKeys(typeCtx types.Context, chk *chunk.Chunk, tp *types.FieldType,
 			if err != nil {
 				return err
 			}
-			serializedKeysVector[logicalRowIndex] = append(serializedKeysVector[logicalRowIndex], b...)
+			serializedKeysVector[physicalRowindex] = append(serializedKeysVector[physicalRowindex], b...)
 		}
 	case mysql.TypeEnum:
-		for logicalRowIndex, physicalRowindex := range usedRows {
+		for _, physicalRowindex := range usedRows {
 			if canSkip(physicalRowindex) {
 				continue
 			}
 			v := column.GetEnum(physicalRowindex).Value
 			if mysql.HasEnumSetAsIntFlag(tp.GetFlag()) {
-				serializedKeysVector[logicalRowIndex] = append(serializedKeysVector[logicalRowIndex], unsafe.Slice((*byte)(unsafe.Pointer(&v)), sizeUint64)...)
+				serializedKeysVector[physicalRowindex] = append(serializedKeysVector[physicalRowindex], unsafe.Slice((*byte)(unsafe.Pointer(&v)), sizeUint64)...)
 			} else {
 				str := ""
 				if enum, err := types.ParseEnumValue(tp.GetElems(), v); err == nil {
 					str = enum.Name
 				}
-				serializedKeysVector[logicalRowIndex] = append(serializedKeysVector[logicalRowIndex], ConvertByCollation(hack.Slice(str), tp)...)
+				serializedKeysVector[physicalRowindex] = append(serializedKeysVector[physicalRowindex], ConvertByCollation(hack.Slice(str), tp)...)
 			}
 		}
 	case mysql.TypeSet:
-		for logicalRowIndex, physicalRowindex := range usedRows {
+		for _, physicalRowindex := range usedRows {
 			if canSkip(physicalRowindex) {
 				continue
 			}
@@ -528,23 +528,23 @@ func SerializeKeys(typeCtx types.Context, chk *chunk.Chunk, tp *types.FieldType,
 			if err != nil {
 				return err
 			}
-			serializedKeysVector[logicalRowIndex] = append(serializedKeysVector[logicalRowIndex], ConvertByCollation(hack.Slice(s.Name), tp)...)
+			serializedKeysVector[physicalRowindex] = append(serializedKeysVector[physicalRowindex], ConvertByCollation(hack.Slice(s.Name), tp)...)
 		}
 	case mysql.TypeBit:
-		for logicalRowIndex, physicalRowindex := range usedRows {
+		for _, physicalRowindex := range usedRows {
 			if canSkip(physicalRowindex) {
 				continue
 			}
 			v, err1 := types.BinaryLiteral(column.GetBytes(physicalRowindex)).ToInt(typeCtx)
 			terror.Log(errors.Trace(err1))
-			serializedKeysVector[logicalRowIndex] = append(serializedKeysVector[logicalRowIndex], unsafe.Slice((*byte)(unsafe.Pointer(&v)), sizeUint64)...)
+			serializedKeysVector[physicalRowindex] = append(serializedKeysVector[physicalRowindex], unsafe.Slice((*byte)(unsafe.Pointer(&v)), sizeUint64)...)
 		}
 	case mysql.TypeJSON:
-		for logicalRowIndex, physicalRowindex := range usedRows {
+		for _, physicalRowindex := range usedRows {
 			if canSkip(physicalRowindex) {
 				continue
 			}
-			serializedKeysVector[logicalRowIndex] = column.GetJSON(physicalRowindex).HashValue(serializedKeysVector[logicalRowIndex])
+			serializedKeysVector[physicalRowindex] = column.GetJSON(physicalRowindex).HashValue(serializedKeysVector[physicalRowindex])
 		}
 	case mysql.TypeNull:
 		for _, physicalRowindex := range usedRows {
