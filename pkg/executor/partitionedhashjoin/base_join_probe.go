@@ -503,17 +503,18 @@ func NewJoinProbe(ctx *PartitionedHashJoinCtx, workID uint, joinType core.JoinTy
 	base.cachedBuildRows = make([]rowIndexInfo, 0, BATCH_BUILD_ROW_SIZE)
 	base.matchedRowsHeaders = make([]uintptr, 0, chunk.InitialCapacity)
 	base.selRows = make([]int, 0, chunk.InitialCapacity)
-	//base.hashValues = make([][]posAndHashValue, ctx.PartitionNumber)
-	//for i := 0; i < ctx.PartitionNumber; i++ {
-	//	base.hashValues[i] = make([]posAndHashValue, 0, chunk.InitialCapacity)
-	//}
-	//base.serializedKeys = make([][]byte, 0, chunk.InitialCapacity)
-	//if base.ctx.ProbeFilter != nil {
-	//	base.filterVector = make([]bool, 0, chunk.InitialCapacity)
-	//}
-	//if base.hasNullableKey {
-	//	base.nullKeyVector = make([]bool, 0, chunk.InitialCapacity)
-	//}
+	base.partSel = make([][]int, ctx.PartitionNumber)
+	for i := 0; i < ctx.PartitionNumber; i++ {
+		base.partSel[i] = make([]int, 0, chunk.InitialCapacity)
+	}
+	base.serializedKeys = make([][]byte, 0, chunk.InitialCapacity)
+	if base.ctx.ProbeFilter != nil {
+		base.filterVector = make([]bool, 0, chunk.InitialCapacity)
+	}
+	if base.hasNullableKey {
+		base.nullKeyVector = make([]bool, 0, chunk.InitialCapacity)
+	}
+	base.hashValues = make([]uint64, 0, chunk.InitialCapacity)
 	if base.ctx.OtherCondition != nil {
 		base.tmpChk = chunk.NewChunkWithCapacity(joinedColumnTypes, chunk.InitialCapacity)
 		base.tmpChk.SetInCompleteChunk(true)
