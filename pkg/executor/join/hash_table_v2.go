@@ -25,9 +25,13 @@ type subTable struct {
 	posMask          uint64
 	isRowTableEmpty  bool
 	isHashTableEmpty bool
+	aggregatedHashValue uint64
 }
 
 func (st *subTable) lookup(hashValue uint64) uintptr {
+	if hashValue & st.aggregatedHashValue != hashValue {
+		return 0
+	}
 	return st.hashTable[hashValue&st.posMask]
 }
 
@@ -58,6 +62,7 @@ func newSubTable(table *rowTable) *subTable {
 	hashTableLength := max(nextPowerOfTwo(table.validKeyCount()), uint64(32))
 	ret.hashTable = make([]uintptr, hashTableLength)
 	ret.posMask = hashTableLength - 1
+	ret.aggregatedHashValue = 0
 	return ret
 }
 
@@ -77,13 +82,25 @@ func (st *subTable) atomicUpdateHashValue(pos uint64, rowAddress unsafe.Pointer)
 	}
 }
 
+func (st *subTable) atomicUpdateAggregatedHashValue(hashValue uint64) {
+	for {
+		prev := atomic.LoadUint64(&st.aggregatedHashValue)
+		updatedValue := hashValue & prev
+		if atomic.CompareAndSwapUint64(&st.aggregatedHashValue, prev, updatedValue) {
+			break
+		}
+	}
+}
+
 func (st *subTable) build(startSegmentIndex int, endSegmentIndex int) {
+	aggregatedHashValue := uint64(0)
 	if startSegmentIndex == 0 && endSegmentIndex == len(st.rowData.segments) {
 		for i := startSegmentIndex; i < endSegmentIndex; i++ {
 			for _, index := range st.rowData.segments[i].validJoinKeyPos {
 				rowAddress := st.rowData.segments[i].getRowPointer(index)
 				hashValue := st.rowData.segments[i].hashValues[index]
 				pos := hashValue & st.posMask
+				aggregatedHashValue |= hashValue
 				st.updateHashValue(pos, rowAddress)
 			}
 		}
@@ -93,10 +110,12 @@ func (st *subTable) build(startSegmentIndex int, endSegmentIndex int) {
 				rowAddress := st.rowData.segments[i].getRowPointer(index)
 				hashValue := st.rowData.segments[i].hashValues[index]
 				pos := hashValue & st.posMask
+				aggregatedHashValue |= hashValue
 				st.atomicUpdateHashValue(pos, rowAddress)
 			}
 		}
 	}
+	st.atomicUpdateAggregatedHashValue(aggregatedHashValue)
 }
 
 type hashTableV2 struct {
