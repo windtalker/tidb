@@ -169,49 +169,14 @@ func getKeyProp(tp *types.FieldType) *keyProp {
 	}
 }
 
-// buildKeyIndex is the build key column index based on buildSchema, should not be nil
-// otherConditionColIndex is the column index that will be used in other condition, if no other condition, will be nil
-// columnsNeedConvertToRow is the column index that need to be converted to row, should not be nil
-// needUsedFlag is true for outer/semi join that use outer to build
-func newTableMeta(buildKeyIndex []int, buildTypes, buildKeyTypes, probeKeyTypes []*types.FieldType, columnsUsedByOtherCondition []int, outputColumns []int, needUsedFlag bool) *joinTableMeta {
-	meta := &joinTableMeta{}
-	meta.isFixedLength = true
-	meta.rowLength = 0
-	meta.totalColumnNumber = len(buildTypes)
-
-	columnsNeedToBeSaved := make(map[int]struct{}, len(buildTypes))
-	updateMeta := func(index int) {
-		if _, ok := columnsNeedToBeSaved[index]; !ok {
-			columnsNeedToBeSaved[index] = struct{}{}
-			length := chunk.GetFixedLen(buildTypes[index])
-			if length == chunk.VarElemLen {
-				meta.isFixedLength = false
-			} else {
-				meta.rowLength += length
-			}
-		}
-	}
-	if outputColumns == nil {
-		// outputColumns = nil means all the column is needed
-		for index := range buildTypes {
-			updateMeta(index)
-		}
-	} else {
-		for _, index := range outputColumns {
-			updateMeta(index)
-		}
-		for _, index := range columnsUsedByOtherCondition {
-			updateMeta(index)
-		}
-	}
-
+func analyzeKey(meta *joinTableMeta, buildKeyIndex []int, buildKeyTypes, probeKeyTypes []*types.FieldType) (hasFixedSizeKeyColumn bool) {
 	meta.isJoinKeysFixedLength = true
 	meta.joinKeysLength = 0
 	meta.isJoinKeysInlined = true
 	keyIndexMap := make(map[int]struct{})
 	meta.serializeModes = make([]codec.SerializeMode, 0, len(buildKeyIndex))
 	isAllKeyInteger := true
-	hasFixedSizeKeyColumn := false
+	hasFixedSizeKeyColumn = false
 	varLengthKeyNumber := 0
 	for index, keyIndex := range buildKeyIndex {
 		keyType := buildKeyTypes[index]
@@ -272,18 +237,23 @@ func newTableMeta(buildKeyIndex []int, buildTypes, buildKeyTypes, probeKeyTypes 
 				}
 			}
 		}
+	}
+	if isAllKeyInteger && len(buildKeyIndex) == 1 && meta.serializeModes[0] != codec.NeedSignFlag {
+		meta.keyMode = OneInt64
 	} else {
-		for _, index := range buildKeyIndex {
-			updateMeta(index)
+		if meta.isJoinKeysFixedLength {
+			meta.keyMode = FixedSerializedKey
+		} else {
+			meta.keyMode = VariableSerializedKey
 		}
 	}
-	if !meta.isFixedLength {
-		meta.rowLength = 0
-	}
-	// construct the column order
-	meta.rowColumnsOrder = make([]int, 0, len(columnsNeedToBeSaved))
-	meta.columnsSize = make([]int, 0, len(columnsNeedToBeSaved))
-	usedColumnMap := make(map[int]struct{}, len(columnsNeedToBeSaved))
+	return
+}
+
+func analyzeColumnOrderInRowFormat(meta *joinTableMeta, columnNumber int, buildKeyIndex []int, buildTypes []*types.FieldType, columnsUsedByOtherCondition, outputColumns []int) {
+	meta.rowColumnsOrder = make([]int, 0, columnNumber)
+	meta.columnsSize = make([]int, 0, columnNumber)
+	usedColumnMap := make(map[int]struct{}, columnNumber)
 
 	updateColumnOrder := func(index int) {
 		if _, ok := usedColumnMap[index]; !ok {
@@ -316,35 +286,83 @@ func newTableMeta(buildKeyIndex []int, buildTypes, buildKeyTypes, probeKeyTypes 
 			updateColumnOrder(index)
 		}
 	}
-	if isAllKeyInteger && len(buildKeyIndex) == 1 && meta.serializeModes[0] != codec.NeedSignFlag {
-		meta.keyMode = OneInt64
-	} else {
-		if meta.isJoinKeysFixedLength {
-			meta.keyMode = FixedSerializedKey
-		} else {
-			meta.keyMode = VariableSerializedKey
+}
+
+// buildKeyIndex is the build key column index based on buildSchema, should not be nil
+// columnsUsedByOtherCondition is the column index that will be used in other condition, if no other condition, will be nil
+// outputColumns is the column index that need to be converted to row, should not be nil
+// needUsedFlag is true for outer/semi join that use outer to build
+func newTableMeta(buildKeyIndex []int, buildTypes, buildKeyTypes, probeKeyTypes []*types.FieldType, columnsUsedByOtherCondition []int, outputColumns []int, needUsedFlag bool) *joinTableMeta {
+	meta := &joinTableMeta{}
+	meta.isFixedLength = true
+	meta.rowLength = 0
+	meta.totalColumnNumber = len(buildTypes)
+
+	columnsNeedToBeConvertedToRowFormat := make(map[int]struct{}, len(buildTypes))
+	updateRowLength := func(index int) {
+		if _, ok := columnsNeedToBeConvertedToRowFormat[index]; !ok {
+			columnsNeedToBeConvertedToRowFormat[index] = struct{}{}
+			if meta.isFixedLength {
+				length := chunk.GetFixedLen(buildTypes[index])
+				if length == chunk.VarElemLen {
+					meta.isFixedLength = false
+					meta.rowLength = -1
+				} else {
+					meta.rowLength += length
+				}
+			}
 		}
 	}
+
+	if outputColumns == nil {
+		// outputColumns = nil means all the column need to be converted to row format
+		for index := range buildTypes {
+			updateRowLength(index)
+		}
+	} else {
+		// otherwise only the column that is used will be converted to row format
+		for _, index := range outputColumns {
+			updateRowLength(index)
+		}
+		for _, index := range columnsUsedByOtherCondition {
+			updateRowLength(index)
+		}
+	}
+
+	// analyze key
+	hasFixedSizeKeyColumn := analyzeKey(meta, buildKeyIndex, buildKeyTypes, probeKeyTypes)
+
+	// if key is inlined, they must be converted to row format
+	if meta.isJoinKeysInlined {
+		for _, index := range buildKeyIndex {
+			updateRowLength(index)
+		}
+	}
+
+	// construct the column order
+	analyzeColumnOrderInRowFormat(meta, len(columnsNeedToBeConvertedToRowFormat), buildKeyIndex, buildTypes, columnsUsedByOtherCondition, outputColumns)
+
 	if needUsedFlag {
 		meta.colOffsetInNullMap = 1
 		// the total row length should be larger than 4 byte since the smallest unit of atomic.LoadXXX is UInt32
-		if len(columnsNeedToBeSaved) > 0 {
+		if len(columnsNeedToBeConvertedToRowFormat) > 0 {
 			// the smallest length of a column is 4 byte, so the total row length is enough
-			meta.nullMapLength = (len(columnsNeedToBeSaved) + 1 + 7) / 8
+			meta.nullMapLength = (len(columnsNeedToBeConvertedToRowFormat) + 1 + 7) / 8
 		} else {
 			// if no columns need to be converted to row format, then the key is not inlined
 			// 1. if any of the key columns is fixed length, then the row length is larger than 4 bytes(since the smallest length of a fixed length column is 4 bytes)
 			// 2. if all the key columns are variable length, there is no guarantee that the row length is larger than 4 byte, the nullmap should be 4 bytes alignment
 			if hasFixedSizeKeyColumn {
-				meta.nullMapLength = (len(columnsNeedToBeSaved) + 1 + 7) / 8
+				meta.nullMapLength = (len(columnsNeedToBeConvertedToRowFormat) + 1 + 7) / 8
 			} else {
-				meta.nullMapLength = ((len(columnsNeedToBeSaved) + 1 + 31) / 32) * 4
+				meta.nullMapLength = ((len(columnsNeedToBeConvertedToRowFormat) + 1 + 31) / 32) * 4
 			}
 		}
 	} else {
 		meta.colOffsetInNullMap = 0
-		meta.nullMapLength = (len(columnsNeedToBeSaved) + 7) / 8
+		meta.nullMapLength = (len(columnsNeedToBeConvertedToRowFormat) + 7) / 8
 	}
+
 	meta.rowDataOffset = -1
 	if meta.isJoinKeysInlined {
 		if meta.isJoinKeysFixedLength {
