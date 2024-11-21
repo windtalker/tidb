@@ -1259,6 +1259,11 @@ func (p *LogicalJoin) ExtractOnCondition(
 						eqCond = append(eqCond, cond.(*expression.ScalarFunction))
 						continue
 					}
+					if binop.FuncName.L == ast.NullEQ && (p.JoinType == SemiJoin || p.JoinType == AntiSemiJoin) {
+						cond := expression.NewFunctionInternal(ctx.GetExprCtx(), ast.NullEQ, types.NewFieldType(mysql.TypeTiny), arg0, arg1)
+						eqCond = append(eqCond, cond.(*expression.ScalarFunction))
+						continue
+					}
 				}
 			}
 		}
