@@ -166,6 +166,11 @@ type TableInfo struct {
 
 	View *ViewInfo `json:"view"`
 
+	// if MVLogInfo is not nil, this table is a mvlog table, its base table is MVLogInfo.BaseTableID
+	MVLogInfo *MVLogInfo `json:"mvlog_info"`
+	// if MVLodID is not 0, this table has a mvlog, and the tableId of its mvlog is MVLogID
+	MVLogID   int64      `json:"mvlog_id"`
+
 	Sequence *SequenceInfo `json:"sequence"`
 
 	// Lock represent the table lock info.
@@ -723,6 +728,12 @@ type ViewInfo struct {
 	SelectStmt  string              `json:"view_select"`
 	CheckOption ast.ViewCheckOption `json:"view_checkoption"`
 	Cols        []ast.CIStr         `json:"view_cols"`
+}
+
+type MVLogInfo struct {
+	BaseTableID int64 `json:"base_table_id"`
+	ColumnsInBaseTable   []ColumnInfo `json:"columns_in_base_table"`
+	// todo add mv purge info
 }
 
 // Some constants for sequence.
