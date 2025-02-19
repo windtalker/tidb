@@ -151,6 +151,7 @@ var Keywords = []KeywordsType{
 	{"LONGTEXT", true, "reserved"},
 	{"LOW_PRIORITY", true, "reserved"},
 	{"MATCH", true, "reserved"},
+	{"MATERIALIZED", true, "reserved"},
 	{"MAXVALUE", true, "reserved"},
 	{"MEDIUMBLOB", true, "reserved"},
 	{"MEDIUMINT", true, "reserved"},

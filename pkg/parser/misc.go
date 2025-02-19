@@ -531,6 +531,7 @@ var tokenMap = map[string]int{
 	"LOW_PRIORITY":             lowPriority,
 	"MASTER":                   master,
 	"MATCH":                    match,
+	"MATERIALIZED":             materialized,
 	"MAX_CONNECTIONS_PER_HOUR": maxConnectionsPerHour,
 	"MAX_IDXNUM":               max_idxnum,
 	"MAX_MINUTES":              max_minutes,

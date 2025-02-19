@@ -31,6 +31,7 @@ var (
 	_ DDLNode = &CreateDatabaseStmt{}
 	_ DDLNode = &CreateIndexStmt{}
 	_ DDLNode = &CreateTableStmt{}
+	_ DDLNode = &CreateMVLogStmt{}
 	_ DDLNode = &CreateViewStmt{}
 	_ DDLNode = &CreateSequenceStmt{}
 	_ DDLNode = &CreatePlacementPolicyStmt{}
@@ -39,6 +40,7 @@ var (
 	_ DDLNode = &FlashBackDatabaseStmt{}
 	_ DDLNode = &DropIndexStmt{}
 	_ DDLNode = &DropTableStmt{}
+	_ DDLNode = &DropMVLogStmt{}
 	_ DDLNode = &DropSequenceStmt{}
 	_ DDLNode = &DropPlacementPolicyStmt{}
 	_ DDLNode = &DropResourceGroupStmt{}
@@ -1131,6 +1133,47 @@ const (
 	TemporaryLocal
 )
 
+type CreateMVLogStmt struct {
+	ddlNode
+
+	// BaseTable is the base table of current mv log
+	BaseTable *TableName
+	// RefCols is the columns that need to be recorded in mv log, should exists in the base table
+	RefCols []CIStr
+}
+
+// Restore implements Node interface.
+func (n *CreateMVLogStmt) Restore(ctx *format.RestoreCtx) error {
+	ctx.WriteKeyWord("CREATE MATERIALIZED VIEW LOG ON ")
+	if err := n.BaseTable.Restore(ctx); err != nil {
+		return errors.Annotate(err, "An error occurred while splicing CreateMVLogStmt BaseTable")
+	}
+	ctx.WritePlain(" (")
+	for i, col := range n.RefCols {
+		if i > 0 {
+			ctx.WritePlain(", ")
+		}
+		ctx.WriteName(col.O)
+	}
+	ctx.WritePlain(")")
+	return nil
+}
+
+// Accept implements Node Accept interface.
+func (n *CreateMVLogStmt) Accept(v Visitor) (Node, bool) {
+	newNode, skipChildren := v.Enter(n)
+	if skipChildren {
+		return v.Leave(newNode)
+	}
+	n = newNode.(*CreateMVLogStmt)
+	node, ok := n.BaseTable.Accept(v)
+	if !ok {
+		return n, false
+	}
+	n.BaseTable = node.(*TableName)
+	return v.Leave(n)
+}
+
 // CreateTableStmt is a statement to create a table.
 // See https://dev.mysql.com/doc/refman/5.7/en/create-table.html
 type CreateTableStmt struct {
@@ -1295,6 +1338,37 @@ func (n *CreateTableStmt) Accept(v Visitor) (Node, bool) {
 		n.Options[i] = node.(*TableOption)
 	}
 
+	return v.Leave(n)
+}
+
+// DropMVLogStmt is a statement to drop a materialized view log.
+type DropMVLogStmt struct {
+	ddlNode
+	// BaseTable is the base table of target mv log that need to be dropped.
+	BaseTable *TableName
+}
+
+// Restore implements Node interface.
+func (n *DropMVLogStmt) Restore(ctx *format.RestoreCtx) error {
+	ctx.WriteKeyWord("DROP MATERIALIZED VIEW LOG ON ")
+	if err := n.BaseTable.Restore(ctx); err != nil {
+		return errors.Annotate(err, "An error occurred while splicing DropMVLogStmt BaseTable")
+	}
+	return nil
+}
+
+// Accept implements Node Accept interface.
+func (n *DropMVLogStmt) Accept(v Visitor) (Node, bool) {
+	newNode, skipChildren := v.Enter(n)
+	if skipChildren {
+		return v.Leave(newNode)
+	}
+	n = newNode.(*DropMVLogStmt)
+	node, ok := n.BaseTable.Accept(v)
+	if !ok {
+		return n, false
+	}
+	n.BaseTable = node.(*TableName)
 	return v.Leave(n)
 }
 

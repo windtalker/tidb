@@ -202,6 +202,7 @@ import (
 	longtextType      "LONGTEXT"
 	lowPriority       "LOW_PRIORITY"
 	match             "MATCH"
+	materialized      "MATERIALIZED"
 	maxValue          "MAXVALUE"
 	mediumblobType    "MEDIUMBLOB"
 	mediumIntType     "MEDIUMINT"
@@ -983,7 +984,8 @@ import (
 	CalibrateResourceStmt      "CALIBRATE RESOURCE statement"
 	CommitStmt                 "COMMIT statement"
 	CreateTableStmt            "CREATE TABLE statement"
-	CreateViewStmt             "CREATE VIEW  statement"
+	CreateMVLogStmt            "CREATE materialized log statement"
+	CreateViewStmt             "CREATE VIEW statement"
 	CreateUserStmt             "CREATE User statement"
 	CreateRoleStmt             "CREATE Role statement"
 	CreateDatabaseStmt         "Create Database Statement"
@@ -1004,6 +1006,7 @@ import (
 	DropStatisticsStmt         "DROP STATISTICS statement"
 	DropStatsStmt              "DROP STATS statement"
 	DropTableStmt              "DROP TABLE statement"
+	DropMVLogStmt              "DROP materialized view log statement"
 	DropSequenceStmt           "DROP SEQUENCE statement"
 	DropUserStmt               "DROP USER"
 	DropRoleStmt               "DROP ROLE"
@@ -4541,6 +4544,30 @@ DatabaseOptionList:
 
 /*******************************************************************
  *
+ *  Create materialized view log Statement
+ *
+ *  Example:
+ *      CREATE MATERIALIZED VIEW LOG ON TableName
+ *      (
+ *          P_Id,
+ *          LastName,
+ *          FirstName,
+ *          Address,
+ *          City
+ *      )
+ *******************************************************************/
+CreateMVLogStmt:
+	"CREATE" "MATERIALIZED" "VIEW" "LOG" "ON" TableName '(' IdentList ')'
+	{
+		stmt := &ast.CreateMVLogStmt{
+			BaseTable: $6.(*ast.TableName),
+			RefCols:   $8.([]ast.CIStr),
+		}
+		$$ = stmt
+	}
+
+/*******************************************************************
+ *
  *  Create Table Statement
  *
  *  Example:
@@ -5388,6 +5415,12 @@ DropIndexStmt:
 |	"DROP" "HYPO" "INDEX" IfExists Identifier "ON" TableName
 	{
 		$$ = &ast.DropIndexStmt{IfExists: $4.(bool), IndexName: $5, Table: $7.(*ast.TableName), IsHypo: true}
+	}
+
+DropMVLogStmt:
+	"DROP" "MATERIALIZED" "VIEW" "LOG" "ON" TableName
+	{
+		$$ = &ast.DropMVLogStmt{BaseTable: $6.(*ast.TableName)}
 	}
 
 DropTableStmt:
@@ -12361,6 +12394,7 @@ Statement:
 |	CreateDatabaseStmt
 |	CreateIndexStmt
 |	CreateTableStmt
+|	CreateMVLogStmt
 |	CreateViewStmt
 |	CreateUserStmt
 |	CreateRoleStmt
@@ -12376,6 +12410,7 @@ Statement:
 |	DropDatabaseStmt
 |	DropIndexStmt
 |	DropTableStmt
+|	DropMVLogStmt
 |	DropProcedureStmt
 |	DropPolicyStmt
 |	DropSequenceStmt

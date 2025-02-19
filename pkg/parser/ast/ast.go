@@ -170,6 +170,8 @@ func GetStmtLabel(stmtNode StmtNode) string {
 		return "CreateIndex"
 	case *CreateTableStmt:
 		return "CreateTable"
+	case *CreateMVLogStmt:
+		return "CreateMVLog"
 	case *CreateViewStmt:
 		return "CreateView"
 	case *CreateUserStmt:
@@ -185,6 +187,8 @@ func GetStmtLabel(stmtNode StmtNode) string {
 			return "DropView"
 		}
 		return "DropTable"
+	case *DropMVLogStmt:
+		return "DropMVLog"
 	case *ExplainStmt:
 		if _, ok := x.Stmt.(*ShowStmt); ok {
 			return "DescTable"
