@@ -5305,14 +5305,10 @@ func pruneAndBuildColPositionInfoForDelete(
 	names []*types.FieldName,
 	tblID2Handle map[int64][]util.HandleCols,
 	tblID2Table map[int64]table.Table,
-	hasFK bool,
+	skipPruneColumn bool,
 ) (TblColPosInfoSlice, *bitset.BitSet, error) {
 	var nonPruned *bitset.BitSet
-	// If there is foreign key, we can't prune the columns.
-	// Use a very relax check for foreign key cascades and checks.
-	// If there's one table containing foreign keys, all of the tables would not do pruning.
-	// It should be strict in the future or just support pruning column when there is foreign key.
-	if !hasFK {
+	if !skipPruneColumn {
 		nonPruned = bitset.New(uint(len(names)))
 		nonPruned.SetAll()
 	}
@@ -5335,9 +5331,9 @@ func pruneAndBuildColPositionInfoForDelete(
 		cols2PosInfo := &cols2PosInfos[i]
 		tbl := tblID2Table[cols2PosInfo.TblID]
 		tblInfo := tbl.Meta()
-		// If it's partitioned table, or has foreign keys, or is point get plan, we can't prune the columns, currently.
-		// nonPrunedSet will be nil if it's a point get or has foreign keys.
-		if tblInfo.GetPartitionInfo() != nil || hasFK || nonPruned == nil {
+		// If it's partitioned table, or has foreign keys, or has mv log or is point get plan, we can't prune the columns, currently.
+		// nonPrunedSet will be nil if it's a point get or has foreign keys or has mv log.
+		if tblInfo.GetPartitionInfo() != nil || skipPruneColumn || nonPruned == nil {
 			err = buildSingleTableColPosInfoForDelete(tbl, cols2PosInfo)
 			if err != nil {
 				return nil, nil, err
@@ -5876,6 +5872,10 @@ func IsDefaultExprSameColumn(names types.NameSlice, node ast.ExprNode) bool {
 	return false
 }
 
+func isTableContainsMVLog(tbl table.Table) bool {
+	return tbl.Meta().MVLogID > 0
+}
+
 func (b *PlanBuilder) buildDelete(ctx context.Context, ds *ast.DeleteStmt) (base.Plan, error) {
 	b.pushSelectOffset(0)
 	b.pushTableHints(ds.TableHints, 0)
@@ -6053,7 +6053,21 @@ func (b *PlanBuilder) buildDelete(ctx context.Context, ds *ast.DeleteStmt) (base
 	}
 
 	var nonPruned *bitset.BitSet
-	del.TblColPosInfos, nonPruned, err = pruneAndBuildColPositionInfoForDelete(preProjNames, tblID2Handle, tblID2table, len(del.FKCascades) > 0 || len(del.FKChecks) > 0)
+	// If there is foreign key, we can't prune the columns.
+	// Use a very relax check for foreign key cascades and checks.
+	// If there's one table containing foreign keys, all of the tables would not do pruning.
+	// It should be strict in the future or just support pruning column when there is foreign key.
+	skipPruneColumn := len(del.FKCascades) > 0 || len(del.FKChecks) > 0
+	if !skipPruneColumn {
+		for _, tbl := range tblID2table {
+			if isTableContainsMVLog(tbl) {
+				// if there is a table containing MV log, we can't prune the columns. todo support prune column when there is MV log.
+				skipPruneColumn = true
+				break
+			}
+		}
+	}
+	del.TblColPosInfos, nonPruned, err = pruneAndBuildColPositionInfoForDelete(preProjNames, tblID2Handle, tblID2table, skipPruneColumn)
 	if err != nil {
 		return nil, err
 	}
