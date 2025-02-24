@@ -108,8 +108,10 @@ type Executor interface {
 	AlterSchema(sctx sessionctx.Context, stmt *ast.AlterDatabaseStmt) error
 	DropSchema(ctx sessionctx.Context, stmt *ast.DropDatabaseStmt) error
 	CreateTable(ctx sessionctx.Context, stmt *ast.CreateTableStmt) error
+	CreateMVLog(ctx sessionctx.Context, stmt *ast.CreateMVLogStmt) error
 	CreateView(ctx sessionctx.Context, stmt *ast.CreateViewStmt) error
 	DropTable(ctx sessionctx.Context, stmt *ast.DropTableStmt) (err error)
+	DropMVLog(ctx sessionctx.Context, stmt *ast.DropMVLogStmt) (err error)
 	RecoverTable(ctx sessionctx.Context, recoverTableInfo *model.RecoverTableInfo) (err error)
 	RecoverSchema(ctx sessionctx.Context, recoverSchemaInfo *model.RecoverSchemaInfo) error
 	DropView(ctx sessionctx.Context, stmt *ast.DropTableStmt) (err error)
@@ -979,6 +981,60 @@ func checkGlobalIndexes(ec errctx.Context, tblInfo *model.TableInfo) error {
 	return nil
 }
 
+// do some checks, mv log can not be create on view, sequence, temporary table, etc.
+func checkBaseTableForMVLog(baseTblInfo *model.TableInfo) error {
+	if baseTblInfo.IsView() {
+		return dbterror.ErrWrongUsage.GenWithStackByArgs(baseTblInfo.Name.O, "Create Materialized View Log on view")
+	}
+	if baseTblInfo.IsSequence() {
+		return dbterror.ErrWrongUsage.GenWithStackByArgs(baseTblInfo.Name.O, "Create Materialized View Log on sequence")
+	}
+	if baseTblInfo.TempTableType != model.TempTableNone {
+		return dbterror.ErrOptOnTemporaryTable.GenWithStackByArgs(baseTblInfo.Name.O, "Create Materialized View Log")
+	}
+	if baseTblInfo.TableCacheStatusType != model.TableCacheStatusDisable {
+		return dbterror.ErrOptOnCacheTable.GenWithStackByArgs(baseTblInfo.Name.O, "Create Materialized View Log")
+	}
+	if baseTblInfo.MVLogInfo != nil {
+		return dbterror.ErrWrongUsage.GenWithStackByArgs(baseTblInfo.Name.O, "Create Materialized View Log on materialized view log")
+	}
+	if baseTblInfo.MVLogID > 0 {
+		return dbterror.ErrWrongUsage.GenWithStackByArgs(baseTblInfo.Name.O, "Create Materialized View Log on table with materialized view log")
+	}
+	return nil
+}
+
+func (e *executor) CreateMVLog(ctx sessionctx.Context, s *ast.CreateMVLogStmt) (err error) {
+	ident := ast.Ident{Schema: s.BaseTable.Schema, Name: s.BaseTable.Name}
+	is := e.infoCache.GetLatest()
+	schema, ok := is.SchemaByName(ident.Schema)
+	if !ok {
+		return infoschema.ErrDatabaseNotExists.GenWithStackByArgs(ident.Schema)
+	}
+	baseTbl, err := is.TableByName(e.ctx, ident.Schema, ident.Name)
+	if err != nil {
+		return infoschema.ErrTableNotExists.GenWithStackByArgs(ident.Schema, ident.Name)
+	}
+
+	if err = checkBaseTableForMVLog(baseTbl.Meta()); err != nil {
+		return err
+	}
+
+	involvingRef := make([]model.InvolvingSchemaInfo, 0, 1)
+	involvingRef = append(involvingRef, model.InvolvingSchemaInfo{
+		Database: s.BaseTable.Schema.L,
+		Table:    s.BaseTable.Name.L,
+		Mode:     model.SharedInvolving,
+	})
+	metaBuildCtx := NewMetaBuildContextWithSctx(ctx)
+	var mvLogTblInfo *model.TableInfo
+	mvLogTblInfo, err = BuildTableInfoForMVLog(metaBuildCtx, s, baseTbl.Meta(), schema.PlacementPolicyRef)
+	if err != nil {
+		return errors.Trace(err)
+	}
+	return e.CreateMVLogWithInfo(ctx, schema.Name, mvLogTblInfo, involvingRef, WithOnExist(OnExistError))
+}
+
 func (e *executor) CreateTable(ctx sessionctx.Context, s *ast.CreateTableStmt) (err error) {
 	ident := ast.Ident{Schema: s.Table.Schema, Name: s.Table.Name}
 	is := e.infoCache.GetLatest()
@@ -1037,6 +1093,50 @@ func (e *executor) CreateTable(ctx sessionctx.Context, s *ast.CreateTableStmt) (
 	}
 
 	return e.CreateTableWithInfo(ctx, schema.Name, tbInfo, involvingRef, WithOnExist(onExist))
+}
+
+func (e *executor) createMVLogJobWithInfo(
+	ctx sessionctx.Context,
+	dbName ast.CIStr,
+	tbInfo *model.TableInfo,
+	involvingRef []model.InvolvingSchemaInfo,
+) (jobW *JobWrapper, err error) {
+	is := e.infoCache.GetLatest()
+	schema, ok := is.SchemaByName(dbName)
+	if !ok {
+		return nil, infoschema.ErrDatabaseNotExists.GenWithStackByArgs(dbName)
+	}
+	// todo check placment policy
+	if _, err := is.TableByName(e.ctx, schema.Name, tbInfo.Name); err == nil {
+		return nil, infoschema.ErrTableExists.GenWithStackByArgs(ast.Ident{Schema: schema.Name, Name: tbInfo.Name})
+	}
+	if err := checkTableInfoValidExtra(ctx.GetSessionVars().StmtCtx.ErrCtx(), ctx.GetStore(), dbName, tbInfo); err != nil {
+		return nil, err
+	}
+
+	involvingSchemas := make([]model.InvolvingSchemaInfo, 0, len(involvingRef)+1)
+	involvingSchemas = append(involvingSchemas, model.InvolvingSchemaInfo{
+		Database: schema.Name.L,
+		Table:    tbInfo.Name.L,
+	})
+	involvingSchemas = append(involvingSchemas, involvingRef...)
+
+	job := &model.Job{
+		Version:             model.GetJobVerInUse(),
+		SchemaID:            schema.ID,
+		SchemaName:          schema.Name.L,
+		TableName:           tbInfo.Name.L,
+		Type:                model.ActionCreateTable,
+		BinlogInfo:          &model.HistoryInfo{},
+		CDCWriteSource:      ctx.GetSessionVars().CDCWriteSource,
+		InvolvingSchemaInfo: involvingSchemas,
+		SQLMode:             ctx.GetSessionVars().SQLMode,
+	}
+	args := &model.CreateTableArgs{
+		TableInfo:      tbInfo,
+		OnExistReplace: false,
+	}
+	return NewJobWrapperWithArgs(job, args, false), nil
 }
 
 // createTableWithInfoJob returns the table creation job.
@@ -1192,6 +1292,29 @@ func (e *executor) createTableWithInfoPost(
 		err = e.handleAutoIncID(tbInfo, schemaID, newEnd, autoid.AutoRandomType)
 	}
 	return err
+}
+
+func (e *executor) CreateMVLogWithInfo(
+	ctx sessionctx.Context,
+	dbName ast.CIStr,
+	tbInfo *model.TableInfo,
+	involvingRef []model.InvolvingSchemaInfo,
+	cs ...CreateTableOption,
+) (err error) {
+
+	jobW, err := e.createMVLogJobWithInfo(ctx, dbName, tbInfo, involvingRef)
+	if err != nil {
+		return err
+	}
+	if jobW == nil {
+		return nil
+	}
+
+	err = e.DoDDLJobWrapper(ctx, jobW)
+	//if err == nil {
+	//	err = e.createTableWithInfoPost(ctx, tbInfo, jobW.SchemaID)
+	//}
+	return errors.Trace(err)
 }
 
 func (e *executor) CreateTableWithInfo(
@@ -4250,6 +4373,47 @@ func (e *executor) dropTableObject(
 		for _, table := range notExistTables {
 			sessVars.StmtCtx.AppendNote(dropExistErr.FastGenByArgs(table))
 		}
+	}
+	return nil
+}
+
+// DropMVLog will drop the mv log
+func (e *executor) DropMVLog(ctx sessionctx.Context, s *ast.DropMVLogStmt) (err error) {
+	is := e.infoCache.GetLatest()
+	schema, ok := is.SchemaByName(s.BaseTable.Schema)
+	if !ok {
+		return infoschema.ErrDatabaseNotExists.GenWithStackByArgs(s.BaseTable.Schema)
+	}
+	baseTableInfo, err := is.TableByName(e.ctx, s.BaseTable.Schema, s.BaseTable.Name)
+	if err != nil {
+		return errors.Trace(infoschema.ErrTableNotExists.GenWithStackByArgs(s.BaseTable.Schema, s.BaseTable.Name))
+	}
+	if baseTableInfo.Meta().MVLogID == 0 {
+		return errors.Trace(infoschema.ErrWrongObject.GenWithStackByArgs(s.BaseTable.Schema, s.BaseTable.Name, "mv log's base table"))
+	}
+	mvLogInfo, ok := is.TableByID(e.ctx, baseTableInfo.Meta().MVLogID)
+	if !ok {
+		return errors.Trace(infoschema.ErrWrongObject.GenWithStackByArgs(s.BaseTable.Schema, s.BaseTable.Name, "mv log's base table"))
+	}
+	job := &model.Job{
+		Version:        model.GetJobVerInUse(),
+		SchemaID:       schema.ID,
+		TableID:        mvLogInfo.Meta().ID,
+		SchemaName:     schema.Name.L,
+		SchemaState:    mvLogInfo.Meta().State,
+		TableName:      mvLogInfo.Meta().Name.L,
+		Type:           model.ActionDropMVLog,
+		BinlogInfo:     &model.HistoryInfo{},
+		CDCWriteSource: ctx.GetSessionVars().CDCWriteSource,
+		SQLMode:        ctx.GetSessionVars().SQLMode,
+	}
+	args := &model.DropMVLogArgs{
+		BaseTableName: ast.Ident{Schema: s.BaseTable.Schema, Name: s.BaseTable.Name},
+	}
+
+	err = e.doDDLJob2(ctx, job, args)
+	if err != nil {
+		return errors.Trace(err)
 	}
 	return nil
 }

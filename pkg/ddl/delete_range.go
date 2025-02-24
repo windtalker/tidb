@@ -296,6 +296,20 @@ func insertJobIntoDeleteRangeTable(ctx context.Context, wrapper DelRangeExecWrap
 				return errors.Trace(err)
 			}
 		}
+	case model.ActionDropMVLog:
+		args, err := model.GetFinishedDropMVLogArgs(job)
+		if err != nil {
+			return errors.Trace(err)
+		}
+		physicalTableIDs := args.OldPartitionIDs
+		if len(physicalTableIDs) > 0 {
+			if err := doBatchDeleteTablesRange(ctx, wrapper, job.ID, physicalTableIDs, ea, "drop table: partition table IDs"); err != nil {
+				return errors.Trace(err)
+			}
+			// logical table may contain global index regions, so delete the logical table range.
+			return errors.Trace(doBatchDeleteTablesRange(ctx, wrapper, job.ID, []int64{job.TableID}, ea, "drop table: table ID"))
+		}
+		return errors.Trace(doBatchDeleteTablesRange(ctx, wrapper, job.ID, []int64{job.TableID}, ea, "drop table: table ID"))
 	case model.ActionDropTable:
 		tableID := job.TableID
 		// The startKey here is for compatibility with previous versions, old version did not endKey so don't have to deal with.

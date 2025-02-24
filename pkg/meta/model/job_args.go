@@ -337,6 +337,52 @@ func GetFinishedDropTableArgs(job *Job) (*DropTableArgs, error) {
 	return getOrDecodeArgsV2[*DropTableArgs](job)
 }
 
+type DropMVLogArgs struct {
+	BaseTableName ast.Ident `json:"base_table_name,omitempty"`
+	// below fields are finished job args
+	StartKey        []byte   `json:"start_key,omitempty"`
+	OldPartitionIDs []int64  `json:"old_partition_ids,omitempty"`
+	OldRuleIDs      []string `json:"old_rule_ids,omitempty"`
+}
+
+func (a *DropMVLogArgs) getArgsV1(job *Job) []any {
+	// only drop-table job has in args, drop view/sequence job has no args.
+	return []any{a.BaseTableName}
+}
+
+func (a *DropMVLogArgs) getFinishedArgsV1(*Job) []any {
+	return []any{a.StartKey, a.OldPartitionIDs, a.OldRuleIDs}
+}
+
+func (a *DropMVLogArgs) decodeV1(job *Job) error {
+	return job.decodeArgs(&a.BaseTableName)
+}
+
+// GetDropMVLogArgs gets the drop-table args.
+func GetDropMVLogArgs(job *Job) (*DropMVLogArgs, error) {
+	return getOrDecodeArgs[*DropMVLogArgs](&DropMVLogArgs{}, job)
+}
+
+// GetFinishedDropMVLogArgs gets the drop-table args after the job is finished.
+func GetFinishedDropMVLogArgs(job *Job) (*DropMVLogArgs, error) {
+	if job.Version == JobVersion1 {
+		var (
+			startKey        []byte
+			oldPartitionIDs []int64
+			oldRuleIDs      []string
+		)
+		if err := job.decodeArgs(&startKey, &oldPartitionIDs, &oldRuleIDs); err != nil {
+			return nil, errors.Trace(err)
+		}
+		return &DropMVLogArgs{
+			StartKey:        startKey,
+			OldPartitionIDs: oldPartitionIDs,
+			OldRuleIDs:      oldRuleIDs,
+		}, nil
+	}
+	return getOrDecodeArgsV2[*DropMVLogArgs](job)
+}
+
 // TruncateTableArgs is the arguments for truncate table/partition job.
 type TruncateTableArgs struct {
 	FKCheck         bool    `json:"fk_check,omitempty"`

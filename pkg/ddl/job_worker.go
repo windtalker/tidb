@@ -913,6 +913,8 @@ func (w *worker) runOneJobStep(
 		ver, err = onCreateView(jobCtx, job)
 	case model.ActionDropTable, model.ActionDropView, model.ActionDropSequence:
 		ver, err = w.onDropTableOrView(jobCtx, job)
+	case model.ActionDropMVLog:
+		ver, err = w.onDropMVLog(jobCtx, job)
 	case model.ActionDropTablePartition:
 		ver, err = w.onDropTablePartition(jobCtx, job)
 	case model.ActionTruncateTablePartition:

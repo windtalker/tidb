@@ -169,7 +169,7 @@ type TableInfo struct {
 	// if MVLogInfo is not nil, this table is a mvlog table, its base table is MVLogInfo.BaseTableID
 	MVLogInfo *MVLogInfo `json:"mvlog_info"`
 	// if MVLodID is not 0, this table has a mvlog, and the tableId of its mvlog is MVLogID
-	MVLogID   int64      `json:"mvlog_id"`
+	MVLogID int64 `json:"mvlog_id"`
 
 	Sequence *SequenceInfo `json:"sequence"`
 
@@ -731,8 +731,8 @@ type ViewInfo struct {
 }
 
 type MVLogInfo struct {
-	BaseTableID int64 `json:"base_table_id"`
-	ColumnsInBaseTable   []ColumnInfo `json:"columns_in_base_table"`
+	BaseTableID        int64          `json:"base_table_id"`
+	ColumnsInBaseTable []*IndexColumn `json:"columns_in_base_table"`
 	// todo add mv purge info
 }
 

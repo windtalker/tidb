@@ -17,6 +17,7 @@ package schematracker
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
@@ -235,6 +236,16 @@ func (d *Checker) DropSchema(ctx sessionctx.Context, stmt *ast.DropDatabaseStmt)
 // RecoverSchema implements the DDL interface.
 func (*Checker) RecoverSchema(_ sessionctx.Context, _ *model.RecoverSchemaInfo) (err error) {
 	return nil
+}
+
+// CreateMVLog implements the DDL interface.
+func (d *Checker) CreateMVLog(ctx sessionctx.Context, stmt *ast.CreateMVLogStmt) error {
+	return errors.New("not implemented")
+}
+
+// DropMVLog implements the DDL interface.
+func (d *Checker) DropMVLog(ctx sessionctx.Context, stmt *ast.DropMVLogStmt) error {
+	return errors.New("not implemented")
 }
 
 // CreateTable implements the DDL interface.

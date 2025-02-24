@@ -57,6 +57,94 @@ func repairTableOrViewWithCheck(t *meta.Mutator, job *model.Job, schemaID int64,
 	return t.UpdateTable(schemaID, tbInfo)
 }
 
+func (w *worker) onDropMVLog(jobCtx *jobContext, job *model.Job) (ver int64, _ error) {
+	args, err := model.GetDropMVLogArgs(job)
+	if err != nil {
+		job.State = model.JobStateCancelled
+		return 0, errors.Trace(err)
+	}
+	jobCtx.jobArgs = args
+	mvLogTblInfo, err := checkTableExistAndCancelNonExistJob(jobCtx.metaMut, job, job.SchemaID)
+	if err != nil {
+		job.State = model.JobStateCancelled
+		return 0, errors.Trace(err)
+	}
+	is := jobCtx.infoCache.GetLatest()
+	_, ok := is.SchemaByID(job.SchemaID)
+	if !ok {
+		job.State = model.JobStateCancelled
+		return 0, infoschema.ErrDatabaseNotExists.GenWithStackByArgs(
+			fmt.Sprintf("(Schema ID %d)", job.SchemaID),
+		)
+	}
+	baseTbl, err := is.TableByName(jobCtx.ctx, args.BaseTableName.Schema, args.BaseTableName.Name)
+	baseTblInfo := baseTbl.Meta()
+	if err != nil {
+		job.State = model.JobStateCancelled
+		return 0, errors.Trace(err)
+	}
+	if mvLogTblInfo.State == model.StatePublic {
+		// need to update baseTableInfo
+		if baseTblInfo.MVLogID == 0 {
+			job.State = model.JobStateCancelled
+			return 0, errors.New("this table does not have materialized view log")
+		}
+	}
+	// drop mvlog table and update base table info
+	originalState := job.SchemaState
+	switch mvLogTblInfo.State {
+	case model.StatePublic:
+		// public -> write only
+		mvLogTblInfo.State = model.StateWriteOnly
+		// reset MVLogID to 0
+		baseTblInfo.MVLogID = 0
+		ver, err = updateVersionAndTableInfo(jobCtx, job, mvLogTblInfo, originalState != mvLogTblInfo.State, schemaIDAndTableInfo{
+			schemaID: job.SchemaID,
+			tblInfo:  baseTblInfo,
+		})
+		if err != nil {
+			return ver, errors.Trace(err)
+		}
+	case model.StateWriteOnly:
+		// write only -> delete only
+		mvLogTblInfo.State = model.StateDeleteOnly
+		ver, err = updateVersionAndTableInfo(jobCtx, job, mvLogTblInfo, originalState != mvLogTblInfo.State)
+		if err != nil {
+			return ver, errors.Trace(err)
+		}
+	case model.StateDeleteOnly:
+		mvLogTblInfo.State = model.StateNone
+		oldIDs := getPartitionIDs(mvLogTblInfo)
+		ruleIDs := append(getPartitionRuleIDs(job.SchemaName, mvLogTblInfo), fmt.Sprintf(label.TableIDFormat, label.IDPrefix, job.SchemaName, mvLogTblInfo.Name.L))
+		args.OldPartitionIDs = oldIDs
+		ver, err = updateVersionAndTableInfo(jobCtx, job, mvLogTblInfo, originalState != mvLogTblInfo.State)
+		if err != nil {
+			return ver, errors.Trace(err)
+		}
+		if err = jobCtx.metaMut.DropTableOrView(job.SchemaID, job.TableID); err != nil {
+			return ver, errors.Trace(err)
+		}
+
+		// todo double check if asyncNotifyEvent is needed
+		//if !tblInfo.IsSequence() && !tblInfo.IsView() {
+		//	dropTableEvent := notifier.NewDropTableEvent(tblInfo)
+		//	err = asyncNotifyEvent(jobCtx, dropTableEvent, job, noSubJob, w.sess)
+		//	if err != nil {
+		//		return ver, errors.Trace(err)
+		//	}
+		//}
+		// Finish this job.
+		job.FinishMultipleTableJob(model.JobStateDone, model.StateNone, ver, []*model.TableInfo{mvLogTblInfo, baseTblInfo})
+		startKey := tablecodec.EncodeTablePrefix(mvLogTblInfo.ID)
+		job.FillFinishedArgs(&model.DropMVLogArgs{
+			StartKey:        startKey,
+			OldPartitionIDs: oldIDs,
+			OldRuleIDs:      ruleIDs,
+		})
+	}
+	return ver, nil
+}
+
 func (w *worker) onDropTableOrView(jobCtx *jobContext, job *model.Job) (ver int64, _ error) {
 	args, err := model.GetDropTableArgs(job)
 	if err != nil {

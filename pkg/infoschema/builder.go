@@ -90,6 +90,9 @@ func (b *Builder) ApplyDiff(m meta.Reader, diff *model.SchemaDiff) ([]int64, err
 		return applyTruncateTableOrPartition(b, m, diff)
 	case model.ActionDropTable, model.ActionDropTablePartition:
 		return applyDropTableOrPartition(b, m, diff)
+	case model.ActionDropMVLog:
+		// TODO: implement drop MVLog
+		return nil, errors.New("not implemented")
 	case model.ActionRecoverTable:
 		return applyRecoverTable(b, m, diff)
 	case model.ActionCreateTables:

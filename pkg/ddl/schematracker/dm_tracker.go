@@ -175,6 +175,16 @@ func (d *SchemaTracker) DropSchema(_ sessionctx.Context, stmt *ast.DropDatabaseS
 	return nil
 }
 
+// CreateMVLog implements the DDL interface.
+func (d *SchemaTracker) CreateMVLog(ctx sessionctx.Context, s *ast.CreateMVLogStmt) error {
+	return errors.New("not implemented")
+}
+
+// DropMVLog implements the DDL interface.
+func (d *SchemaTracker) DropMVLog(ctx sessionctx.Context, s *ast.DropMVLogStmt) error {
+	return errors.New("not implemented")
+}
+
 // CreateTable implements the DDL interface.
 func (d *SchemaTracker) CreateTable(ctx sessionctx.Context, s *ast.CreateTableStmt) error {
 	ident := ast.Ident{Schema: s.Table.Schema, Name: s.Table.Name}

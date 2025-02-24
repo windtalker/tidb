@@ -168,6 +168,11 @@ func (w *worker) onCreateTable(jobCtx *jobContext, job *model.Job) (ver int64, _
 
 	tbInfo := args.TableInfo
 
+	if tbInfo.MVLogInfo != nil {
+		// create mv log
+		return w.onCreateMVLog(jobCtx, job)
+	}
+
 	if len(tbInfo.ForeignKeys) > 0 {
 		return w.createTableWithForeignKeys(jobCtx, job, args)
 	}

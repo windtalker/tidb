@@ -687,6 +687,31 @@ func (m *Mutator) UpdateDatabase(dbInfo *model.DBInfo) error {
 	return m.txn.HSet(mDBs, dbKey, data)
 }
 
+// CreateMVLog creates a mv log with tableInfo in database.
+func (m *Mutator) CreateMVLog(dbID int64, tableInfo *model.TableInfo) error {
+	// Check if db exists.
+	dbKey := m.dbKey(dbID)
+	if err := m.checkDBExists(dbKey); err != nil {
+		return errors.Trace(err)
+	}
+
+	// Check if table exists.
+	tableKey := m.tableKey(tableInfo.ID)
+	if err := m.checkTableNotExists(dbKey, tableKey); err != nil {
+		return errors.Trace(err)
+	}
+
+	data, err := json.Marshal(tableInfo)
+	if err != nil {
+		return errors.Trace(err)
+	}
+
+	if err := m.txn.HSet(dbKey, tableKey, data); err != nil {
+		return errors.Trace(err)
+	}
+	return nil
+}
+
 // CreateTableOrView creates a table with tableInfo in database.
 func (m *Mutator) CreateTableOrView(dbID int64, tableInfo *model.TableInfo) error {
 	// Check if db exists.

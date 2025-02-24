@@ -168,6 +168,8 @@ func (e *DDLExec) Next(ctx context.Context, _ *chunk.Chunk) (err error) {
 		err = e.executeFlashbackDatabase(x)
 	case *ast.CreateTableStmt:
 		err = e.executeCreateTable(x)
+	case *ast.CreateMVLogStmt:
+		err = e.executeCreateMVLog(x)
 	case *ast.CreateViewStmt:
 		err = e.executeCreateView(ctx, x)
 	case *ast.DropIndexStmt:
@@ -183,6 +185,8 @@ func (e *DDLExec) Next(ctx context.Context, _ *chunk.Chunk) (err error) {
 				err = e.dropLocalTemporaryTables(localTempTablesToDrop)
 			}
 		}
+	case *ast.DropMVLogStmt:
+		err = e.executeDropMVLog(x)
 	case *ast.RecoverTableStmt:
 		err = e.executeRecoverTable(x)
 	case *ast.FlashBackTableStmt:
@@ -284,6 +288,16 @@ func (e *DDLExec) executeAlterDatabase(s *ast.AlterDatabaseStmt) error {
 
 func (e *DDLExec) executeCreateTable(s *ast.CreateTableStmt) error {
 	err := e.ddlExecutor.CreateTable(e.Ctx(), s)
+	return err
+}
+
+func (e *DDLExec) executeCreateMVLog(s *ast.CreateMVLogStmt) error {
+	err := e.ddlExecutor.CreateMVLog(e.Ctx(), s)
+	return err
+}
+
+func (e *DDLExec) executeDropMVLog(s *ast.DropMVLogStmt) error {
+	err := e.ddlExecutor.DropMVLog(e.Ctx(), s)
 	return err
 }
 

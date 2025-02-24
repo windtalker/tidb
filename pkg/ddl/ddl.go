@@ -1215,7 +1215,7 @@ func GetDropOrTruncateTableInfoFromJobsByStore(jobs []*model.Job, gcSafePoint ui
 		if err != nil {
 			return false, err
 		}
-		if job.Type != model.ActionDropTable && job.Type != model.ActionTruncateTable {
+		if job.Type != model.ActionDropTable && job.Type != model.ActionTruncateTable && job.Type != model.ActionDropMVLog {
 			continue
 		}
 

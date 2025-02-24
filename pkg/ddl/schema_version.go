@@ -179,6 +179,16 @@ func SetSchemaDiffForDropTable(diff *model.SchemaDiff, job *model.Job, jobCtx *j
 	}
 }
 
+// SetSchemaDiffForDropMVLog set SchemaDiff for ActionDropMVLog.
+func SetSchemaDiffForDropMVLog(diff *model.SchemaDiff, job *model.Job, jobCtx *jobContext) {
+	// affects are used to update placement rule cache
+	diff.TableID = job.TableID
+	args := jobCtx.jobArgs.(*model.DropMVLogArgs)
+	if len(args.OldPartitionIDs) > 0 {
+		diff.AffectedOpts = buildPlacementAffects(args.OldPartitionIDs, args.OldPartitionIDs)
+	}
+}
+
 // SetSchemaDiffForDropTablePartition set SchemaDiff for ActionDropTablePartition.
 func SetSchemaDiffForDropTablePartition(diff *model.SchemaDiff, job *model.Job, jobCtx *jobContext) {
 	// affects are used to update placement rule cache
@@ -341,6 +351,8 @@ func updateSchemaVersion(jobCtx *jobContext, job *model.Job, multiInfos ...schem
 		SetSchemaDiffForRecoverTable(diff, job, jobCtx)
 	case model.ActionDropTable:
 		SetSchemaDiffForDropTable(diff, job, jobCtx)
+	case model.ActionDropMVLog:
+		SetSchemaDiffForDropMVLog(diff, job, jobCtx)
 	case model.ActionReorganizePartition:
 		SetSchemaDiffForReorganizePartition(diff, job, jobCtx)
 	case model.ActionRemovePartitioning, model.ActionAlterTablePartitioning:
