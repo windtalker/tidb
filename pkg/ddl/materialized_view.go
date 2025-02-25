@@ -23,6 +23,7 @@ import (
 	"github.com/pingcap/tidb/pkg/meta/metabuild"
 	"github.com/pingcap/tidb/pkg/meta/model"
 	"github.com/pingcap/tidb/pkg/parser/ast"
+	"github.com/pingcap/tidb/pkg/parser/charset"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
 	"github.com/pingcap/tidb/pkg/table"
 	"github.com/pingcap/tidb/pkg/types"
@@ -31,34 +32,58 @@ import (
 
 // some constants for materialized view and materialized view log
 const (
-	// MVLogDMLTypeColName is the column name of materialized view log which records the DML type.
-	MVLogDMLTypeColName = "__mv_log_dml_type"
-	// MVLogIsNewValueColName is the column name of materialized view log which records is current row the new value.
-	MVLogIsNewValueColName = "__mv_log_is_new_value"
-	// MVLogIdInTxnColName is the column name of materialized view log which records the row id inside txn.
-	// For all the rows in the same txn, the value of this column is increasing from 0.
-	// For rows in different txn, the value is not relevant.
-	MVLogIdInTxnColName = "__mv_log_id_in_txn"
 	// MVLogNamePrefix is the prefix of materialized view log name, the mv log name is MVLogNamePrefix + base table name.
 	MVLogNamePrefix = "__mv_log_"
 )
 
 var (
-	MVLogDMLTypeColType    *types.FieldType
+	// MVLogDMLTypeCol is the column of materialized view log which records the DML type.
+	MVLogDMLTypeColName = ast.NewCIStr("__mv_log_dml_type")
+	MVLogDMLTypeColType *types.FieldType
+	// MVLogIsNewValueCol is the column of materialized view log which records is current row the new value.
+	MVLogIsNewValueColName = ast.NewCIStr("__mv_log_is_new_value")
 	MVLogIsNewValueColType *types.FieldType
-	MVLogIdInTxnColType    *types.FieldType
+	// MVLogIdInTxnCol is the column name of materialized view log which records the row id inside txn.
+	// For all the rows in the same txn, the value of this column is increasing from 0.
+	// For rows in different txn, the value is not relevant.
+	MVLogIdInTxnColName = ast.NewCIStr("__mv_log_id_in_txn")
+	MVLogIdInTxnColType *types.FieldType
+	// MVLogExtraHandleCol is the extra handle col for base table without primary key or primary key is not handle
+	MVLogExtraHandleColName = ast.NewCIStr("__mv_log_tidb_rowid")
+	ExtraHandleColType      *types.FieldType
 )
 
 func init() {
 	// 1: insert, 2: update, 3: delete
+	flen, decimal := mysql.GetDefaultFieldLengthAndDecimal(mysql.TypeTiny)
 	MVLogDMLTypeColType = types.NewFieldType(mysql.TypeTiny)
 	MVLogDMLTypeColType.AddFlag(mysql.NotNullFlag)
+	MVLogDMLTypeColType.SetFlen(flen)
+	MVLogDMLTypeColType.SetDecimal(decimal)
+	MVLogDMLTypeColType.SetCharset(charset.CharsetBin)
+	MVLogDMLTypeColType.SetCollate(charset.CollationBin)
 	// 0: old value, 1: new value
 	MVLogIsNewValueColType = types.NewFieldType(mysql.TypeTiny)
 	MVLogIsNewValueColType.AddFlag(mysql.NotNullFlag)
+	MVLogIsNewValueColType.SetFlen(flen)
+	MVLogIsNewValueColType.SetDecimal(decimal)
+	MVLogIsNewValueColType.SetCharset(charset.CharsetBin)
+	MVLogIsNewValueColType.SetCollate(charset.CollationBin)
 
+	flen, decimal = mysql.GetDefaultFieldLengthAndDecimal(mysql.TypeLonglong)
 	MVLogIdInTxnColType = types.NewFieldType(mysql.TypeLonglong)
 	MVLogIdInTxnColType.AddFlag(mysql.NotNullFlag)
+	MVLogIdInTxnColType.SetFlen(flen)
+	MVLogIdInTxnColType.SetDecimal(decimal)
+	MVLogIdInTxnColType.SetCharset(charset.CharsetBin)
+	MVLogIdInTxnColType.SetCollate(charset.CollationBin)
+
+	ExtraHandleColType = types.NewFieldType(mysql.TypeLonglong)
+	ExtraHandleColType.SetFlag(mysql.NotNullFlag)
+	ExtraHandleColType.SetFlen(flen)
+	ExtraHandleColType.SetDecimal(decimal)
+	ExtraHandleColType.SetCharset(charset.CharsetBin)
+	ExtraHandleColType.SetCollate(charset.CollationBin)
 }
 
 func buildColumnsForMVLog(baseTblInfo *model.TableInfo, refCols []ast.CIStr) ([]*table.Column, []*model.IndexColumn, error) {
@@ -68,7 +93,7 @@ func buildColumnsForMVLog(baseTblInfo *model.TableInfo, refCols []ast.CIStr) ([]
 	colsInBaseTable := make([]*model.IndexColumn, 0, len(refCols))
 	cols = append(cols, &table.Column{
 		ColumnInfo: &model.ColumnInfo{
-			Name:      ast.NewCIStr(MVLogDMLTypeColName),
+			Name:      MVLogDMLTypeColName,
 			FieldType: *MVLogDMLTypeColType,
 			Offset:    offset,
 			State:     model.StatePublic,
@@ -78,7 +103,7 @@ func buildColumnsForMVLog(baseTblInfo *model.TableInfo, refCols []ast.CIStr) ([]
 	offset++
 	cols = append(cols, &table.Column{
 		ColumnInfo: &model.ColumnInfo{
-			Name:      ast.NewCIStr(MVLogIsNewValueColName),
+			Name:      MVLogIsNewValueColName,
 			FieldType: *MVLogIsNewValueColType,
 			Offset:    offset,
 			State:     model.StatePublic,
@@ -88,7 +113,7 @@ func buildColumnsForMVLog(baseTblInfo *model.TableInfo, refCols []ast.CIStr) ([]
 	offset++
 	cols = append(cols, &table.Column{
 		ColumnInfo: &model.ColumnInfo{
-			Name:      ast.NewCIStr(MVLogIdInTxnColName),
+			Name:      MVLogIdInTxnColName,
 			FieldType: *MVLogIdInTxnColType,
 			Offset:    offset,
 			State:     model.StatePublic,
@@ -96,7 +121,27 @@ func buildColumnsForMVLog(baseTblInfo *model.TableInfo, refCols []ast.CIStr) ([]
 		},
 	})
 	offset++
+
+	checkExtraHandle := !baseTblInfo.PKIsHandle && !baseTblInfo.IsCommonHandle
 	for _, colName := range refCols {
+		if checkExtraHandle && colName.L == model.ExtraHandleName.L {
+			cols = append(cols, &table.Column{
+				ColumnInfo: &model.ColumnInfo{
+					Name:      MVLogExtraHandleColName,
+					FieldType: *ExtraHandleColType,
+					Offset:    offset,
+					State:     model.StatePublic,
+					Version:   model.CurrLatestColumnInfoVersion,
+				},
+			})
+			colsInBaseTable = append(colsInBaseTable, &model.IndexColumn{
+				Name: colName,
+				// -1 means extra handle col
+				Offset: -1,
+			})
+			offset++
+			continue
+		}
 		col := findColumnByName(colName.L, baseTblInfo)
 		if col == nil {
 			return nil, nil, infoschema.ErrColumnNotExists.GenWithStackByArgs(colName.O, baseTblInfo.Name.O)
@@ -106,8 +151,9 @@ func buildColumnsForMVLog(baseTblInfo *model.TableInfo, refCols []ast.CIStr) ([]
 		}
 		// constuct FieldType for mv log
 		mvColFieldType := col.FieldType
+		// delete all the unused flags
 		mvColFieldType.DelFlag(mysql.AutoIncrementFlag)
-		// todo double chcek if we need to clear OnUpdateNowFlag
+		mvColFieldType.DelFlag(mysql.OnUpdateNowFlag)
 		mvColFieldType.DelFlag(mysql.PriKeyFlag)
 		mvColFieldType.DelFlag(mysql.UniqueKeyFlag)
 		mvColFieldType.DelFlag(mysql.UniqueFlag)
