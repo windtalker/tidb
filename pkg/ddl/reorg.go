@@ -188,7 +188,8 @@ func (ctx *reorgTableMutateContext) GetRowIDShardGenerator() *variable.RowIDShar
 }
 
 // GetReservedRowIDAlloc implements table.MutateContext.GetReservedRowIDAlloc.
-func (ctx *reorgTableMutateContext) GetReservedRowIDAlloc() (*stmtctx.ReservedRowIDAlloc, bool) {
+func (ctx *reorgTableMutateContext) GetReservedRowIDAlloc(bool) (*stmtctx.ReservedRowIDAlloc, bool) {
+	// todo double check if need to check forMVLog
 	return &ctx.reservedRowIDAlloc, true
 }
 

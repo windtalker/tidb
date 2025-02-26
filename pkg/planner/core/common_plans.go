@@ -435,6 +435,8 @@ type Insert struct {
 
 	FKChecks   []*FKCheck   `plan-cache-clone:"must-nil"`
 	FKCascades []*FKCascade `plan-cache-clone:"must-nil"`
+
+	MVLog table.Table `plan-cache-clone:"must-nil"`
 }
 
 // MemoryUsage return the memory usage of Insert

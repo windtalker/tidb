@@ -745,7 +745,7 @@ func (t *TableCommon) addRecord(sctx table.MutateContext, txn kv.Transaction, r 
 			// The reserved ID could be used in the future within this statement, by the
 			// following AddRecord() operation.
 			// Make the IDs continuous benefit for the performance of TiKV.
-			if reserved, ok := sctx.GetReservedRowIDAlloc(); ok {
+			if reserved, ok := sctx.GetReservedRowIDAlloc(t.Meta().IsMVLog()); ok {
 				var baseRowID, maxRowID int64
 				if baseRowID, maxRowID, err = AllocHandleIDs(ctx, sctx, t, uint64(reserveAutoID)); err != nil {
 					return nil, err
@@ -1365,7 +1365,7 @@ func GetColDefaultValue(ctx exprctx.BuildContext, col *table.Column, defaultVals
 func AllocHandle(ctx context.Context, mctx table.MutateContext, t table.Table) (kv.IntHandle,
 	error) {
 	if mctx != nil {
-		if reserved, ok := mctx.GetReservedRowIDAlloc(); ok {
+		if reserved, ok := mctx.GetReservedRowIDAlloc(t.Meta().IsMVLog()); ok {
 			// First try to alloc if the statement has reserved auto ID.
 			if rowID, ok := reserved.Consume(); ok {
 				return kv.IntHandle(rowID), nil

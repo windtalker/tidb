@@ -87,7 +87,7 @@ func TestSessionMutateContextFields(t *testing.T) {
 	sctx.GetSessionVars().TxnCtx.StartTS = 123
 	require.Same(t, sctx.GetSessionVars().GetRowIDShardGenerator(), ctx.GetRowIDShardGenerator())
 	// ReservedRowIDAlloc
-	reserved, ok := ctx.GetReservedRowIDAlloc()
+	reserved, ok := ctx.GetReservedRowIDAlloc(false)
 	require.True(t, ok)
 	require.Same(t, &sctx.GetSessionVars().StmtCtx.ReservedRowIDAlloc, reserved)
 	// statistics support

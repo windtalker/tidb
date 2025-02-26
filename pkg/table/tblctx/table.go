@@ -126,7 +126,7 @@ type MutateContext interface {
 	// GetRowIDShardGenerator returns the `RowIDShardGenerator` object to shard rows.
 	GetRowIDShardGenerator() *variable.RowIDShardGenerator
 	// GetReservedRowIDAlloc returns the `ReservedRowIDAlloc` object to allocate row id from reservation.
-	GetReservedRowIDAlloc() (*stmtctx.ReservedRowIDAlloc, bool)
+	GetReservedRowIDAlloc(forMVLog bool) (*stmtctx.ReservedRowIDAlloc, bool)
 	// GetStatisticsSupport returns a `StatisticsSupport` if the context supports it.
 	// If the context does not support statistics update, the second return value will be false.
 	GetStatisticsSupport() (StatisticsSupport, bool)

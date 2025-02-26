@@ -299,7 +299,7 @@ func (e *UpdateExec) exec(
 			flags, tbl, false, e.memTracker,
 			e.fkChecks[content.TblID],
 			e.fkCascades[content.TblID],
-			dupKeyCheck, e.IgnoreError)
+			dupKeyCheck, e.IgnoreError, nil)
 
 		// Copy data from new row to merge row
 		if err := e.mergeGenerated(row, newData, i, false); err != nil {

@@ -3954,6 +3954,9 @@ func (b *PlanBuilder) buildInsert(ctx context.Context, insert *ast.InsertStmt) (
 	if !ok {
 		return nil, errors.Errorf("Can't get table %s", tableInfo.Name.O)
 	}
+	if tableInPlan.Meta().IsMVLog() {
+		return nil, errors.Errorf("Can't write to a mv log directly")
+	}
 
 	insertPlan := Insert{
 		Table:         tableInPlan,
@@ -4058,6 +4061,18 @@ func (b *PlanBuilder) buildInsert(ctx context.Context, insert *ast.InsertStmt) (
 		return nil, err
 	}
 	err = insertPlan.buildOnInsertFKTriggers(b.ctx, b.is, tnW.DBInfo.Name.L)
+	if err != nil {
+		return nil, err
+	}
+
+	if insertPlan.Table.Meta().HasMVLog() {
+		// setup mvlog
+		mvLog, ok := b.is.TableByID(ctx, insertPlan.Table.Meta().MVLogID)
+		if !ok {
+			return nil, errors.Errorf("Can't get mv log table on %s", insertPlan.Table.Meta().Name.O)
+		}
+		insertPlan.MVLog = mvLog
+	}
 	return insertPlan, err
 }
 

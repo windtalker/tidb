@@ -91,6 +91,7 @@ func updateRecord(
 	fkCascades []*FKCascadeExec,
 	dupKeyMode table.DupKeyCheckMode,
 	ignoreErr bool,
+	mvLogUpdater *mvlogUpdater,
 ) (changed bool, ignored bool, retErr error) {
 	r, ctx := tracing.StartRegionEx(ctx, "executor.updateRecord")
 	defer r.End()
@@ -282,9 +283,20 @@ func updateRecord(
 				return false, err
 			}
 
-			_, err = t.AddRecord(sctx.GetTableCtx(), txn, newData, table.IsUpdate, table.WithCtx(ctx), dupKeyMode, pessimisticLazyCheck)
+			handle, err := t.AddRecord(sctx.GetTableCtx(), txn, newData, table.IsUpdate, table.WithCtx(ctx), dupKeyMode, pessimisticLazyCheck)
 			if err != nil {
 				return false, err
+			}
+			if mvLogUpdater != nil {
+				//
+				err = mvLogUpdater.onDeleteRow(ctx, sctx, txn, h, oldData, 0, false)
+				if err != nil {
+					return false, err
+				}
+				err = mvLogUpdater.onInsertRow(ctx, sctx, txn, handle, newData, 0)
+				if err != nil {
+					return false, err
+				}
 			}
 			memBuffer.Release(sh)
 			return true, nil
@@ -314,6 +326,16 @@ func updateRecord(
 				return false, false, ec.HandleError(err)
 			}
 			return false, false, err
+		}
+		if mvLogUpdater != nil {
+			err = mvLogUpdater.onDeleteRow(ctx, sctx, txn, h, oldData, 0, false)
+			if err != nil {
+				return false, false, err
+			}
+			err = mvLogUpdater.onInsertRow(ctx, sctx, txn, h, newData, 0)
+			if err != nil {
+				return false, false, err
+			}
 		}
 		if sessVars.LockUnchangedKeys {
 			// Lock unique keys when handle unchanged

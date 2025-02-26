@@ -240,7 +240,7 @@ func TestLitTableMutateContext(t *testing.T) {
 		require.False(t, tblCtx.InRestrictedSQL())
 		require.NotNil(t, tblCtx.GetMutateBuffers())
 		require.NotNil(t, tblCtx.GetMutateBuffers().GetWriteStmtBufs())
-		alloc, ok := tblCtx.GetReservedRowIDAlloc()
+		alloc, ok := tblCtx.GetReservedRowIDAlloc(false)
 		require.True(t, ok)
 		require.NotNil(t, alloc)
 		require.Equal(t, &stmtctx.ReservedRowIDAlloc{}, alloc)

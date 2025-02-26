@@ -504,6 +504,16 @@ func (t *TableInfo) IsView() bool {
 	return t.View != nil
 }
 
+// IsMVLog checks if current table is a mv log.
+func (t *TableInfo) IsMVLog() bool {
+	return t.MVLogInfo != nil
+}
+
+// HasMVLog checks if current table has a mv log.
+func (t *TableInfo) HasMVLog() bool {
+	return t.MVLogID != 0
+}
+
 // IsSequence checks if TableInfo is a sequence.
 func (t *TableInfo) IsSequence() bool {
 	return t.Sequence != nil

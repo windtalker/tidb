@@ -222,10 +222,11 @@ type TxnCtxNoNeedToRestore struct {
 	IsStaleness bool
 	// IsExplicit indicates whether the txn is an interactive txn, which is typically started with a BEGIN
 	// or START TRANSACTION statement, or by setting autocommit to 0.
-	IsExplicit bool
-	Isolation  string
-	LockExpire uint32
-	ForUpdate  uint32
+	IsExplicit          bool
+	StatementIndexInTxn atomic.Uint64
+	Isolation           string
+	LockExpire          uint32
+	ForUpdate           uint32
 	// TxnScope indicates the value of txn_scope
 	TxnScope string
 
@@ -2477,6 +2478,9 @@ func (s *SessionVars) SetInTxn(val bool) {
 	s.SetStatusFlag(mysql.ServerStatusInTrans, val)
 	if val {
 		s.TxnCtx.IsExplicit = val
+	} else {
+		// reset to 0 if not in transaction
+		s.TxnCtx.StatementIndexInTxn.Store(0)
 	}
 }
 

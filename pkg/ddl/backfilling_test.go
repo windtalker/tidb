@@ -298,9 +298,9 @@ func TestReorgTableMutateContext(t *testing.T) {
 		require.Equal(t, sctxTblCtx.GetRowIDShardGenerator().GetShardStep(), ctx.GetRowIDShardGenerator().GetShardStep())
 		require.GreaterOrEqual(t, ctx.GetRowIDShardGenerator().GetCurrentShard(1), int64(0))
 
-		alloc1, ok := sctxTblCtx.GetReservedRowIDAlloc()
+		alloc1, ok := sctxTblCtx.GetReservedRowIDAlloc(false)
 		require.True(t, ok)
-		alloc2, ok := ctx.GetReservedRowIDAlloc()
+		alloc2, ok := ctx.GetReservedRowIDAlloc(false)
 		require.True(t, ok)
 		require.Equal(t, alloc1, alloc2)
 		require.True(t, alloc2.Exhausted())

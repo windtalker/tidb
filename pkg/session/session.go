@@ -2032,6 +2032,7 @@ func (s *session) ExecuteStmt(ctx context.Context, stmtNode ast.StmtNode) (sqlex
 
 	sessVars := s.sessionVars
 	sessVars.StartTime = time.Now()
+	sessVars.TxnCtx.StatementIndexInTxn.Add(1)
 
 	// Some executions are done in compile stage, so we reset them before compile.
 	if err := executor.ResetContextOfStmt(s, stmtNode); err != nil {

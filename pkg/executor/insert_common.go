@@ -50,6 +50,75 @@ import (
 	"go.uber.org/zap"
 )
 
+type mvlogUpdater struct {
+	// UpdateMVLog updates the MVLog.
+	mvLog               table.Table
+	baseColumnInfo      []*model.IndexColumn
+	indexInStatement    uint64
+	statementIndexInTxn uint64
+}
+
+func (m *mvlogUpdater) onFinishOneRow() {
+	m.indexInStatement++
+}
+
+func (m *mvlogUpdater) onInsertRow(ctx context.Context, sctx sessionctx.Context, txn kv.Transaction, h kv.Handle, row []types.Datum, reservedAutoIDHint int) error {
+	// construct the row to insert into the MVLog table.
+	newRow := make([]types.Datum, 0, len(m.baseColumnInfo)+3)
+	dmlTypeDatum := types.NewDatum(int64(ddl.MVLogDMLTypeInsert))
+	newRow = append(newRow, dmlTypeDatum)
+	isNewValueDatum := types.NewDatum(int64(ddl.MVLogIsNewValueNewValue))
+	newRow = append(newRow, isNewValueDatum)
+	indexInTxn := types.NewDatum((m.statementIndexInTxn-1)<<48 | m.indexInStatement)
+	newRow = append(newRow, indexInTxn)
+	for _, col := range m.baseColumnInfo {
+		if col.Offset == -1 {
+			newRow = append(newRow, types.NewDatum(h.IntValue()))
+		} else {
+			newRow = append(newRow, row[col.Offset])
+		}
+	}
+	// first column is
+	if reservedAutoIDHint > 0 {
+		_, err := m.mvLog.AddRecord(sctx.GetTableCtx(), txn, newRow, table.WithCtx(ctx), table.WithReserveAutoIDHint(reservedAutoIDHint))
+		return err
+	} else {
+		_, err := m.mvLog.AddRecord(sctx.GetTableCtx(), txn, newRow, table.WithCtx(ctx))
+		return err
+	}
+}
+
+func (m *mvlogUpdater) onDeleteRow(ctx context.Context, sctx sessionctx.Context, txn kv.Transaction, h kv.Handle, row []types.Datum, reservedAutoIDHint int, fromUpdate bool) error {
+	// construct the row to insert into the MVLog table.
+	newRow := make([]types.Datum, 0, len(m.baseColumnInfo)+3)
+	dmlType := ddl.MVLogDMLTypeDelete
+	if fromUpdate {
+		dmlType = ddl.MVLogDMLTypeUpdate
+	}
+	dmlTypeDatum := types.NewDatum(int64(dmlType))
+	newRow = append(newRow, dmlTypeDatum)
+	// delete is always old value.
+	isNewValueDatum := types.NewDatum(int64(ddl.MVLogIsNewValueOldValue))
+	newRow = append(newRow, isNewValueDatum)
+	indexInTxn := types.NewDatum((m.statementIndexInTxn-1)<<48 | m.indexInStatement)
+	newRow = append(newRow, indexInTxn)
+	for _, col := range m.baseColumnInfo {
+		if col.Offset == -1 {
+			newRow = append(newRow, types.NewDatum(h.IntValue()))
+		} else {
+			newRow = append(newRow, row[col.Offset])
+		}
+	}
+	// first column is
+	if reservedAutoIDHint > 0 {
+		_, err := m.mvLog.AddRecord(sctx.GetTableCtx(), txn, newRow, table.WithCtx(ctx), table.WithReserveAutoIDHint(reservedAutoIDHint))
+		return err
+	} else {
+		_, err := m.mvLog.AddRecord(sctx.GetTableCtx(), txn, newRow, table.WithCtx(ctx))
+		return err
+	}
+}
+
 // InsertValues is the data to insert.
 // nolint:structcheck
 type InsertValues struct {
@@ -95,6 +164,8 @@ type InsertValues struct {
 	// fkChecks contains the foreign key checkers.
 	fkChecks   []*FKCheckExec
 	fkCascades []*FKCascadeExec
+
+	mvlogUpdater *mvlogUpdater
 
 	ignoreErr bool
 }
@@ -1305,6 +1376,9 @@ func (e *InsertValues) batchCheckAndInsert(
 		e.Ctx().GetSessionVars().StmtCtx.AddCopiedRows(1)
 		// all the rows have been checked, so it is safe to use DupKeyCheckSkip
 		err = addRecord(ctx, rows[i], table.DupKeyCheckSkip)
+		if e.mvlogUpdater != nil {
+			e.mvlogUpdater.onFinishOneRow()
+		}
 		if err != nil {
 			// throw warning when violate check constraint
 			if table.ErrCheckConstraintViolated.Equal(err) {
@@ -1376,6 +1450,12 @@ func (e *InsertValues) removeRow(
 	if err != nil {
 		return false, err
 	}
+	if e.mvlogUpdater != nil {
+		err = e.mvlogUpdater.onDeleteRow(ctx, e.Ctx(), txn, handle, oldRow, 0, false)
+		if err != nil {
+			return false, err
+		}
+	}
 	if inReplace {
 		e.Ctx().GetSessionVars().StmtCtx.AddAffectedRows(1)
 	} else {
@@ -1415,13 +1495,19 @@ func (e *InsertValues) addRecordWithAutoIDHint(
 		return err
 	}
 	pessimisticLazyCheck := getPessimisticLazyCheckMode(vars)
+	var handle kv.Handle
 	if reserveAutoIDCount > 0 {
-		_, err = e.Table.AddRecord(e.Ctx().GetTableCtx(), txn, row, table.WithCtx(ctx), table.WithReserveAutoIDHint(reserveAutoIDCount), dupKeyCheck, pessimisticLazyCheck)
+		handle, err = e.Table.AddRecord(e.Ctx().GetTableCtx(), txn, row, table.WithCtx(ctx), table.WithReserveAutoIDHint(reserveAutoIDCount), dupKeyCheck, pessimisticLazyCheck)
 	} else {
-		_, err = e.Table.AddRecord(e.Ctx().GetTableCtx(), txn, row, table.WithCtx(ctx), dupKeyCheck, pessimisticLazyCheck)
+		handle, err = e.Table.AddRecord(e.Ctx().GetTableCtx(), txn, row, table.WithCtx(ctx), dupKeyCheck, pessimisticLazyCheck)
 	}
 	if err != nil {
 		return err
+	}
+	if e.mvlogUpdater != nil {
+		if err = e.mvlogUpdater.onInsertRow(ctx, e.Ctx(), txn, handle, row, reserveAutoIDCount); err != nil {
+			return err
+		}
 	}
 	vars.StmtCtx.AddAffectedRows(1)
 	if e.lastInsertID != 0 {

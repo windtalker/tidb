@@ -121,7 +121,8 @@ type executorBuilder struct {
 	dataReaderTS         uint64
 
 	// Used when building MPPGather.
-	encounterUnionScan bool
+	encounterUnionScan  bool
+	statementIndexInTxn uint64
 }
 
 // CTEStorages stores resTbl and iterInTbl for CTEExec.
@@ -136,11 +137,12 @@ type CTEStorages struct {
 func newExecutorBuilder(ctx sessionctx.Context, is infoschema.InfoSchema) *executorBuilder {
 	txnManager := sessiontxn.GetTxnManager(ctx)
 	return &executorBuilder{
-		ctx:              ctx,
-		is:               is,
-		isStaleness:      staleread.IsStmtStaleness(ctx),
-		txnScope:         txnManager.GetTxnScope(),
-		readReplicaScope: txnManager.GetReadReplicaScope(),
+		ctx:                 ctx,
+		is:                  is,
+		isStaleness:         staleread.IsStmtStaleness(ctx),
+		txnScope:            txnManager.GetTxnScope(),
+		readReplicaScope:    txnManager.GetReadReplicaScope(),
+		statementIndexInTxn: ctx.GetSessionVars().TxnCtx.StatementIndexInTxn.Load(),
 	}
 }
 
@@ -1008,6 +1010,22 @@ func (b *executorBuilder) buildInsert(v *plannercore.Insert) exec.Executor {
 	ivs.fkCascades, b.err = b.buildFKCascadeExecs(ivs.Table, v.FKCascades)
 	if b.err != nil {
 		return nil
+	}
+
+	if v.MVLog != nil {
+		if b.statementIndexInTxn <= 0 {
+			b.err = errors.New("unexpected statement index in transaction, should at least be 1")
+			return nil
+		}
+		if b.statementIndexInTxn > 1 && (b.statementIndexInTxn-1)<<48 == 0 {
+			b.err = errors.New("unexpected statement index in transaction, should be at most 65536")
+			return nil
+		}
+		ivs.mvlogUpdater = &mvlogUpdater{
+			mvLog:               v.MVLog,
+			baseColumnInfo:      v.MVLog.Meta().MVLogInfo.ColumnsInBaseTable,
+			statementIndexInTxn: b.statementIndexInTxn,
+		}
 	}
 
 	if v.IsReplace {

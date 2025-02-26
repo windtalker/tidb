@@ -168,7 +168,8 @@ func (ctx *litTableMutateContext) GetRowIDShardGenerator() *variable.RowIDShardG
 }
 
 // GetReservedRowIDAlloc implements the `table.MutateContext` interface.
-func (ctx *litTableMutateContext) GetReservedRowIDAlloc() (*stmtctx.ReservedRowIDAlloc, bool) {
+func (ctx *litTableMutateContext) GetReservedRowIDAlloc(bool) (*stmtctx.ReservedRowIDAlloc, bool) {
+	// todo double check if we need handle forMVLog arguments
 	return &ctx.reservedRowIDAlloc, true
 }
 

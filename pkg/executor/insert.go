@@ -116,6 +116,9 @@ func (e *InsertExec) exec(ctx context.Context, rows [][]types.Datum) error {
 			if err != nil {
 				return err
 			}
+			if e.mvlogUpdater != nil {
+				e.mvlogUpdater.onFinishOneRow()
+			}
 		}
 		if e.stats != nil {
 			e.stats.CheckInsertTime += time.Since(start)
@@ -272,6 +275,9 @@ func (e *InsertExec) batchUpdateDupRows(ctx context.Context, newRows [][]types.D
 
 			err = e.updateDupRow(ctx, i, txn, r, handle, e.OnDuplicate, updateDupKeyCheck, autoColIdx)
 			if err == nil {
+				if e.mvlogUpdater != nil {
+					e.mvlogUpdater.onFinishOneRow()
+				}
 				continue
 			}
 			if !kv.IsErrNotFound(err) {
@@ -299,7 +305,9 @@ func (e *InsertExec) batchUpdateDupRows(ctx context.Context, newRows [][]types.D
 				}
 				return err
 			}
-
+			if e.mvlogUpdater != nil {
+				e.mvlogUpdater.onFinishOneRow()
+			}
 			newRows[i] = nil
 			break
 		}
@@ -312,6 +320,9 @@ func (e *InsertExec) batchUpdateDupRows(ctx context.Context, newRows [][]types.D
 			err := e.addRecord(ctx, newRows[i], addRecordDupKeyCheck)
 			if err != nil {
 				return err
+			}
+			if e.mvlogUpdater != nil {
+				e.mvlogUpdater.onFinishOneRow()
 			}
 		}
 	}
@@ -525,7 +536,7 @@ func (e *InsertExec) doDupRowUpdate(
 		handle, oldRow, newData,
 		0, generated, e.evalBuffer4Dup, errorHandler,
 		assignFlag, e.Table,
-		true, e.memTracker, e.fkChecks, e.fkCascades, dupKeyMode, e.ignoreErr)
+		true, e.memTracker, e.fkChecks, e.fkCascades, dupKeyMode, e.ignoreErr, e.mvlogUpdater)
 
 	if ignored {
 		return nil

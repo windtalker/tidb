@@ -33,7 +33,12 @@ import (
 // some constants for materialized view and materialized view log
 const (
 	// MVLogNamePrefix is the prefix of materialized view log name, the mv log name is MVLogNamePrefix + base table name.
-	MVLogNamePrefix = "__mv_log_"
+	MVLogNamePrefix         = "__mv_log_"
+	MVLogDMLTypeInsert      = 1
+	MVLogDMLTypeUpdate      = 2
+	MVLogDMLTypeDelete      = 3
+	MVLogIsNewValueOldValue = 0
+	MVLogIsNewValueNewValue = 1
 )
 
 var (
@@ -73,6 +78,7 @@ func init() {
 	flen, decimal = mysql.GetDefaultFieldLengthAndDecimal(mysql.TypeLonglong)
 	MVLogIdInTxnColType = types.NewFieldType(mysql.TypeLonglong)
 	MVLogIdInTxnColType.AddFlag(mysql.NotNullFlag)
+	MVLogIdInTxnColType.AddFlag(mysql.UnsignedFlag)
 	MVLogIdInTxnColType.SetFlen(flen)
 	MVLogIdInTxnColType.SetDecimal(decimal)
 	MVLogIdInTxnColType.SetCharset(charset.CharsetBin)

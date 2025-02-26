@@ -298,7 +298,8 @@ type StatementContext struct {
 	InsertID uint64
 
 	// ReservedRowIDAlloc is used to alloc auto ID from the reserved IDs.
-	ReservedRowIDAlloc ReservedRowIDAlloc
+	ReservedRowIDAlloc         ReservedRowIDAlloc
+	ReservedRowIDAllocForMVLog ReservedRowIDAlloc
 
 	// Copied from SessionVars.TimeZone.
 	Priority     mysql.PriorityEnum
@@ -1081,6 +1082,7 @@ func (sc *StatementContext) resetMuForRetry() {
 func (sc *StatementContext) ResetForRetry() {
 	sc.resetMuForRetry()
 	sc.ReservedRowIDAlloc.Reset(0, 0)
+	sc.ReservedRowIDAllocForMVLog.Reset(0, 0)
 	sc.TableIDs = sc.TableIDs[:0]
 	sc.IndexNames = sc.IndexNames[:0]
 	sc.TaskID = AllocateTaskID()

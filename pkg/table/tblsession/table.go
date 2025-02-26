@@ -105,8 +105,11 @@ func (ctx *MutateContext) GetRowIDShardGenerator() *variable.RowIDShardGenerator
 }
 
 // GetReservedRowIDAlloc implements the MutateContext interface.
-func (ctx *MutateContext) GetReservedRowIDAlloc() (*stmtctx.ReservedRowIDAlloc, bool) {
+func (ctx *MutateContext) GetReservedRowIDAlloc(forMVLog bool) (*stmtctx.ReservedRowIDAlloc, bool) {
 	if sc := ctx.vars().StmtCtx; sc != nil {
+		if forMVLog {
+			return &sc.ReservedRowIDAllocForMVLog, true
+		}
 		return &sc.ReservedRowIDAlloc, true
 	}
 	// `StmtCtx` should not be nil in the `variable.SessionVars`.
