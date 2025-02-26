@@ -969,6 +969,22 @@ func (b *executorBuilder) buildSetConfig(v *plannercore.SetConfig) exec.Executor
 	}
 }
 
+func (b *executorBuilder) buildMVLogUpdater(mvLog table.Table) *mvlogUpdater {
+	if b.statementIndexInTxn <= 0 {
+		b.err = errors.New("unexpected statement index in transaction, should at least be 1")
+		return nil
+	}
+	if b.statementIndexInTxn > 1 && (b.statementIndexInTxn-1)<<48 == 0 {
+		b.err = errors.New("unexpected statement index in transaction, should be at most 65536")
+		return nil
+	}
+	return &mvlogUpdater{
+		mvLog:               mvLog,
+		baseColumnInfo:      mvLog.Meta().MVLogInfo.ColumnsInBaseTable,
+		statementIndexInTxn: b.statementIndexInTxn,
+	}
+}
+
 func (b *executorBuilder) buildInsert(v *plannercore.Insert) exec.Executor {
 	b.inInsertStmt = true
 	if b.err = b.updateForUpdateTS(); b.err != nil {
@@ -1013,18 +1029,9 @@ func (b *executorBuilder) buildInsert(v *plannercore.Insert) exec.Executor {
 	}
 
 	if v.MVLog != nil {
-		if b.statementIndexInTxn <= 0 {
-			b.err = errors.New("unexpected statement index in transaction, should at least be 1")
+		ivs.mvlogUpdater = b.buildMVLogUpdater(v.MVLog)
+		if ivs.mvlogUpdater == nil {
 			return nil
-		}
-		if b.statementIndexInTxn > 1 && (b.statementIndexInTxn-1)<<48 == 0 {
-			b.err = errors.New("unexpected statement index in transaction, should be at most 65536")
-			return nil
-		}
-		ivs.mvlogUpdater = &mvlogUpdater{
-			mvLog:               v.MVLog,
-			baseColumnInfo:      v.MVLog.Meta().MVLogInfo.ColumnsInBaseTable,
-			statementIndexInTxn: b.statementIndexInTxn,
 		}
 	}
 
@@ -2789,6 +2796,13 @@ func (b *executorBuilder) buildUpdate(v *plannercore.Update) exec.Executor {
 	if b.err != nil {
 		return nil
 	}
+
+	if v.MvLog != nil {
+		updateExec.mvlogUpdater = b.buildMVLogUpdater(v.MvLog)
+		if b.err != nil {
+			return nil
+		}
+	}
 	return updateExec
 }
 
@@ -2841,6 +2855,12 @@ func (b *executorBuilder) buildDelete(v *plannercore.Delete) exec.Executor {
 	deleteExec.fkCascades, b.err = b.buildTblID2FKCascadeExecs(tblID2table, v.FKCascades)
 	if b.err != nil {
 		return nil
+	}
+	if v.MvLog != nil {
+		deleteExec.mvlogUpdater = b.buildMVLogUpdater(v.MvLog)
+		if b.err != nil {
+			return nil
+		}
 	}
 	return deleteExec
 }

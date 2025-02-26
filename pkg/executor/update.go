@@ -74,7 +74,8 @@ type UpdateExec struct {
 	// fkChecks contains the foreign key checkers. the map is tableID -> []*FKCheckExec
 	fkChecks map[int64][]*FKCheckExec
 	// fkCascades contains the foreign key cascade. the map is tableID -> []*FKCascadeExec
-	fkCascades map[int64][]*FKCascadeExec
+	fkCascades   map[int64][]*FKCascadeExec
+	mvlogUpdater *mvlogUpdater
 
 	IgnoreError bool
 }
@@ -259,6 +260,11 @@ func (e *UpdateExec) exec(
 	var totalMemDelta int64
 	defer func() { e.memTracker.Consume(totalMemDelta) }()
 
+	mvLogBaseTableID := int64(0)
+	if e.mvlogUpdater != nil {
+		mvLogBaseTableID = e.mvlogUpdater.mvLog.Meta().MVLogInfo.BaseTableID
+	}
+
 	for i, content := range e.tblColPosInfos {
 		if !e.tableUpdatable[i] {
 			// If there's nothing to update, we can just skip current row
@@ -291,6 +297,10 @@ func (e *UpdateExec) exec(
 			return errors.Trace(err)
 		}
 
+		mvlogUpdater := e.mvlogUpdater
+		if content.TblID != mvLogBaseTableID {
+			mvlogUpdater = nil
+		}
 		// Update row
 		changed, ignored, err := updateRecord(
 			ctx, e.Ctx(),
@@ -299,7 +309,11 @@ func (e *UpdateExec) exec(
 			flags, tbl, false, e.memTracker,
 			e.fkChecks[content.TblID],
 			e.fkCascades[content.TblID],
-			dupKeyCheck, e.IgnoreError, nil)
+			dupKeyCheck, e.IgnoreError, mvlogUpdater)
+
+		if mvlogUpdater != nil {
+			mvlogUpdater.onFinishOneRow()
+		}
 
 		// Copy data from new row to merge row
 		if err := e.mergeGenerated(row, newData, i, false); err != nil {

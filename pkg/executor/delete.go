@@ -51,6 +51,8 @@ type DeleteExec struct {
 	// fkCascades contains the foreign key cascade. the map is tableID -> []*FKCascadeExec
 	fkCascades map[int64][]*FKCascadeExec
 
+	mvlogUpdater *mvlogUpdater
+
 	ignoreErr bool
 }
 
@@ -63,7 +65,7 @@ func (e *DeleteExec) Next(ctx context.Context, req *chunk.Chunk) error {
 	return e.deleteSingleTableByChunk(ctx)
 }
 
-func (e *DeleteExec) deleteOneRow(tbl table.Table, colInfo *plannercore.TblColPosInfo, isExtraHandle bool, row []types.Datum) error {
+func (e *DeleteExec) deleteOneRow(ctx context.Context, tbl table.Table, colInfo *plannercore.TblColPosInfo, isExtraHandle bool, row []types.Datum) error {
 	end := len(row)
 	if isExtraHandle {
 		end--
@@ -72,7 +74,7 @@ func (e *DeleteExec) deleteOneRow(tbl table.Table, colInfo *plannercore.TblColPo
 	if err != nil {
 		return err
 	}
-	err = e.removeRow(e.Ctx(), tbl, handle, row[:end], colInfo)
+	err = e.removeRow(ctx, e.Ctx(), tbl, handle, row[:end], colInfo)
 	if err != nil {
 		return err
 	}
@@ -143,7 +145,7 @@ func (e *DeleteExec) deleteSingleTableByChunk(ctx context.Context) error {
 					continue
 				}
 			}
-			err = e.deleteOneRow(tbl, colPosInfo, isExtraHandle, datumRow)
+			err = e.deleteOneRow(ctx, tbl, colPosInfo, isExtraHandle, datumRow)
 			if err != nil {
 				return err
 			}
@@ -258,7 +260,7 @@ func (e *DeleteExec) removeRowsInTblRowMap(ctx context.Context, tblRowMap tableR
 				}
 			}
 
-			err = e.removeRow(e.Ctx(), e.tblID2Table[id], h, val.handleVal, val.posInfo)
+			err = e.removeRow(ctx, e.Ctx(), e.tblID2Table[id], h, val.handleVal, val.posInfo)
 			return err == nil
 		})
 		if err != nil {
@@ -268,22 +270,26 @@ func (e *DeleteExec) removeRowsInTblRowMap(ctx context.Context, tblRowMap tableR
 	return nil
 }
 
-func (e *DeleteExec) removeRow(ctx sessionctx.Context, t table.Table, h kv.Handle, data []types.Datum, posInfo *plannercore.TblColPosInfo) error {
+func (e *DeleteExec) removeRow(ctx context.Context, sctx sessionctx.Context, t table.Table, h kv.Handle, data []types.Datum, posInfo *plannercore.TblColPosInfo) error {
 	txn, err := e.Ctx().Txn(true)
 	if err != nil {
 		return err
 	}
 
-	err = t.RemoveRecord(ctx.GetTableCtx(), txn, h, data, posInfo.IndexesRowLayout)
+	err = t.RemoveRecord(sctx.GetTableCtx(), txn, h, data, posInfo.IndexesRowLayout)
 	if err != nil {
 		return err
 	}
 	tid := t.Meta().ID
-	err = onRemoveRowForFK(ctx, data, e.fkChecks[tid], e.fkCascades[tid], e.ignoreErr)
+	err = onRemoveRowForFK(sctx, data, e.fkChecks[tid], e.fkCascades[tid], e.ignoreErr)
 	if err != nil {
 		return err
 	}
-	ctx.GetSessionVars().StmtCtx.AddAffectedRows(1)
+	if e.mvlogUpdater != nil && tid == e.mvlogUpdater.mvLog.Meta().MVLogInfo.BaseTableID {
+		e.mvlogUpdater.onDeleteRow(ctx, sctx, txn, h, data, 0, false)
+		e.mvlogUpdater.onFinishOneRow()
+	}
+	sctx.GetSessionVars().StmtCtx.AddAffectedRows(1)
 	return nil
 }
 

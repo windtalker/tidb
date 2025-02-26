@@ -2013,6 +2013,9 @@ func buildPointUpdatePlan(ctx base.PlanContext, pointPlan base.PhysicalPlan, dbN
 	if checkFastPlanPrivilege(ctx, dbName, tbl.Name.L, mysql.SelectPriv, mysql.UpdatePriv) != nil {
 		return nil
 	}
+	if tbl.IsMVLog() {
+		return nil
+	}
 	orderedList, allAssignmentsAreConstant := buildOrderedList(ctx, pointPlan, updateStmt.List)
 	if orderedList == nil {
 		return nil
@@ -2062,6 +2065,13 @@ func buildPointUpdatePlan(ctx base.PlanContext, pointPlan base.PhysicalPlan, dbN
 	err := updatePlan.buildOnUpdateFKTriggers(ctx, is, updatePlan.tblID2Table)
 	if err != nil {
 		return nil
+	}
+	if tbl.HasMVLog() {
+		updatePlan.MvLog, _ = is.TableByID(context.Background(), tbl.MVLogID)
+		if updatePlan.MvLog == nil {
+			// todo log error message
+			return nil
+		}
 	}
 	return updatePlan
 }
@@ -2163,6 +2173,17 @@ func buildPointDeletePlan(ctx base.PlanContext, pointPlan base.PhysicalPlan, dbN
 	tblID2Table := map[int64]table.Table{tbl.ID: t}
 	err = delPlan.buildOnDeleteFKTriggers(ctx, is, tblID2Table)
 	if err != nil {
+		return nil
+	}
+	if tbl.HasMVLog() {
+		delPlan.MvLog, _ = is.TableByID(context.Background(), tbl.MVLogID)
+		if delPlan.MvLog == nil {
+			// todo log error message
+			return nil
+		}
+	}
+	if tbl.IsMVLog() {
+		// mv log can not be deleted
 		return nil
 	}
 	return delPlan

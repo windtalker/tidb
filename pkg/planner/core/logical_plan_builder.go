@@ -5569,8 +5569,19 @@ func (b *PlanBuilder) buildUpdate(ctx context.Context, update *ast.UpdateStmt) (
 		return nil, err
 	}
 	tblID2table := make(map[int64]table.Table, len(tblID2Handle))
+	mvLogId := int64(0)
 	for id := range tblID2Handle {
-		tblID2table[id], _ = b.is.TableByID(ctx, id)
+		currentTbl, _ := b.is.TableByID(ctx, id)
+		if currentTbl.Meta().HasMVLog() {
+			if mvLogId != 0 {
+				return nil, errors.New("more than 1 table in multiple update statement has mv log, not supported")
+			}
+			mvLogId = currentTbl.Meta().MVLogID
+		}
+		if currentTbl.Meta().IsMVLog() {
+			return nil, errors.New("mv log table cannot be updated")
+		}
+		tblID2table[id] = currentTbl
 	}
 	updt.TblColPosInfos, err = buildColumns2HandleWithWrtiableColumns(updt.OutputNames(), tblID2Handle, tblID2table)
 	if err != nil {
@@ -5579,6 +5590,12 @@ func (b *PlanBuilder) buildUpdate(ctx context.Context, update *ast.UpdateStmt) (
 	updt.PartitionedTable = b.partitionedTable
 	updt.tblID2Table = tblID2table
 	err = updt.buildOnUpdateFKTriggers(b.ctx, b.is, tblID2table)
+	if mvLogId != 0 {
+		updt.MvLog, _ = b.is.TableByID(ctx, mvLogId)
+		if updt.MvLog == nil {
+			return nil, errors.New("cannot find mv log table")
+		}
+	}
 	return updt, err
 }
 
@@ -6043,13 +6060,30 @@ func (b *PlanBuilder) buildDelete(ctx context.Context, ds *ast.DeleteStmt) (base
 		tblID2Handle = del.cleanTblID2HandleMap(tblID2TableName, tblID2Handle, preProjNames)
 	}
 	tblID2table := make(map[int64]table.Table, len(tblID2Handle))
+	mvLogId := int64(0)
 	for id := range tblID2Handle {
-		tblID2table[id], _ = b.is.TableByID(ctx, id)
+		tbl, _ := b.is.TableByID(ctx, id)
+		if tbl.Meta().HasMVLog() {
+			if mvLogId != 0 {
+				return nil, errors.New("more than 1 table in multiple delete statement has mv log, not supported")
+			}
+			mvLogId = tbl.Meta().MVLogID
+		}
+		if tbl.Meta().IsMVLog() {
+			return nil, errors.New("mv log table cannot be deleted")
+		}
+		tblID2table[id] = tbl
 	}
 
 	err = del.buildOnDeleteFKTriggers(b.ctx, b.is, tblID2table)
 	if err != nil {
 		return nil, err
+	}
+	if mvLogId != 0 {
+		del.MvLog, _ = b.is.TableByID(ctx, mvLogId)
+		if del.MvLog == nil {
+			return nil, errors.New("cannot find mv log table")
+		}
 	}
 
 	var nonPruned *bitset.BitSet

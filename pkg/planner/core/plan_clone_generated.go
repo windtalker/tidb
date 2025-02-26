@@ -435,6 +435,9 @@ func (op *Update) CloneForPlanCache(newCtx base.PlanContext) (base.Plan, bool) {
 	if op.FKCascades != nil {
 		return nil, false
 	}
+	if op.MvLog != nil {
+		return nil, false
+	}
 	return cloned, true
 }
 
@@ -454,6 +457,9 @@ func (op *Delete) CloneForPlanCache(newCtx base.PlanContext) (base.Plan, bool) {
 		return nil, false
 	}
 	if op.FKCascades != nil {
+		return nil, false
+	}
+	if op.MvLog != nil {
 		return nil, false
 	}
 	return cloned, true
@@ -478,6 +484,9 @@ func (op *Insert) CloneForPlanCache(newCtx base.PlanContext) (base.Plan, bool) {
 		return nil, false
 	}
 	if op.FKCascades != nil {
+		return nil, false
+	}
+	if op.MVLog != nil {
 		return nil, false
 	}
 	return cloned, true

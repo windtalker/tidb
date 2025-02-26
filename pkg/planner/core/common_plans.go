@@ -507,6 +507,9 @@ type Update struct {
 
 	FKChecks   map[int64][]*FKCheck   `plan-cache-clone:"must-nil"`
 	FKCascades map[int64][]*FKCascade `plan-cache-clone:"must-nil"`
+
+	// MVLog is the table of the MV log, for now only single table update is supported
+	MvLog table.Table `plan-cache-clone:"must-nil"`
 }
 
 // MemoryUsage return the memory usage of Update
@@ -549,6 +552,8 @@ type Delete struct {
 
 	FKChecks   map[int64][]*FKCheck   `plan-cache-clone:"must-nil"`
 	FKCascades map[int64][]*FKCascade `plan-cache-clone:"must-nil"`
+
+	MvLog table.Table `plan-cache-clone:"must-nil"`
 
 	IgnoreErr bool
 }
