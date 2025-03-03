@@ -3541,7 +3541,7 @@ func unfoldWildStar(field *ast.SelectField, outputName types.NameSlice, column [
 		}
 		if (dbName.L == "" || dbName.L == name.DBName.L) &&
 			(tblName.L == "" || tblName.L == name.TblName.L) &&
-			col.ID != model.ExtraHandleID && col.ID != model.ExtraPhysTblID {
+			col.ID != model.ExtraHandleID && col.ID != model.ExtraPhysTblID && col.ID != model.ExtraMVCCVersionID {
 			colName := &ast.ColumnNameExpr{
 				Name: &ast.ColumnName{
 					Schema: name.DBName,
@@ -4600,6 +4600,9 @@ func (b *PlanBuilder) buildDataSource(ctx context.Context, tn *ast.TableName, as
 	copy(allPaths, possiblePaths)
 
 	countCnt := len(columns) + 1 // +1 for an extra handle column
+	if tbl.Meta().IsMVLog() {
+		countCnt++ // for extra mvcc version column
+	}
 	ds := logicalop.DataSource{
 		DBName:                 dbName,
 		TableAsName:            asName,
@@ -4664,6 +4667,19 @@ func (b *PlanBuilder) buildDataSource(ctx context.Context, tn *ast.TableName, as
 			})
 			ds.TblCols = append(ds.TblCols, extraCol)
 		}
+	}
+	if tbl.Meta().IsMVLog() {
+		// append mvcc version column
+		extraVersionCol := ds.NewExtraMVCCVersionSchemaCol()
+		ds.Columns = append(ds.Columns, model.NewExtraMVCCVersionColInfo())
+		schema.Append(extraVersionCol)
+		names = append(names, &types.FieldName{
+			DBName:      dbName,
+			TblName:     tableInfo.Name,
+			ColName:     model.ExtraMVCCVersionName,
+			OrigColName: model.ExtraMVCCVersionName,
+		})
+		ds.TblCols = append(ds.TblCols, extraVersionCol)
 	}
 	ds.HandleCols = handleCols
 	ds.UnMutableHandleCols = handleCols

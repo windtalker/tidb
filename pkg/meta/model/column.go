@@ -311,3 +311,23 @@ func NewExtraPhysTblIDColInfo() *ColumnInfo {
 	colInfo.SetCollate(charset.CollationBin)
 	return colInfo
 }
+
+// NewExtraMVCCVersionColInfo mocks a column info for extra mvcc version column.
+func NewExtraMVCCVersionColInfo() *ColumnInfo {
+	colInfo := &ColumnInfo{
+		ID:   ExtraMVCCVersionID,
+		Name: ExtraMVCCVersionName,
+	}
+
+	// not null, unsigned
+	colInfo.SetFlag(mysql.NotNullFlag | mysql.UnsignedFlag)
+	colInfo.SetType(mysql.TypeLonglong)
+
+	flen, decimal := mysql.GetDefaultFieldLengthAndDecimal(mysql.TypeLonglong)
+	colInfo.SetFlen(flen)
+	colInfo.SetDecimal(decimal)
+
+	colInfo.SetCharset(charset.CharsetBin)
+	colInfo.SetCollate(charset.CollationBin)
+	return colInfo
+}

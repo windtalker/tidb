@@ -575,6 +575,18 @@ func (ds *DataSource) NewExtraHandleSchemaCol() *expression.Column {
 	}
 }
 
+// NewExtraMVCCVersionSchemaCol creates a new column for extra mvcc version col.
+func (ds *DataSource) NewExtraMVCCVersionSchemaCol() *expression.Column {
+	tp := types.NewFieldType(mysql.TypeLonglong)
+	tp.SetFlag(mysql.NotNullFlag | mysql.UnsignedFlag)
+	return &expression.Column{
+		RetType:  tp,
+		UniqueID: ds.SCtx().GetSessionVars().AllocPlanColumnID(),
+		ID:       model.ExtraMVCCVersionID,
+		OrigName: fmt.Sprintf("%v.%v.%v", ds.DBName, ds.TableInfo.Name, model.ExtraMVCCVersionName),
+	}
+}
+
 func appendDataSourcePredicatePushDownTraceStep(ds *DataSource, opt *optimizetrace.LogicalOptimizeOp) {
 	if len(ds.PushedDownConds) < 1 {
 		return

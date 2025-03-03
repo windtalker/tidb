@@ -45,6 +45,9 @@ const ExtraPhysTblID = -3
 // ExtraRowChecksumID is the column ID of column which holds the row checksum info.
 const ExtraRowChecksumID = -4
 
+// ExtraMVCCVersionID is the column ID of column which holds the row mvcc version info.
+const ExtraMVCCVersionID = -1024
+
 const (
 	// TableInfoVersion0 means the table info version is 0.
 	// Upgrade from v2.1.1 or v2.1.2 to v2.1.3 and later, and then execute a "change/modify column" statement
@@ -90,6 +93,9 @@ var ExtraPhysTblIDName = ast.NewCIStr("_tidb_tid")
 
 // Deprecated: Use ExtraPhysTblIDName instead.
 // var ExtraPartitionIdName = NewCIStr("_tidb_pid") //nolint:revive
+
+// ExtraMVCCVersionName is the name of ExtraMVCCVersionName Column.
+var ExtraMVCCVersionName = ast.NewCIStr("_tidb_mvcc_version")
 
 // TableInfo provides meta data describing a DB table.
 type TableInfo struct {
