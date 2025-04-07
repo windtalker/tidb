@@ -52,6 +52,7 @@ import (
 	"github.com/pingcap/tidb/pkg/parser/mysql"
 	"github.com/pingcap/tidb/pkg/parser/terror"
 	parser_types "github.com/pingcap/tidb/pkg/parser/types"
+	"github.com/pingcap/tidb/pkg/planner/core/base"
 	"github.com/pingcap/tidb/pkg/privilege"
 	rg "github.com/pingcap/tidb/pkg/resourcegroup"
 	"github.com/pingcap/tidb/pkg/sessionctx"
@@ -110,6 +111,7 @@ type Executor interface {
 	CreateTable(ctx sessionctx.Context, stmt *ast.CreateTableStmt) error
 	CreateMVLog(ctx sessionctx.Context, stmt *ast.CreateMVLogStmt) error
 	CreateView(ctx sessionctx.Context, stmt *ast.CreateViewStmt) error
+	CreateMView(ctx sessionctx.Context, stmt *ast.CreateMViewStmt, outputSchema *expression.Schema) error
 	DropTable(ctx sessionctx.Context, stmt *ast.DropTableStmt) (err error)
 	DropMVLog(ctx sessionctx.Context, stmt *ast.DropMVLogStmt) (err error)
 	RecoverTable(ctx sessionctx.Context, recoverTableInfo *model.RecoverTableInfo) (err error)
@@ -1608,6 +1610,43 @@ func (e *executor) RecoverTable(ctx sessionctx.Context, recoverTableInfo *model.
 		CheckFlag: recoverCheckFlagNone}
 	err = e.doDDLJob2(ctx, job, args)
 	return errors.Trace(err)
+}
+
+func checkPlanForMV(p base.LogicalPlan) error {
+	return errors.New("not supported plan for mv")
+}
+
+func (e *executor) CreateMView(ctx sessionctx.Context, s *ast.CreateMViewStmt, outputSchema *expression.Schema) (err error) {
+	viewInfo, err := BuildMViewInfo(s)
+	if err != nil {
+		return err
+	}
+	if viewInfo.RefreshMethod == ast.Force {
+		return errors.New("not supported refresh method for mv")
+	}
+	if viewInfo.RefreshIntervalType != ast.OnDemand {
+		return errors.New("not supported refresh interval type for mv")
+	}
+	cols := make([]*table.Column, len(s.Cols))
+	for i, v := range s.Cols {
+		cols[i] = table.ToColumn(&model.ColumnInfo{
+			Name:      v,
+			ID:        int64(i),
+			Offset:    i,
+			State:     model.StatePublic,
+			FieldType: *outputSchema.Columns[i].RetType,
+		})
+	}
+	tblCharset := ""
+	tblCollate := ""
+	if v, ok := ctx.GetSessionVars().GetSystemVar(vardef.CharacterSetConnection); ok {
+		tblCharset = v
+	}
+	if v, ok := ctx.GetSessionVars().GetSystemVar(vardef.CollationConnection); ok {
+		tblCollate = v
+	}
+	_, err = BuildTableInfoForMV(NewMetaBuildContextWithSctx(ctx), s.ViewName.Name, outputSchema, s.Cols, tblCharset, tblCollate)
+	panic("unimplemented")
 }
 
 func (e *executor) CreateView(ctx sessionctx.Context, s *ast.CreateViewStmt) (err error) {

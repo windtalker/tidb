@@ -132,6 +132,35 @@ func (v *ViewCheckOption) String() string {
 	}
 }
 
+type ViewRefreshMethod int
+
+const (
+	Fast ViewRefreshMethod = iota
+	Complete
+	Force
+)
+
+func (n ViewRefreshMethod) String() string {
+	switch n {
+	case Fast:
+		return "FAST"
+	case Complete:
+		return "COMPLETE"
+	case Force:
+		return "FORCE"
+	default:
+		return ""
+	}
+}
+
+type ViewRefreshIntervalType int
+
+const (
+	OnCommit ViewRefreshIntervalType = iota
+	OnDemand
+	OnSchedule
+)
+
 // PartitionType is the type for PartitionInfo
 type PartitionType int
 

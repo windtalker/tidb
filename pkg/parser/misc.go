@@ -264,6 +264,7 @@ var tokenMap = map[string]int{
 	"COMMITTED":                committed,
 	"COMPACT":                  compact,
 	"COMPRESS":                 compress,
+	"COMPUTATION":              computation,
 	"COMPRESSED":               compressed,
 	"COMPRESSION":              compression,
 	"CONCURRENCY":              concurrency,

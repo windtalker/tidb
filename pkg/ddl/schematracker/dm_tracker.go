@@ -24,6 +24,7 @@ import (
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/tidb/pkg/ddl"
+	"github.com/pingcap/tidb/pkg/expression"
 	"github.com/pingcap/tidb/pkg/infoschema"
 	"github.com/pingcap/tidb/pkg/meta/metabuild"
 	"github.com/pingcap/tidb/pkg/meta/model"
@@ -266,6 +267,10 @@ func (d *SchemaTracker) CreateTableWithInfo(
 	}
 
 	return d.PutTable(dbName, info)
+}
+
+func (d *SchemaTracker) CreateMView(ctx sessionctx.Context, s *ast.CreateMViewStmt, outputSchema *expression.Schema) error {
+	panic("not implemented")
 }
 
 // CreateView implements the DDL interface.

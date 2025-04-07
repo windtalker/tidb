@@ -271,6 +271,14 @@ func checkStableResultMode(sctx base.PlanContext) bool {
 	return s.EnableStableResultMode && (!st.InInsertStmt && !st.InUpdateStmt && !st.InDeleteStmt && !st.InLoadDataStmt)
 }
 
+func doLogicalOptimize(ctx context.Context, sctx base.PlanContext, flag uint64, logic base.LogicalPlan) (
+	base.LogicalPlan, error) {
+	if sctx.GetSessionVars().GetSessionVars().EnableCascadesPlanner {
+		return CascadesLogicalOptimize(ctx, sctx, flag, logic)
+	}
+	return VolcanoLogicalOptimize(ctx, sctx, flag, logic)
+}
+
 // doOptimize optimizes a logical plan into a physical plan,
 // while also returning the optimized logical plan, the final physical plan, and the cost of the final plan.
 // The returned logical plan is necessary for generating plans for Common Table Expressions (CTEs).
@@ -282,17 +290,26 @@ func doOptimize(ctx context.Context, sctx base.PlanContext, flag uint64, logic b
 	return VolcanoOptimize(ctx, sctx, flag, logic)
 }
 
-// CascadesOptimize includes: normalization, cascadesOptimize, and physicalOptimize.
-func CascadesOptimize(ctx context.Context, sctx base.PlanContext, flag uint64, logic base.LogicalPlan) (base.LogicalPlan, base.PhysicalPlan, float64, error) {
-	sessVars := sctx.GetSessionVars()
+func CascadesLogicalOptimize(ctx context.Context, sctx base.PlanContext, flag uint64, logic base.LogicalPlan) (base.LogicalPlan, error) {
 	flag = adjustOptimizationFlags(flag, logic)
 	logic, err := normalizeOptimize(ctx, flag, logic)
+	if err != nil {
+		return nil, err
+	}
+	return logic, nil
+}
+
+// CascadesOptimize includes: normalization, cascadesOptimize, and physicalOptimize.
+func CascadesOptimize(ctx context.Context, sctx base.PlanContext, flag uint64, logic base.LogicalPlan) (base.LogicalPlan, base.PhysicalPlan, float64, error) {
+	logic, err := CascadesLogicalOptimize(ctx, sctx, flag, logic)
 	if err != nil {
 		return nil, nil, 0, err
 	}
 	if !AllowCartesianProduct.Load() && existsCartesianProduct(logic) {
 		return nil, nil, 0, errors.Trace(plannererrors.ErrCartesianProductUnsupported)
 	}
+
+	sessVars := sctx.GetSessionVars()
 	logic.ExtractFD()
 
 	var cas *cascades.Optimizer
@@ -339,14 +356,22 @@ func CascadesOptimize(ctx context.Context, sctx base.PlanContext, flag uint64, l
 	return logic, finalPlan, cost, nil
 }
 
-// VolcanoOptimize includes: logicalOptimize, physicalOptimize
-func VolcanoOptimize(ctx context.Context, sctx base.PlanContext, flag uint64, logic base.LogicalPlan) (base.LogicalPlan, base.PhysicalPlan, float64, error) {
-	sessVars := sctx.GetSessionVars()
+func VolcanoLogicalOptimize(ctx context.Context, sctx base.PlanContext, flag uint64, logic base.LogicalPlan) (base.LogicalPlan, error) {
 	flag = adjustOptimizationFlags(flag, logic)
 	logic, err := logicalOptimize(ctx, flag, logic)
 	if err != nil {
+		return nil, err
+	}
+	return logic, nil
+}
+
+// VolcanoOptimize includes: logicalOptimize, physicalOptimize
+func VolcanoOptimize(ctx context.Context, sctx base.PlanContext, flag uint64, logic base.LogicalPlan) (base.LogicalPlan, base.PhysicalPlan, float64, error) {
+	logic, err := VolcanoLogicalOptimize(ctx, sctx, flag, logic)
+	if err != nil {
 		return nil, nil, 0, err
 	}
+	sessVars := sctx.GetSessionVars()
 
 	if !AllowCartesianProduct.Load() && existsCartesianProduct(logic) {
 		return nil, nil, 0, errors.Trace(plannererrors.ErrCartesianProductUnsupported)

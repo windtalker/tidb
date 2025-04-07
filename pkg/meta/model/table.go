@@ -746,6 +746,17 @@ type ViewInfo struct {
 	Cols        []ast.CIStr         `json:"view_cols"`
 }
 
+type MViewInfo struct {
+	SelectStmt               string                      `json:"view_select"`
+	Cols                     []ast.CIStr                 `json:"view_cols"`
+	RefreshMethod            ast.ViewRefreshMethod       `json:"view_refresh_method"`
+	RefreshIntervalType      ast.ViewRefreshIntervalType `json:"view_refresh_interval_type"`
+	StartExpr                string                      `json:"view_start_expr"`
+	IntervalExpr             string                      `json:"view_interval_expr"`
+	EnableQueryOnComputation bool                        `json:"enable_query_on_computation"`
+	EnableRerite             bool                        `json:"enable_rewrite"`
+}
+
 type MVLogInfo struct {
 	BaseTableID        int64          `json:"base_table_id"`
 	ColumnsInBaseTable []*IndexColumn `json:"columns_in_base_table"`

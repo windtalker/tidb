@@ -372,6 +372,7 @@ import (
 	commit                "COMMIT"
 	committed             "COMMITTED"
 	compact               "COMPACT"
+	complete              "COMPLETE"
 	compressed            "COMPRESSED"
 	compression           "COMPRESSION"
 	compressionLevel      "COMPRESSION_LEVEL"
@@ -400,6 +401,7 @@ import (
 	declare               "DECLARE"
 	definer               "DEFINER"
 	delayKeyWrite         "DELAY_KEY_WRITE"
+	demand                "DEMAND"
 	digest                "DIGEST"
 	directory             "DIRECTORY"
 	disable               "DISABLE"
@@ -433,6 +435,7 @@ import (
 	expire                "EXPIRE"
 	extended              "EXTENDED"
 	failedLoginAttempts   "FAILED_LOGIN_ATTEMPTS"
+	fast                  "FAST"
 	faultsSym             "FAULTS"
 	fields                "FIELDS"
 	file                  "FILE"
@@ -567,6 +570,7 @@ import (
 	recommend             "RECOMMEND"
 	recover               "RECOVER"
 	redundant             "REDUNDANT"
+	refresh               "REFRESH"
 	reload                "RELOAD"
 	remove                "REMOVE"
 	reorganize            "REORGANIZE"
@@ -711,6 +715,7 @@ import (
 	burstable             "BURSTABLE"
 	cast                  "CAST"
 	compress              "COMPRESS"
+	computation           "COMPUTATION"
 	constraints           "CONSTRAINTS"
 	cooldown              "COOLDOWN"
 	copyKwd               "COPY"
@@ -773,6 +778,7 @@ import (
 	replay                "REPLAY"
 	replayer              "REPLAYER"
 	restoredTS            "RESTORED_TS"
+	rewrite               "REWRITE"
 	ru                    "RU"
 	running               "RUNNING"
 	ruRate                "RU_PER_SEC"
@@ -986,6 +992,7 @@ import (
 	CreateTableStmt            "CREATE TABLE statement"
 	CreateMVLogStmt            "CREATE materialized log statement"
 	CreateViewStmt             "CREATE VIEW statement"
+	CreateMViewStmt            "CREATE MATERIALIZED VIEW statement"
 	CreateUserStmt             "CREATE User statement"
 	CreateRoleStmt             "CREATE Role statement"
 	CreateDatabaseStmt         "Create Database Statement"
@@ -1422,6 +1429,12 @@ import (
 	ViewName                               "view name"
 	ViewFieldList                          "create view statement field list"
 	ViewSQLSecurity                        "view sql security"
+	ViewRefreshClause                      "view refresh clause"
+	ViewRefreshMethod                      "view refresh method clause"
+	ViewRefreshInterval                    "view refresh interval clause"
+	ViewQueryClause                        "view query clause"
+	ViewQueryComputationClause             "view query computation clause"
+	ViewQueryRewriteClause                 "view query rewrite clause"
 	WhereClause                            "WHERE clause"
 	WhereClauseOptional                    "Optional WHERE clause"
 	WhenClause                             "When clause"
@@ -5275,6 +5288,136 @@ ViewCheckOption:
 	}
 
 /******************************************************************
+ * Create Materialized View Statement
+ *
+ * Example:
+ *     CREATE MATERIALIZED VIEW view_name(col1, col2) as select co1, col2 from table_name
+ ******************************************************************/
+CreateMViewStmt:
+	"CREATE" "MATERIALIZED" "VIEW" ViewName ViewFieldList ViewRefreshClause ViewQueryClause "AS" SelectStmt
+	{
+		startOffset := parser.startOffset(&yyS[yypt])
+		endOffset := parser.yylval.offset
+		selStmt := $9.(ast.StmtNode)
+		x := &ast.CreateMViewStmt{
+			ViewName:      $4.(*ast.TableName),
+			Select:        selStmt,
+			RefreshOption: $6.(*ast.ViewRefreshOption),
+			QueryOption:   $7.(*ast.ViewQueryOption),
+		}
+		if $5 != nil {
+			x.Cols = $5.([]ast.CIStr)
+		}
+		selStmt.SetText(parser.lexer.client, strings.TrimSpace(parser.src[startOffset:endOffset]))
+		$$ = x
+	}
+
+ViewRefreshClause:
+	/* EMPTY */
+	{
+		$$ = &ast.ViewRefreshOption{
+			RefreshMethod: ast.Complete,
+			RefreshInterval: &ast.ViewRefreshInterval{
+				IntervalType: ast.OnDemand,
+				StartExpr:    nil,
+				IntervalExpr: nil,
+			},
+		}
+	}
+|	"REFRESH" ViewRefreshMethod ViewRefreshInterval
+	{
+		$$ = &ast.ViewRefreshOption{
+			RefreshMethod:   $2.(ast.ViewRefreshMethod),
+			RefreshInterval: $3.(*ast.ViewRefreshInterval),
+		}
+	}
+
+ViewRefreshMethod:
+	"FAST"
+	{
+		$$ = ast.Fast
+	}
+|	"COMPLETE"
+	{
+		$$ = ast.Complete
+	}
+
+ViewRefreshInterval:
+	"ON" "DEMAND"
+	{
+		$$ = &ast.ViewRefreshInterval{
+			IntervalType: ast.OnDemand,
+			StartExpr:    nil,
+			IntervalExpr: nil,
+		}
+	}
+|	"ON" "COMMIT"
+	{
+		$$ = &ast.ViewRefreshInterval{
+			IntervalType: ast.OnCommit,
+			StartExpr:    nil,
+			IntervalExpr: nil,
+		}
+	}
+|	"START" "WITH" Expression "NEXT" Expression
+	{
+		$$ = &ast.ViewRefreshInterval{
+			IntervalType: ast.OnSchedule,
+			StartExpr:    $3,
+			IntervalExpr: $5,
+		}
+	}
+
+ViewQueryClause:
+	{
+		$$ = &ast.ViewQueryOption{
+			EnableOnQueryComputation: false,
+			EnableRewrite:            false,
+		}
+	}
+|	ViewQueryComputationClause
+	{
+		$$ = &ast.ViewQueryOption{
+			EnableOnQueryComputation: $1.(bool),
+			EnableRewrite:            false,
+		}
+	}
+|	ViewQueryRewriteClause
+	{
+		$$ = &ast.ViewQueryOption{
+			EnableOnQueryComputation: false,
+			EnableRewrite:            $1.(bool),
+		}
+	}
+|	ViewQueryComputationClause ViewQueryRewriteClause
+	{
+		$$ = &ast.ViewQueryOption{
+			EnableOnQueryComputation: $1.(bool),
+			EnableRewrite:            $2.(bool),
+		}
+	}
+
+ViewQueryComputationClause:
+	"ENABLE" "ON" "QUERY" "COMPUTATION"
+	{
+		$$ = true
+	}
+|	"DISABLE" "ON" "QUERY" "COMPUTATION"
+	{
+		$$ = false
+	}
+
+ViewQueryRewriteClause:
+	"ENABLE" "QUERY" "REWRITE"
+	{
+		$$ = true
+	}
+|	"DISABLE" "QUERY" "REWRITE"
+	{
+		$$ = false
+	}
+
+/******************************************************************
  * Do statement
  * See https://dev.mysql.com/doc/refman/5.7/en/do.html
  ******************************************************************/
@@ -6901,6 +7044,7 @@ UnReservedKeyword:
 |	"SAN"
 |	"COMMIT"
 |	"COMPACT"
+|	"COMPLETE"
 |	"COMPRESSED"
 |	"CONSISTENCY"
 |	"CONSISTENT"
@@ -6956,6 +7100,7 @@ UnReservedKeyword:
 |	"REBUILD"
 |	"RECOMMEND"
 |	"REDUNDANT"
+|	"REFRESH"
 |	"REORGANIZE"
 |	"RESOURCE"
 |	"RESTART"
@@ -7013,6 +7158,7 @@ UnReservedKeyword:
 |	"QUARTER"
 |	"GRANTS"
 |	"TRIGGERS"
+|	"DEMAND"
 |	"DELAY_KEY_WRITE"
 |	"ISOLATION"
 |	"JSON"
@@ -7104,6 +7250,7 @@ UnReservedKeyword:
 |	"CONTEXT"
 |	"SWITCHES"
 |	"PAGE"
+|	"FAST"
 |	"FAULTS"
 |	"IPC"
 |	"SWAPS"
@@ -7308,6 +7455,7 @@ NotKeywordToken:
 |	"BRIEF"
 |	"CAST"
 |	"COMPRESS"
+|	"COMPUTATION"
 |	"COPY"
 |	"CURTIME"
 |	"CURDATE"
@@ -7413,6 +7561,7 @@ NotKeywordToken:
 |	"START_TS"
 |	"UNTIL_TS"
 |	"RESTORED_TS"
+|	"REWRITE"
 |	"FULL_BACKUP_STORAGE"
 |	"EXEC_ELAPSED"
 |	"PROCESSED_KEYS"
@@ -12396,6 +12545,7 @@ Statement:
 |	CreateTableStmt
 |	CreateMVLogStmt
 |	CreateViewStmt
+|	CreateMViewStmt
 |	CreateUserStmt
 |	CreateRoleStmt
 |	CreateBindingStmt

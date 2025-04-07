@@ -24,6 +24,7 @@ import (
 	"github.com/pingcap/tidb/pkg/ddl"
 	"github.com/pingcap/tidb/pkg/domain"
 	"github.com/pingcap/tidb/pkg/executor/internal/exec"
+	"github.com/pingcap/tidb/pkg/expression"
 	"github.com/pingcap/tidb/pkg/infoschema"
 	"github.com/pingcap/tidb/pkg/kv"
 	"github.com/pingcap/tidb/pkg/meta/model"
@@ -52,11 +53,12 @@ import (
 type DDLExec struct {
 	exec.BaseExecutor
 
-	ddlExecutor  ddl.Executor
-	stmt         ast.StmtNode
-	is           infoschema.InfoSchema
-	tempTableDDL temptable.TemporaryTableDDL
-	done         bool
+	ddlExecutor    ddl.Executor
+	stmt           ast.StmtNode
+	is             infoschema.InfoSchema
+	tempTableDDL   temptable.TemporaryTableDDL
+	mvOutputSchema *expression.Schema
+	done           bool
 }
 
 // toErr converts the error to the ErrInfoSchemaChanged when the schema is outdated.
@@ -172,6 +174,8 @@ func (e *DDLExec) Next(ctx context.Context, _ *chunk.Chunk) (err error) {
 		err = e.executeCreateMVLog(x)
 	case *ast.CreateViewStmt:
 		err = e.executeCreateView(ctx, x)
+	case *ast.CreateMViewStmt:
+		err = e.executeCreateMView(ctx, x)
 	case *ast.DropIndexStmt:
 		err = e.executeDropIndex(x)
 	case *ast.DropDatabaseStmt:
@@ -333,6 +337,21 @@ func (e *DDLExec) createSessionTemporaryTable(s *ast.CreateTableStmt) error {
 
 	sessiontxn.GetTxnManager(e.Ctx()).OnLocalTemporaryTableCreated()
 	return nil
+}
+
+func (e *DDLExec) executeCreateMView(ctx context.Context, s *ast.CreateMViewStmt) error {
+	ret := &core.PreprocessorReturn{}
+	nodeW := resolve.NewNodeW(s.Select)
+	err := core.Preprocess(ctx, e.Ctx(), nodeW, core.WithPreprocessorReturn(ret))
+	if err != nil {
+		return errors.Trace(err)
+	}
+	if ret.IsStaleness {
+		return exeerrors.ErrViewInvalid.GenWithStackByArgs(s.ViewName.Schema.L, s.ViewName.Name.L)
+	}
+
+	e.Ctx().GetSessionVars().ClearRelatedTableForMDL()
+	return e.ddlExecutor.CreateMView(e.Ctx(), s, e.mvOutputSchema)
 }
 
 func (e *DDLExec) executeCreateView(ctx context.Context, s *ast.CreateViewStmt) error {

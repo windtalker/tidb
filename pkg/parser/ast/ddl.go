@@ -1741,6 +1741,107 @@ func (n *CreateViewStmt) Accept(v Visitor) (Node, bool) {
 	return v.Leave(n)
 }
 
+type ViewRefreshInterval struct {
+	IntervalType ViewRefreshIntervalType
+	StartExpr    ExprNode
+	IntervalExpr ExprNode
+}
+
+type ViewRefreshOption struct {
+	RefreshMethod   ViewRefreshMethod
+	RefreshInterval *ViewRefreshInterval
+}
+
+type ViewQueryOption struct {
+	EnableOnQueryComputation bool
+	EnableRewrite            bool
+}
+
+type CreateMViewStmt struct {
+	ddlNode
+
+	ViewName      *TableName
+	Cols          []CIStr
+	Select        StmtNode
+	RefreshOption *ViewRefreshOption
+	QueryOption   *ViewQueryOption
+}
+
+// Restore implements Node interface.
+func (n *CreateMViewStmt) Restore(ctx *format.RestoreCtx) error {
+	ctx.WriteKeyWord("CREATE MATERIALIZED VIEW ")
+	if err := n.ViewName.Restore(ctx); err != nil {
+		return errors.Annotate(err, "An error occurred while create CreateMViewStmt.ViewName")
+	}
+	for i, col := range n.Cols {
+		if i == 0 {
+			ctx.WritePlain(" (")
+		} else {
+			ctx.WritePlain(",")
+		}
+		ctx.WriteName(col.O)
+		if i == len(n.Cols)-1 {
+			ctx.WritePlain(")")
+		}
+	}
+	if n.RefreshOption != nil {
+		ctx.WriteKeyWord(" REFRESH ")
+		ctx.WriteKeyWord(n.RefreshOption.RefreshMethod.String())
+		if n.RefreshOption.RefreshInterval != nil {
+			switch n.RefreshOption.RefreshInterval.IntervalType {
+			case OnCommit:
+				ctx.WriteKeyWord(" ON COMMIT")
+			case OnDemand:
+				ctx.WriteKeyWord(" ON DEMAND")
+			case OnSchedule:
+				ctx.WriteKeyWord(" START WITH ")
+				if err := n.RefreshOption.RefreshInterval.StartExpr.Restore(ctx); err != nil {
+					return errors.Annotate(err, "An error occurred while create CreateMViewStmt.RefreshOption.RefreshInterval.StartExpr")
+				}
+				ctx.WriteKeyWord(" NEXT ")
+				if err := n.RefreshOption.RefreshInterval.IntervalExpr.Restore(ctx); err != nil {
+					return errors.Annotate(err, "An error occurred while create CreateMViewStmt.RefreshOption.RefreshInterval.IntervalExpr")
+				}
+		}
+	}
+	}
+	if n.QueryOption != nil {
+		if n.QueryOption.EnableOnQueryComputation {
+			ctx.WriteKeyWord(" ENABLE ON QUERY COMPUTATION")
+		} else {
+			ctx.WriteKeyWord(" DISABLE ON QUERY COMPUTATION")
+		}
+		if n.QueryOption.EnableRewrite {
+			ctx.WriteKeyWord(" ENABLE REWRITE")
+		} else {
+			ctx.WriteKeyWord(" DISABLE REWRITE")
+		}
+	}
+	ctx.WriteKeyWord(" AS ")
+	if err := n.Select.Restore(ctx); err != nil {
+		return errors.Annotate(err, "An error occurred while create CreateMViewStmt.Select")
+	}
+	return nil
+}
+func (n *CreateMViewStmt) Accept(v Visitor) (Node, bool) {
+	newNode, skipChildren := v.Enter(n)
+	if skipChildren {
+		return v.Leave(newNode)
+	}
+	n = newNode.(*CreateMViewStmt)
+	node, ok := n.ViewName.Accept(v)
+	if !ok {
+		return n, false
+	}
+	n.ViewName = node.(*TableName)
+	selnode, ok := n.Select.Accept(v)
+	if !ok {
+		return n, false
+	}
+	n.Select = selnode.(StmtNode)
+	return v.Leave(n)
+}
+
 // CreatePlacementPolicyStmt is a statement to create a policy.
 type CreatePlacementPolicyStmt struct {
 	ddlNode

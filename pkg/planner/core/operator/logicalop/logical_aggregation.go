@@ -31,6 +31,7 @@ import (
 	"github.com/pingcap/tidb/pkg/planner/util/optimizetrace"
 	"github.com/pingcap/tidb/pkg/planner/util/optimizetrace/logicaltrace"
 	"github.com/pingcap/tidb/pkg/planner/util/utilfuncp"
+	"github.com/pingcap/tidb/pkg/types"
 	h "github.com/pingcap/tidb/pkg/util/hint"
 	"github.com/pingcap/tidb/pkg/util/intset"
 	"github.com/pingcap/tidb/pkg/util/plancodec"
@@ -120,6 +121,7 @@ func (la *LogicalAggregation) PruneColumns(parentUsedCols []*expression.Column, 
 
 	allFirstRow := true
 	allRemainFirstRow := true
+	updatedNames := la.OutputNames()
 	for i := len(used) - 1; i >= 0; i-- {
 		if la.AggFuncs[i].Name != ast.AggFuncFirstRow {
 			allFirstRow = false
@@ -128,6 +130,7 @@ func (la *LogicalAggregation) PruneColumns(parentUsedCols []*expression.Column, 
 			prunedColumns = append(prunedColumns, la.Schema().Columns[i])
 			prunedFunctions = append(prunedFunctions, la.AggFuncs[i])
 			la.Schema().Columns = append(la.Schema().Columns[:i], la.Schema().Columns[i+1:]...)
+			updatedNames = append(updatedNames[:i], updatedNames[i+1:]...)
 			la.AggFuncs = append(la.AggFuncs[:i], la.AggFuncs[i+1:]...)
 		} else if la.AggFuncs[i].Name != ast.AggFuncFirstRow {
 			allRemainFirstRow = false
@@ -164,7 +167,9 @@ func (la *LogicalAggregation) PruneColumns(parentUsedCols []*expression.Column, 
 			RetType:  newAgg.RetTp,
 		}
 		la.Schema().Columns = append(la.Schema().Columns, col)
+		updatedNames = append(updatedNames, types.EmptyName)
 	}
+	la.SetOutputNames(updatedNames)
 
 	if len(la.GroupByItems) > 0 {
 		for i := len(la.GroupByItems) - 1; i >= 0; i-- {

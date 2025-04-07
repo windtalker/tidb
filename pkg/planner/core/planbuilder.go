@@ -5210,6 +5210,55 @@ func (b *PlanBuilder) buildDDL(ctx context.Context, node ast.DDLNode) (base.Plan
 			b.visitInfo = appendVisitInfo(b.visitInfo, mysql.SuperPriv, "",
 				"", "", err)
 		}
+	case *ast.CreateMViewStmt:
+		err := checkForUserVariables(v.Select)
+		if err != nil {
+			return nil, err
+		}
+		b.isCreateView = true
+		defer func() {
+			b.isCreateView = false
+		}()
+		if stmt := findStmtAsViewSchema(v); stmt != nil {
+			stmt.AsViewSchema = true
+		}
+
+		nodeW := resolve.NewNodeWWithCtx(v.Select, b.resolveCtx)
+		plan, err := b.Build(ctx, nodeW)
+		if err != nil {
+			return nil, err
+		}
+		plan, err = doLogicalOptimize(ctx, b.ctx, b.optFlag, plan.(base.LogicalPlan))
+		if err != nil {
+			return nil, err
+		}
+		schema := plan.Schema()
+		names := plan.OutputNames()
+		if len(schema.Columns) != len(names) {
+			return nil, errors.New("schema and names mismatch")
+		}
+		if v.Cols == nil {
+			adjustOverlongViewColname(plan.(base.LogicalPlan))
+			v.Cols = make([]ast.CIStr, len(schema.Columns))
+			for i, name := range names {
+				v.Cols[i] = name.ColName
+			}
+		}
+		if len(v.Cols) != schema.Len() {
+			return nil, dbterror.ErrViewWrongList
+		}
+		for _, name := range v.Cols {
+			if name.L == model.ExtraHandleName.L {
+				return nil, errors.New("_tidb_rowid must have an alias in materialized view")
+			}
+		}
+		schema, err = checkMVPlanAndGenerateMVSchema(plan.(base.LogicalPlan))
+		if err != nil {
+			return nil, err
+		}
+		p := &DDL{Statement: node, MvOutputSchema: schema}
+		return p, nil
+		// todo check privilege
 	case *ast.CreateSequenceStmt:
 		if b.ctx.GetSessionVars().User != nil {
 			authErr = plannererrors.ErrTableaccessDenied.GenWithStackByArgs("CREATE", b.ctx.GetSessionVars().User.AuthUsername,
@@ -5864,7 +5913,7 @@ func buildChecksumTableSchema() (*expression.Schema, []*types.FieldName) {
 func adjustOverlongViewColname(plan base.LogicalPlan) {
 	outputNames := plan.OutputNames()
 	for i := range outputNames {
-		if outputName := outputNames[i].ColName.L; len(outputName) > mysql.MaxColumnNameLength {
+		if outputName := outputNames[i].ColName.L; len(outputName) > mysql.MaxColumnNameLength || len(outputName) == 0 {
 			outputNames[i].ColName = ast.NewCIStr(fmt.Sprintf("name_exp_%d", i+1))
 		}
 	}
@@ -5874,6 +5923,8 @@ func adjustOverlongViewColname(plan base.LogicalPlan) {
 func findStmtAsViewSchema(stmt ast.Node) *ast.SelectStmt {
 	switch x := stmt.(type) {
 	case *ast.CreateViewStmt:
+		return findStmtAsViewSchema(x.Select)
+	case *ast.CreateMViewStmt:
 		return findStmtAsViewSchema(x.Select)
 	case *ast.SetOprStmt:
 		return findStmtAsViewSchema(x.SelectList)

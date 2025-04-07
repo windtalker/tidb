@@ -1217,6 +1217,157 @@ func renameCheckConstraint(tblInfo *model.TableInfo) {
 	setNameForConstraintInfo(tblInfo.Name.L, map[string]bool{}, tblInfo.Constraints)
 }
 
+func toColumnInfo(colIdWithPkFlag map[int64]int64, colIdWithUKFlag map[int64]int64, col *expression.Column) *model.ColumnInfo {
+	ci := col.ToInfo()
+	if _, ok := colIdWithPkFlag[col.UniqueID]; ok {
+		ci.FieldType.AddFlag(mysql.PriKeyFlag)
+		// update the column id in colIdWithPkFlag
+		colIdWithPkFlag[col.UniqueID] = col.ID
+	}
+	if _, ok := colIdWithUKFlag[col.UniqueID]; ok {
+		ci.FieldType.AddFlag(mysql.UniqueKeyFlag)
+		// update the column id in colIdWithUKFlag
+		colIdWithUKFlag[col.UniqueID] = col.ID
+	}
+	return ci
+}
+
+func buildIndexInfoForMV(ctx *metabuild.Context, columns []*model.ColumnInfo, colIdMap map[int64]int64, indexName ast.CIStr, indexColumns []*expression.Column, isPrimaryKey bool, isUniqueKey bool) (*model.IndexInfo, error) {
+	indexInfo := &model.IndexInfo{
+		Name:    indexName,
+		State:   model.StatePublic,
+		Primary: isPrimaryKey,
+		Unique:  isUniqueKey,
+	}
+	maxIndexLength := config.GetGlobalConfig().MaxIndexLength
+	sumLength := 0
+	for _, col := range indexColumns {
+		colInTable := model.FindColumnInfoByID(columns, colIdMap[col.UniqueID])
+		if colInTable == nil {
+			return nil, errors.New("column not found, should not happen")
+		}
+		if err := checkIndexColumn(colInTable, types.UnspecifiedLength, ctx != nil && (!ctx.GetSQLMode().HasStrictMode() || ctx.SuppressTooLongIndexErr()), model.ColumnarIndexTypeNA); err != nil {
+			return nil, err
+		}
+		if colInTable.FieldType.IsArray() {
+			return nil, dbterror.ErrNotSupportedYet.GenWithStackByArgs("multi-valued key in mv")
+		}
+		indexColLen, err := getIndexColumnLength(colInTable, types.UnspecifiedLength)
+		if err != nil {
+			return nil, err
+		}
+		sumLength += indexColLen
+		if (ctx == nil || !ctx.SuppressTooLongIndexErr()) && sumLength > maxIndexLength {
+			// The sum of all lengths must be shorter than the max length for prefix.
+
+			// The multiple column index and the unique index in which the length sum exceeds the maximum size
+			// will return an error instead produce a warning.
+			if ctx == nil || ctx.GetSQLMode().HasStrictMode() || mysql.HasUniKeyFlag(colInTable.GetFlag()) {
+				return nil, dbterror.ErrTooLongKey.GenWithStackByArgs(sumLength, maxIndexLength)
+			}
+			// truncate index length and produce warning message in non-restrict sql mode.
+			colLenPerUint, err := getIndexColumnLength(colInTable, 1)
+			if err != nil {
+				return nil, err
+			}
+			indexColLen = maxIndexLength / colLenPerUint
+			// produce warning message
+			ctx.AppendWarning(dbterror.ErrTooLongKey.FastGenByArgs(sumLength, maxIndexLength))
+		}
+	}
+	return indexInfo, nil
+}
+
+func BuildTableInfoForMV(
+	ctx *metabuild.Context,
+	tableName ast.CIStr,
+	outputSchema *expression.Schema,
+	colNames []ast.CIStr,
+	charset string,
+	collate string,
+) (tbInfo *model.TableInfo, err error) {
+	tbInfo = &model.TableInfo{
+		Name:    tableName,
+		Version: model.CurrLatestTableInfoVersion,
+		Charset: charset,
+		Collate: collate,
+	}
+	tblColumns := make([]*table.Column, 0, outputSchema.Len())
+	existedColsMap := make(map[string]struct{}, outputSchema.Len())
+	colIdWithPkFlag := make(map[int64]int64)
+	colIdWithUKFlag := make(map[int64]int64)
+	for _, pks := range outputSchema.PKOrUK {
+		for _, pk := range pks {
+			colIdWithPkFlag[pk.UniqueID] = -1
+		}
+	}
+	for _, uks := range outputSchema.NullableUK {
+		for _, uk := range uks {
+			colIdWithUKFlag[uk.UniqueID] = -1
+		}
+	}
+	for i, col := range outputSchema.Columns {
+		// allocate a new id
+		col.ID = AllocateColumnID(tbInfo)
+		tbInfo.Columns = append(tbInfo.Columns, toColumnInfo(colIdWithPkFlag, colIdWithUKFlag, col))
+		tblColumns = append(tblColumns, table.ToColumn(toColumnInfo(colIdWithPkFlag, colIdWithUKFlag, col)))
+		if _, ok := existedColsMap[colNames[i].L]; ok {
+			// todo return duplicate column name error
+			return nil, dbterror.ErrWrongColumnName.GenWithStackByArgs(colNames[i].O)
+		}
+		existedColsMap[colNames[i].L] = struct{}{}
+	}
+	if len(outputSchema.PKOrUK) != 0 {
+		// currently, we don't support create index in mv, if PKOrUK is not empty, it must be a primary key
+		if len(outputSchema.PKOrUK) != 1 {
+			return nil, errors.New("PKOrUK should be empty or only contain one key")
+		}
+		pkCols := outputSchema.PKOrUK[0]
+		isSingleIntPK := false
+		if len(pkCols) == 1 {
+			switch pkCols[0].RetType.GetType() {
+			case mysql.TypeLong, mysql.TypeLonglong, mysql.TypeInt24, mysql.TypeShort, mysql.TypeTiny:
+				isSingleIntPK = true
+			}
+		}
+		if ShouldBuildClusteredIndex(ctx.GetClusteredIndexDefMode(), nil, isSingleIntPK) {
+			if isSingleIntPK {
+				tbInfo.PKIsHandle = true
+			} else {
+				tbInfo.IsCommonHandle = true
+				tbInfo.CommonHandleVersion = 1
+			}
+		}
+		if !tbInfo.PKIsHandle {
+			// if pk is not handle
+			indexName := mysql.PrimaryKeyName
+			indexInfo, err := buildIndexInfoForMV(ctx, tbInfo.Columns, colIdWithPkFlag, ast.NewCIStr(indexName), pkCols, true, true)
+			if err != nil {
+				return nil, err
+			}
+			indexInfo.ID = AllocateIndexID(tbInfo)
+			tbInfo.Indices = append(tbInfo.Indices, indexInfo)
+		}
+	}
+	if len(outputSchema.NullableUK) != 0 {
+		if len(outputSchema.NullableUK) != 1 {
+			return nil, errors.New("NullableUK should be empty or only contain one key")
+		}
+		// construct unique key
+		indexName := "uk_1"
+		indexInfo, err := buildIndexInfoForMV(ctx, tbInfo.Columns, colIdWithUKFlag, ast.NewCIStr(indexName), outputSchema.NullableUK[0], false, true)
+		if err != nil {
+			return nil, err
+		}
+		indexInfo.ID = AllocateIndexID(tbInfo)
+		tbInfo.Indices = append(tbInfo.Indices, indexInfo)
+	}
+	if len(tbInfo.Indices) > 1 {
+		return nil, errors.New("more than 1 index is in mv, not supported")
+	}
+	return tbInfo, err
+}
+
 // BuildTableInfo creates a TableInfo.
 func BuildTableInfo(
 	ctx *metabuild.Context,
@@ -1611,6 +1762,20 @@ func ShouldBuildClusteredIndex(mode vardef.ClusteredIndexDefMode, opt *ast.Index
 		}
 	}
 	return opt.PrimaryKeyTp == ast.PrimaryKeyTypeClustered
+}
+
+// BuildMViewInfo builds a ViewInfo structure from an ast.CreateViewStmt.
+func BuildMViewInfo(s *ast.CreateMViewStmt) (*model.MViewInfo, error) {
+	// Always Use `format.RestoreNameBackQuotes` to restore `SELECT` statement despite the `ANSI_QUOTES` SQL Mode is enabled or not.
+	restoreFlag := format.RestoreStringSingleQuotes | format.RestoreKeyWordUppercase | format.RestoreNameBackQuotes
+	var sb strings.Builder
+	if err := s.Select.Restore(format.NewRestoreCtx(restoreFlag, &sb)); err != nil {
+		return nil, err
+	}
+
+	return &model.MViewInfo{SelectStmt: sb.String(), Cols: s.Cols, RefreshMethod: s.RefreshOption.RefreshMethod,
+		RefreshIntervalType: s.RefreshOption.RefreshInterval.IntervalType, EnableQueryOnComputation: s.QueryOption.EnableOnQueryComputation,
+		EnableRerite: s.QueryOption.EnableRewrite}, nil
 }
 
 // BuildViewInfo builds a ViewInfo structure from an ast.CreateViewStmt.

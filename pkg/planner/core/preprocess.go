@@ -286,7 +286,12 @@ func (p *preprocessor) Enter(in ast.Node) (out ast.Node, skipChildren bool) {
 		p.stmtTp = TypeCreate
 		p.flag |= inCreateOrDropTable
 		p.checkCreateViewGrammar(node)
-		p.checkCreateViewWithSelectGrammar(node)
+		p.checkCreateViewWithSelectGrammar(node.Select)
+	case *ast.CreateMViewStmt:
+		p.stmtTp = TypeCreate
+		p.flag |= inCreateOrDropTable
+		p.checkCreateMViewGrammar(node)
+		p.checkCreateViewWithSelectGrammar(node.Select)
 	case *ast.DropTableStmt:
 		p.flag |= inCreateOrDropTable
 		p.stmtTp = TypeDrop
@@ -985,6 +990,20 @@ func (p *preprocessor) checkCreateTableGrammar(stmt *ast.CreateTableStmt) {
 	}
 }
 
+func (p *preprocessor) checkCreateMViewGrammar(stmt *ast.CreateMViewStmt) {
+	vName := stmt.ViewName.Name.String()
+	if util.IsInCorrectIdentifierName(vName) {
+		p.err = dbterror.ErrWrongTableName.GenWithStackByArgs(vName)
+		return
+	}
+	for _, col := range stmt.Cols {
+		if util.IsInCorrectIdentifierName(col.String()) {
+			p.err = dbterror.ErrWrongColumnName.GenWithStackByArgs(col)
+			return
+		}
+	}
+}
+
 func (p *preprocessor) checkCreateViewGrammar(stmt *ast.CreateViewStmt) {
 	vName := stmt.ViewName.Name.String()
 	if util.IsInCorrectIdentifierName(vName) {
@@ -1025,8 +1044,8 @@ func (p *preprocessor) checkCreateViewWithSelect(stmt ast.Node) {
 	}
 }
 
-func (p *preprocessor) checkCreateViewWithSelectGrammar(stmt *ast.CreateViewStmt) {
-	switch stmt := stmt.Select.(type) {
+func (p *preprocessor) checkCreateViewWithSelectGrammar(stmt ast.StmtNode) {
+	switch stmt := stmt.(type) {
 	case *ast.SelectStmt:
 		p.checkCreateViewWithSelect(stmt)
 	case *ast.SetOprStmt:

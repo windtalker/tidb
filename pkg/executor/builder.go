@@ -1268,11 +1268,12 @@ func (b *executorBuilder) buildRevoke(revoke *ast.RevokeStmt) exec.Executor {
 
 func (b *executorBuilder) buildDDL(v *plannercore.DDL) exec.Executor {
 	e := &DDLExec{
-		BaseExecutor: exec.NewBaseExecutor(b.ctx, v.Schema(), v.ID()),
-		ddlExecutor:  domain.GetDomain(b.ctx).DDLExecutor(),
-		stmt:         v.Statement,
-		is:           b.is,
-		tempTableDDL: temptable.GetTemporaryTableDDL(b.ctx),
+		BaseExecutor:   exec.NewBaseExecutor(b.ctx, v.Schema(), v.ID()),
+		ddlExecutor:    domain.GetDomain(b.ctx).DDLExecutor(),
+		stmt:           v.Statement,
+		is:             b.is,
+		tempTableDDL:   temptable.GetTemporaryTableDDL(b.ctx),
+		mvOutputSchema: v.MvOutputSchema,
 	}
 	return e
 }

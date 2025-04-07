@@ -174,6 +174,8 @@ func GetStmtLabel(stmtNode StmtNode) string {
 		return "CreateMVLog"
 	case *CreateViewStmt:
 		return "CreateView"
+	case *CreateMViewStmt:
+		return "CreateMView"
 	case *CreateUserStmt:
 		return "CreateUser"
 	case *DeleteStmt:

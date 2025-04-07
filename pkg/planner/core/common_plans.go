@@ -747,7 +747,8 @@ type CompactTable struct {
 type DDL struct {
 	baseSchemaProducer
 
-	Statement ast.DDLNode
+	Statement      ast.DDLNode
+	MvOutputSchema *expression.Schema
 }
 
 // SelectInto represents a select-into plan.
