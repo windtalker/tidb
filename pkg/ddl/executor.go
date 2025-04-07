@@ -52,7 +52,6 @@ import (
 	"github.com/pingcap/tidb/pkg/parser/mysql"
 	"github.com/pingcap/tidb/pkg/parser/terror"
 	parser_types "github.com/pingcap/tidb/pkg/parser/types"
-	"github.com/pingcap/tidb/pkg/planner/core/base"
 	"github.com/pingcap/tidb/pkg/privilege"
 	rg "github.com/pingcap/tidb/pkg/resourcegroup"
 	"github.com/pingcap/tidb/pkg/sessionctx"
@@ -99,6 +98,11 @@ const (
 
 var errCheckConstraintIsOff = errors.NewNoStackError(vardef.TiDBEnableCheckConstraint + " is off")
 
+type CreateMViewExtraInfo struct {
+	OutputSchema *expression.Schema
+	BaseTableIDs []int64
+}
+
 // Executor is the interface for executing DDL statements.
 // it's mostly called by SQL executor.
 // DDL statements are converted into DDL jobs, JobSubmitter will submit the jobs
@@ -111,7 +115,7 @@ type Executor interface {
 	CreateTable(ctx sessionctx.Context, stmt *ast.CreateTableStmt) error
 	CreateMVLog(ctx sessionctx.Context, stmt *ast.CreateMVLogStmt) error
 	CreateView(ctx sessionctx.Context, stmt *ast.CreateViewStmt) error
-	CreateMView(ctx sessionctx.Context, stmt *ast.CreateMViewStmt, outputSchema *expression.Schema) error
+	CreateMView(ctx sessionctx.Context, stmt *ast.CreateMViewStmt, extraInfo *CreateMViewExtraInfo) error
 	DropTable(ctx sessionctx.Context, stmt *ast.DropTableStmt) (err error)
 	DropMVLog(ctx sessionctx.Context, stmt *ast.DropMVLogStmt) (err error)
 	RecoverTable(ctx sessionctx.Context, recoverTableInfo *model.RecoverTableInfo) (err error)
@@ -1612,11 +1616,7 @@ func (e *executor) RecoverTable(ctx sessionctx.Context, recoverTableInfo *model.
 	return errors.Trace(err)
 }
 
-func checkPlanForMV(p base.LogicalPlan) error {
-	return errors.New("not supported plan for mv")
-}
-
-func (e *executor) CreateMView(ctx sessionctx.Context, s *ast.CreateMViewStmt, outputSchema *expression.Schema) (err error) {
+func (e *executor) CreateMView(ctx sessionctx.Context, s *ast.CreateMViewStmt, extraInfo *CreateMViewExtraInfo) (err error) {
 	viewInfo, err := BuildMViewInfo(s)
 	if err != nil {
 		return err
@@ -1634,7 +1634,7 @@ func (e *executor) CreateMView(ctx sessionctx.Context, s *ast.CreateMViewStmt, o
 			ID:        int64(i),
 			Offset:    i,
 			State:     model.StatePublic,
-			FieldType: *outputSchema.Columns[i].RetType,
+			FieldType: *extraInfo.OutputSchema.Columns[i].RetType,
 		})
 	}
 	tblCharset := ""
@@ -1645,7 +1645,7 @@ func (e *executor) CreateMView(ctx sessionctx.Context, s *ast.CreateMViewStmt, o
 	if v, ok := ctx.GetSessionVars().GetSystemVar(vardef.CollationConnection); ok {
 		tblCollate = v
 	}
-	_, err = BuildTableInfoForMV(NewMetaBuildContextWithSctx(ctx), s.ViewName.Name, outputSchema, s.Cols, tblCharset, tblCollate)
+	_, err = BuildTableInfoForMV(NewMetaBuildContextWithSctx(ctx), s.ViewName.Name, extraInfo.OutputSchema, cols, tblCharset, tblCollate)
 	panic("unimplemented")
 }
 

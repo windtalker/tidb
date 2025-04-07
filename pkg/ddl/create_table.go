@@ -1217,17 +1217,17 @@ func renameCheckConstraint(tblInfo *model.TableInfo) {
 	setNameForConstraintInfo(tblInfo.Name.L, map[string]bool{}, tblInfo.Constraints)
 }
 
-func toColumnInfo(colIdWithPkFlag map[int64]int64, colIdWithUKFlag map[int64]int64, col *expression.Column) *model.ColumnInfo {
+func toColumnInfo(colIdWithPkFlag map[int64]int64, colIdWithUKFlag map[int64]int64, col *table.Column, uniqueID int64) *model.ColumnInfo {
 	ci := col.ToInfo()
-	if _, ok := colIdWithPkFlag[col.UniqueID]; ok {
+	if _, ok := colIdWithPkFlag[uniqueID]; ok {
 		ci.FieldType.AddFlag(mysql.PriKeyFlag)
 		// update the column id in colIdWithPkFlag
-		colIdWithPkFlag[col.UniqueID] = col.ID
+		colIdWithPkFlag[uniqueID] = col.ID
 	}
-	if _, ok := colIdWithUKFlag[col.UniqueID]; ok {
+	if _, ok := colIdWithUKFlag[uniqueID]; ok {
 		ci.FieldType.AddFlag(mysql.UniqueKeyFlag)
 		// update the column id in colIdWithUKFlag
-		colIdWithUKFlag[col.UniqueID] = col.ID
+		colIdWithUKFlag[uniqueID] = col.ID
 	}
 	return ci
 }
@@ -1239,6 +1239,7 @@ func buildIndexInfoForMV(ctx *metabuild.Context, columns []*model.ColumnInfo, co
 		Primary: isPrimaryKey,
 		Unique:  isUniqueKey,
 	}
+	idxParts := make([]*model.IndexColumn, 0, len(indexColumns))
 	maxIndexLength := config.GetGlobalConfig().MaxIndexLength
 	sumLength := 0
 	for _, col := range indexColumns {
@@ -1262,7 +1263,7 @@ func buildIndexInfoForMV(ctx *metabuild.Context, columns []*model.ColumnInfo, co
 
 			// The multiple column index and the unique index in which the length sum exceeds the maximum size
 			// will return an error instead produce a warning.
-			if ctx == nil || ctx.GetSQLMode().HasStrictMode() || mysql.HasUniKeyFlag(colInTable.GetFlag()) {
+			if ctx == nil || ctx.GetSQLMode().HasStrictMode() || mysql.HasUniKeyFlag(colInTable.GetFlag()) || len(indexColumns) > 1 {
 				return nil, dbterror.ErrTooLongKey.GenWithStackByArgs(sumLength, maxIndexLength)
 			}
 			// truncate index length and produce warning message in non-restrict sql mode.
@@ -1274,7 +1275,13 @@ func buildIndexInfoForMV(ctx *metabuild.Context, columns []*model.ColumnInfo, co
 			// produce warning message
 			ctx.AppendWarning(dbterror.ErrTooLongKey.FastGenByArgs(sumLength, maxIndexLength))
 		}
+		idxParts = append(idxParts, &model.IndexColumn{
+			Name:   colInTable.Name,
+			Offset: colInTable.Offset,
+			Length: indexColLen,
+		})
 	}
+	indexInfo.Columns = idxParts
 	return indexInfo, nil
 }
 
@@ -1282,7 +1289,7 @@ func BuildTableInfoForMV(
 	ctx *metabuild.Context,
 	tableName ast.CIStr,
 	outputSchema *expression.Schema,
-	colNames []ast.CIStr,
+	cols []*table.Column,
 	charset string,
 	collate string,
 ) (tbInfo *model.TableInfo, err error) {
@@ -1306,16 +1313,16 @@ func BuildTableInfoForMV(
 			colIdWithUKFlag[uk.UniqueID] = -1
 		}
 	}
-	for i, col := range outputSchema.Columns {
+	for i, col := range cols {
 		// allocate a new id
 		col.ID = AllocateColumnID(tbInfo)
-		tbInfo.Columns = append(tbInfo.Columns, toColumnInfo(colIdWithPkFlag, colIdWithUKFlag, col))
-		tblColumns = append(tblColumns, table.ToColumn(toColumnInfo(colIdWithPkFlag, colIdWithUKFlag, col)))
-		if _, ok := existedColsMap[colNames[i].L]; ok {
+		tbInfo.Columns = append(tbInfo.Columns, toColumnInfo(colIdWithPkFlag, colIdWithUKFlag, col, outputSchema.Columns[i].UniqueID))
+		tblColumns = append(tblColumns, table.ToColumn(toColumnInfo(colIdWithPkFlag, colIdWithUKFlag, col, outputSchema.Columns[i].UniqueID)))
+		if _, ok := existedColsMap[col.Name.L]; ok {
 			// todo return duplicate column name error
-			return nil, dbterror.ErrWrongColumnName.GenWithStackByArgs(colNames[i].O)
+			return nil, dbterror.ErrWrongColumnName.GenWithStackByArgs(col.Name.O)
 		}
-		existedColsMap[colNames[i].L] = struct{}{}
+		existedColsMap[col.Name.L] = struct{}{}
 	}
 	if len(outputSchema.PKOrUK) != 0 {
 		// currently, we don't support create index in mv, if PKOrUK is not empty, it must be a primary key

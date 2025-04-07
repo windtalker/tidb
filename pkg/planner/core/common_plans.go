@@ -743,12 +743,17 @@ type CompactTable struct {
 	PartitionNames []ast.CIStr
 }
 
+type MVCreateHelper struct {
+	MvOutputSchema *expression.Schema
+	BaseTableIDs   []int64
+}
+
 // DDL represents a DDL statement plan.
 type DDL struct {
 	baseSchemaProducer
 
 	Statement      ast.DDLNode
-	MvOutputSchema *expression.Schema
+	MVCreateHelper *MVCreateHelper
 }
 
 // SelectInto represents a select-into plan.

@@ -5252,11 +5252,14 @@ func (b *PlanBuilder) buildDDL(ctx context.Context, node ast.DDLNode) (base.Plan
 				return nil, errors.New("_tidb_rowid must have an alias in materialized view")
 			}
 		}
-		schema, err = checkMVPlanAndGenerateMVSchema(plan.(base.LogicalPlan))
+		schema, baseTableIDs, err := checkMVPlanAndGenerateMVSchema(plan.(base.LogicalPlan))
 		if err != nil {
 			return nil, err
 		}
-		p := &DDL{Statement: node, MvOutputSchema: schema}
+		p := &DDL{Statement: node, MVCreateHelper: &MVCreateHelper{
+			MvOutputSchema: schema,
+			BaseTableIDs:   baseTableIDs,
+		}}
 		return p, nil
 		// todo check privilege
 	case *ast.CreateSequenceStmt:

@@ -1273,7 +1273,8 @@ func (b *executorBuilder) buildDDL(v *plannercore.DDL) exec.Executor {
 		stmt:           v.Statement,
 		is:             b.is,
 		tempTableDDL:   temptable.GetTemporaryTableDDL(b.ctx),
-		mvOutputSchema: v.MvOutputSchema,
+		mvOutputSchema: v.MVCreateHelper.MvOutputSchema,
+		mvBaseTableIds: v.MVCreateHelper.BaseTableIDs,
 	}
 	return e
 }

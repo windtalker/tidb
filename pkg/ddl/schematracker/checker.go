@@ -28,7 +28,6 @@ import (
 	"github.com/pingcap/tidb/pkg/ddl/schemaver"
 	"github.com/pingcap/tidb/pkg/ddl/serverstate"
 	"github.com/pingcap/tidb/pkg/ddl/systable"
-	"github.com/pingcap/tidb/pkg/expression"
 	"github.com/pingcap/tidb/pkg/infoschema"
 	"github.com/pingcap/tidb/pkg/kv"
 	"github.com/pingcap/tidb/pkg/meta/autoid"
@@ -273,7 +272,7 @@ func (d *Checker) CreateTable(ctx sessionctx.Context, stmt *ast.CreateTableStmt)
 	return nil
 }
 
-func (d *Checker) CreateMView(ctx sessionctx.Context, stmt *ast.CreateMViewStmt, outputSchema *expression.Schema) error {
+func (d *Checker) CreateMView(ctx sessionctx.Context, stmt *ast.CreateMViewStmt, extraInfo *ddl.CreateMViewExtraInfo) error {
 	panic("not implemented")
 }
 

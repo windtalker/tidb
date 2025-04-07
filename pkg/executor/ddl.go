@@ -58,6 +58,7 @@ type DDLExec struct {
 	is             infoschema.InfoSchema
 	tempTableDDL   temptable.TemporaryTableDDL
 	mvOutputSchema *expression.Schema
+	mvBaseTableIds []int64
 	done           bool
 }
 
@@ -351,7 +352,7 @@ func (e *DDLExec) executeCreateMView(ctx context.Context, s *ast.CreateMViewStmt
 	}
 
 	e.Ctx().GetSessionVars().ClearRelatedTableForMDL()
-	return e.ddlExecutor.CreateMView(e.Ctx(), s, e.mvOutputSchema)
+	return e.ddlExecutor.CreateMView(e.Ctx(), s, &ddl.CreateMViewExtraInfo{OutputSchema: e.mvOutputSchema, BaseTableIDs: e.mvBaseTableIds})
 }
 
 func (e *DDLExec) executeCreateView(ctx context.Context, s *ast.CreateViewStmt) error {
