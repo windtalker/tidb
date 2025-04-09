@@ -172,6 +172,8 @@ type TableInfo struct {
 
 	View *ViewInfo `json:"view"`
 
+	MView *MViewInfo `json:"mview"`
+
 	// if MVLogInfo is not nil, this table is a mvlog table, its base table is MVLogInfo.BaseTableID
 	MVLogInfo *MVLogInfo `json:"mvlog_info"`
 	// if MVLodID is not 0, this table has a mvlog, and the tableId of its mvlog is MVLogID
@@ -755,6 +757,7 @@ type MViewInfo struct {
 	IntervalExpr             string                      `json:"view_interval_expr"`
 	EnableQueryOnComputation bool                        `json:"enable_query_on_computation"`
 	EnableRerite             bool                        `json:"enable_rewrite"`
+	BaseTableNames           [][2]ast.CIStr              `json:"base_table_names"`
 }
 
 type MVLogInfo struct {

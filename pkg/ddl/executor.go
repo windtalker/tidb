@@ -99,8 +99,8 @@ const (
 var errCheckConstraintIsOff = errors.NewNoStackError(vardef.TiDBEnableCheckConstraint + " is off")
 
 type CreateMViewExtraInfo struct {
-	OutputSchema *expression.Schema
-	BaseTableIDs []int64
+	OutputSchema   *expression.Schema
+	BaseTableNames [][2]ast.CIStr
 }
 
 // Executor is the interface for executing DDL statements.
@@ -1201,6 +1201,8 @@ func (e *executor) createTableWithInfoJob(
 
 	var actionType model.ActionType
 	switch {
+	case tbInfo.MView != nil:
+		actionType = model.ActionCreateMView
 	case tbInfo.View != nil:
 		actionType = model.ActionCreateView
 	case tbInfo.Sequence != nil:
@@ -1617,7 +1619,7 @@ func (e *executor) RecoverTable(ctx sessionctx.Context, recoverTableInfo *model.
 }
 
 func (e *executor) CreateMView(ctx sessionctx.Context, s *ast.CreateMViewStmt, extraInfo *CreateMViewExtraInfo) (err error) {
-	viewInfo, err := BuildMViewInfo(s)
+	viewInfo, err := BuildMViewInfo(s, extraInfo)
 	if err != nil {
 		return err
 	}
@@ -1645,8 +1647,22 @@ func (e *executor) CreateMView(ctx sessionctx.Context, s *ast.CreateMViewStmt, e
 	if v, ok := ctx.GetSessionVars().GetSystemVar(vardef.CollationConnection); ok {
 		tblCollate = v
 	}
-	_, err = BuildTableInfoForMV(NewMetaBuildContextWithSctx(ctx), s.ViewName.Name, extraInfo.OutputSchema, cols, tblCharset, tblCollate)
-	panic("unimplemented")
+	tbInfo, err := BuildTableInfoForMV(NewMetaBuildContextWithSctx(ctx), s.ViewName.Name, extraInfo, cols, tblCharset, tblCollate)
+	if err != nil {
+		return nil
+	}
+	tbInfo.MView = viewInfo
+	onExist := OnExistError
+	involvingRef := make([]model.InvolvingSchemaInfo, 0, len(extraInfo.BaseTableNames))
+	for _, name := range extraInfo.BaseTableNames {
+		involvingRef = append(involvingRef, model.InvolvingSchemaInfo{
+			Database: name[0].L,
+			Table:    name[1].L,
+			Mode:     model.SharedInvolving,
+		})
+	}
+
+	return e.CreateTableWithInfo(ctx, s.ViewName.Schema, tbInfo, involvingRef, WithOnExist(onExist))
 }
 
 func (e *executor) CreateView(ctx sessionctx.Context, s *ast.CreateViewStmt) (err error) {

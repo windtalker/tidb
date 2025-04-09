@@ -53,13 +53,13 @@ import (
 type DDLExec struct {
 	exec.BaseExecutor
 
-	ddlExecutor    ddl.Executor
-	stmt           ast.StmtNode
-	is             infoschema.InfoSchema
-	tempTableDDL   temptable.TemporaryTableDDL
-	mvOutputSchema *expression.Schema
-	mvBaseTableIds []int64
-	done           bool
+	ddlExecutor      ddl.Executor
+	stmt             ast.StmtNode
+	is               infoschema.InfoSchema
+	tempTableDDL     temptable.TemporaryTableDDL
+	mvOutputSchema   *expression.Schema
+	mvBaseTableNames [][2]ast.CIStr
+	done             bool
 }
 
 // toErr converts the error to the ErrInfoSchemaChanged when the schema is outdated.
@@ -352,7 +352,7 @@ func (e *DDLExec) executeCreateMView(ctx context.Context, s *ast.CreateMViewStmt
 	}
 
 	e.Ctx().GetSessionVars().ClearRelatedTableForMDL()
-	return e.ddlExecutor.CreateMView(e.Ctx(), s, &ddl.CreateMViewExtraInfo{OutputSchema: e.mvOutputSchema, BaseTableIDs: e.mvBaseTableIds})
+	return e.ddlExecutor.CreateMView(e.Ctx(), s, &ddl.CreateMViewExtraInfo{OutputSchema: e.mvOutputSchema, BaseTableNames: e.mvBaseTableNames})
 }
 
 func (e *DDLExec) executeCreateView(ctx context.Context, s *ast.CreateViewStmt) error {

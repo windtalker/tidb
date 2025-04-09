@@ -221,7 +221,7 @@ func (a *CreateTableArgs) getArgsV1(job *Job) []any {
 		return []any{a.TableInfo, a.FKCheck}
 	case ActionCreateView:
 		return []any{a.TableInfo, a.OnExistReplace, a.OldViewTblID}
-	case ActionCreateSequence:
+	case ActionCreateSequence, ActionCreateMView:
 		return []any{a.TableInfo}
 	}
 	return nil
@@ -234,7 +234,7 @@ func (a *CreateTableArgs) decodeV1(job *Job) error {
 		return errors.Trace(job.decodeArgs(a.TableInfo, &a.FKCheck))
 	case ActionCreateView:
 		return errors.Trace(job.decodeArgs(a.TableInfo, &a.OnExistReplace, &a.OldViewTblID))
-	case ActionCreateSequence:
+	case ActionCreateSequence, ActionCreateMView:
 		return errors.Trace(job.decodeArgs(a.TableInfo))
 	}
 	return nil

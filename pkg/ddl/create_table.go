@@ -151,6 +151,22 @@ func createTable(jobCtx *jobContext, job *model.Job, args *model.CreateTableArgs
 	}
 }
 
+func (w *worker) onCreateMView(jobCtx *jobContext, job *model.Job) (ver int64, _ error) {
+	args, err := model.GetCreateTableArgs(job)
+	if err != nil {
+		// Invalid arguments, cancel this job.
+		job.State = model.JobStateCancelled
+		return ver, errors.Trace(err)
+	}
+	jobCtx.jobArgs = args
+
+	tbInfo := args.TableInfo
+	if tbInfo.MView == nil {
+		job.State = model.JobStateCancelled
+		return ver, dbterror.ErrInvalidDDLJob.GenWithStackByArgs("table", tbInfo.State)
+	}
+	return createMView(jobCtx, job, args)
+}
 func (w *worker) onCreateTable(jobCtx *jobContext, job *model.Job) (ver int64, _ error) {
 	failpoint.Inject("mockExceedErrorLimit", func(val failpoint.Value) {
 		if val.(bool) {
@@ -1288,7 +1304,7 @@ func buildIndexInfoForMV(ctx *metabuild.Context, columns []*model.ColumnInfo, co
 func BuildTableInfoForMV(
 	ctx *metabuild.Context,
 	tableName ast.CIStr,
-	outputSchema *expression.Schema,
+	extraInfo *CreateMViewExtraInfo,
 	cols []*table.Column,
 	charset string,
 	collate string,
@@ -1299,6 +1315,7 @@ func BuildTableInfoForMV(
 		Charset: charset,
 		Collate: collate,
 	}
+	outputSchema := extraInfo.OutputSchema
 	tblColumns := make([]*table.Column, 0, outputSchema.Len())
 	existedColsMap := make(map[string]struct{}, outputSchema.Len())
 	colIdWithPkFlag := make(map[int64]int64)
@@ -1772,7 +1789,7 @@ func ShouldBuildClusteredIndex(mode vardef.ClusteredIndexDefMode, opt *ast.Index
 }
 
 // BuildMViewInfo builds a ViewInfo structure from an ast.CreateViewStmt.
-func BuildMViewInfo(s *ast.CreateMViewStmt) (*model.MViewInfo, error) {
+func BuildMViewInfo(s *ast.CreateMViewStmt, extraInfo *CreateMViewExtraInfo) (*model.MViewInfo, error) {
 	// Always Use `format.RestoreNameBackQuotes` to restore `SELECT` statement despite the `ANSI_QUOTES` SQL Mode is enabled or not.
 	restoreFlag := format.RestoreStringSingleQuotes | format.RestoreKeyWordUppercase | format.RestoreNameBackQuotes
 	var sb strings.Builder
@@ -1782,7 +1799,7 @@ func BuildMViewInfo(s *ast.CreateMViewStmt) (*model.MViewInfo, error) {
 
 	return &model.MViewInfo{SelectStmt: sb.String(), Cols: s.Cols, RefreshMethod: s.RefreshOption.RefreshMethod,
 		RefreshIntervalType: s.RefreshOption.RefreshInterval.IntervalType, EnableQueryOnComputation: s.QueryOption.EnableOnQueryComputation,
-		EnableRerite: s.QueryOption.EnableRewrite}, nil
+		EnableRerite: s.QueryOption.EnableRewrite, BaseTableNames: extraInfo.BaseTableNames}, nil
 }
 
 // BuildViewInfo builds a ViewInfo structure from an ast.CreateViewStmt.

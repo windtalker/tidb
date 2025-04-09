@@ -20,6 +20,7 @@ import (
 	"github.com/pingcap/errors"
 	"github.com/pingcap/tidb/pkg/expression"
 	"github.com/pingcap/tidb/pkg/meta/model"
+	"github.com/pingcap/tidb/pkg/parser/ast"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
 	"github.com/pingcap/tidb/pkg/planner/core/base"
 	"github.com/pingcap/tidb/pkg/planner/core/operator/logicalop"
@@ -30,7 +31,7 @@ type mvCheckerHelper struct {
 	meetProjection  bool
 	meetAggregation bool
 	outputSchema    *expression.Schema
-	baseTableIds    []int64
+	baseTableNames  [][2]ast.CIStr
 }
 
 func isFunctionSupportedInMV(funcName string) bool {
@@ -172,7 +173,7 @@ func checkMVPlan(p base.LogicalPlan, checkerHelper *mvCheckerHelper) error {
 		// for aggregation, all group by column and count(*) must be selected, and all group by column should be marked as pk or unique key(if contains null)
 		return checkMVPlan(x.Children()[0], checkerHelper)
 	case *logicalop.DataSource:
-		checkerHelper.baseTableIds = append(checkerHelper.baseTableIds, x.Table.Meta().ID)
+		checkerHelper.baseTableNames = append(checkerHelper.baseTableNames, [2]ast.CIStr{x.DBName, x.TableInfo.Name})
 		if !checkerHelper.meetAggregation {
 			// for data source, if there is no aggregation, then the pk must be selected as output
 			var pkCols []*expression.Column
@@ -233,7 +234,7 @@ func checkMVPlan(p base.LogicalPlan, checkerHelper *mvCheckerHelper) error {
 	}
 }
 
-func checkMVPlanAndGenerateMVSchema(p base.LogicalPlan) (*expression.Schema, []int64, error) {
+func checkMVPlanAndGenerateMVSchema(p base.LogicalPlan) (*expression.Schema, [][2]ast.CIStr, error) {
 	// copy the schema since it will be modified during the check
 	outputSchema := &(*p.Schema())
 	outputSchema.NullableUK = outputSchema.NullableUK[:0]
@@ -245,5 +246,5 @@ func checkMVPlanAndGenerateMVSchema(p base.LogicalPlan) (*expression.Schema, []i
 	if err != nil {
 		return nil, nil, err
 	}
-	return checkHelper.outputSchema, checkHelper.baseTableIds, nil
+	return checkHelper.outputSchema, checkHelper.baseTableNames, nil
 }

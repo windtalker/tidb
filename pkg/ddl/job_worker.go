@@ -905,6 +905,8 @@ func (w *worker) runOneJobStep(
 		ver, err = onModifySchemaDefaultPlacement(jobCtx, job)
 	case model.ActionCreateTable:
 		ver, err = w.onCreateTable(jobCtx, job)
+	case model.ActionCreateMView:
+		ver, err = w.onCreateMView(jobCtx, job)
 	case model.ActionCreateTables:
 		ver, err = w.onCreateTables(jobCtx, job)
 	case model.ActionRepairTable:

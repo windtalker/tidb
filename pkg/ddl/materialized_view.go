@@ -214,6 +214,44 @@ func BuildTableInfoForMVLog(ctx *metabuild.Context, s *ast.CreateMVLogStmt, base
 	return tbInfo, nil
 }
 
+func createMView(jobCtx *jobContext, job *model.Job, args *model.CreateTableArgs) (int64, error) {
+	schemaID := job.SchemaID
+	tbInfo := args.TableInfo
+	tbInfo.State = model.StateNone
+	// check mv not exists
+	err := checkTableNotExists(jobCtx.infoCache, schemaID, tbInfo.Name.L)
+	if err != nil {
+		if infoschema.ErrDatabaseNotExists.Equal(err) || infoschema.ErrTableExists.Equal(err) {
+			job.State = model.JobStateCancelled
+		}
+		return 0, errors.Trace(err)
+	}
+	// check base table exists
+	for _, tbl := range tbInfo.MView.BaseTableNames {
+		_, err := jobCtx.infoCache.GetLatest().TableByName(context.Background(), tbl[0], tbl[1])
+		if err != nil {
+			job.State = model.JobStateCancelled
+			return 0, errors.Trace(err)
+		}
+	}
+
+	metaMut := jobCtx.metaMut
+	if tbInfo.State != model.StateNone {
+		// invalid state, cancel this job
+		job.State = model.JobStateCancelled
+		return 0, errors.New("unexpected ddl state")
+	}
+	tbInfo.State = model.StatePublic
+	tbInfo.UpdateTS = metaMut.StartTS
+	err = checkTableInfoValid(tbInfo)
+	if err != nil {
+		job.State = model.JobStateCancelled
+		return 0, errors.Trace(err)
+	}
+	// update base table info
+
+	return 0, errors.New("create materialized view is not supported yet")
+}
 func createMVLog(jobCtx *jobContext, job *model.Job, args *model.CreateTableArgs) (int64, error) {
 	schemaID := job.SchemaID
 	tbInfo := args.TableInfo

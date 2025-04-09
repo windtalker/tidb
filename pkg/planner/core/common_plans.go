@@ -745,7 +745,7 @@ type CompactTable struct {
 
 type MVCreateHelper struct {
 	MvOutputSchema *expression.Schema
-	BaseTableIDs   []int64
+	BaseTableNames [][2]ast.CIStr
 }
 
 // DDL represents a DDL statement plan.
