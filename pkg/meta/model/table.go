@@ -174,6 +174,8 @@ type TableInfo struct {
 
 	MView *MViewInfo `json:"mview"`
 
+	RelatedMViews [][2]ast.CIStr
+
 	// if MVLogInfo is not nil, this table is a mvlog table, its base table is MVLogInfo.BaseTableID
 	MVLogInfo *MVLogInfo `json:"mvlog_info"`
 	// if MVLodID is not 0, this table has a mvlog, and the tableId of its mvlog is MVLogID

@@ -226,14 +226,6 @@ func createMView(jobCtx *jobContext, job *model.Job, args *model.CreateTableArgs
 		}
 		return 0, errors.Trace(err)
 	}
-	// check base table exists
-	for _, tbl := range tbInfo.MView.BaseTableNames {
-		_, err := jobCtx.infoCache.GetLatest().TableByName(context.Background(), tbl[0], tbl[1])
-		if err != nil {
-			job.State = model.JobStateCancelled
-			return 0, errors.Trace(err)
-		}
-	}
 
 	metaMut := jobCtx.metaMut
 	if tbInfo.State != model.StateNone {
@@ -248,10 +240,41 @@ func createMView(jobCtx *jobContext, job *model.Job, args *model.CreateTableArgs
 		job.State = model.JobStateCancelled
 		return 0, errors.Trace(err)
 	}
+	// create mv
+	err = metaMut.CreateTableOrView(schemaID, tbInfo)
+	if err != nil {
+		job.State = model.JobStateCancelled
+		return 0, errors.Trace(err)
+	}
 	// update base table info
+	affectedTblInfo := make([]*model.TableInfo, 0, 1 + len(tbInfo.MView.BaseTableNames))
+	affectedTblInfo = append(affectedTblInfo, tbInfo)
+	affectedSchemaAndTables := make([]schemaIDAndTableInfo, 0, 1 + len(tbInfo.MView.BaseTableNames))
+	affectedSchemaAndTables = append(affectedSchemaAndTables, schemaIDAndTableInfo{schemaID: schemaID, tblInfo: tbInfo})
 
+	for _, baseTbl := range tbInfo.MView.BaseTableNames {
+		baseTable, err := jobCtx.infoCache.GetLatest().TableByName(context.Background(), baseTbl[0], baseTbl[1])
+		if err != nil {
+			job.State = model.JobStateCancelled
+			return 0, errors.Trace(err)
+		}
+		baseTableInfo := baseTable.Meta()
+		baseTableInfo.RelatedMViews = append(baseTableInfo.RelatedMViews, [2]ast.CIStr{ast.NewCIStr(job.SchemaName), tbInfo.Name})
+		metaMut.UpdateTable(baseTableInfo.DBID, baseTableInfo)
+		affectedTblInfo = append(affectedTblInfo, baseTableInfo)
+		affectedSchemaAndTables = append(affectedSchemaAndTables, schemaIDAndTableInfo{schemaID: baseTableInfo.DBID, tblInfo: baseTableInfo})
+	}
+
+	ver, err := updateSchemaVersion(jobCtx, job, affectedSchemaAndTables...)
+	if err != nil {
+		job.State = model.JobStateCancelled
+		return 0, errors.Trace(err)
+	}
+	job.FinishMultipleTableJob(model.JobStateDone, model.StatePublic, ver, affectedTblInfo)
+	// return ver, nil
 	return 0, errors.New("create materialized view is not supported yet")
 }
+
 func createMVLog(jobCtx *jobContext, job *model.Job, args *model.CreateTableArgs) (int64, error) {
 	schemaID := job.SchemaID
 	tbInfo := args.TableInfo
@@ -298,7 +321,7 @@ func createMVLog(jobCtx *jobContext, job *model.Job, args *model.CreateTableArgs
 		job.State = model.JobStateCancelled
 		return 0, errors.Trace(err)
 	}
-	jobCtx.metaMut.UpdateTable(schemaID, baseTableInfo)
+	jobCtx.metaMut.UpdateTable(baseTableInfo.DBID, baseTableInfo)
 
 	affectedTblInfo := make([]*model.TableInfo, 0, 2)
 	affectedTblInfo = append(affectedTblInfo, tbInfo)
