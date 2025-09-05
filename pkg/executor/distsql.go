@@ -1214,6 +1214,7 @@ func (w *indexWorker) extractTaskHandles(ctx context.Context, chk *chunk.Chunk, 
 			}
 			handles = append(handles, h)
 			if w.idxLookup.isVersionAware {
+				// todo tici should return the real version and the set it here
 				handleVersionMap.Set(h, uint64(0))
 			}
 		}

@@ -335,6 +335,7 @@ replace (
 
 	github.com/pingcap/tidb/pkg/indexer => ./pkg/tici
 	github.com/pingcap/tidb/pkg/parser => ./pkg/parser
+	github.com/pingcap/kvproto => /Users/feixu/dev/pingcap/kvproto
 
 	// TODO: `sourcegraph.com/sourcegraph/appdash` has been archived, and the original host has been removed.
 	// Please remove these dependencies.
