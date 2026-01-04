@@ -35,6 +35,7 @@ const ErrorLength = 0
 
 // FieldType records field type information.
 type FieldType = ast.FieldType
+type ImmutableFieldType = ast.ImmutableFieldType
 
 // NewFieldType returns a FieldType,
 // with a type and other information about field type.
@@ -60,12 +61,12 @@ func NewFieldTypeWithCollation(tp byte, collation string, length int) *FieldType
 // AggFieldType aggregates field types for a multi-argument function like `IF`, `IFNULL`, `COALESCE`
 // whose return type is determined by the arguments' FieldTypes.
 // Aggregation is performed by MergeFieldType function.
-func AggFieldType(tps []*FieldType) *FieldType {
+func AggFieldType(tps []*ImmutableFieldType) *FieldType {
 	var currType FieldType
 	isMixedSign := false
 	for i, t := range tps {
 		if i == 0 && currType.GetType() == mysql.TypeUnspecified {
-			currType = *t
+			currType = *(*FieldType)(t)
 			continue
 		}
 		mtp := mergeFieldType(currType.GetType(), t.GetType())
@@ -114,7 +115,7 @@ func TryToFixFlenOfDatetime(resultTp *FieldType) {
 }
 
 // AggregateEvalType aggregates arguments' EvalType of a multi-argument function.
-func AggregateEvalType(fts []*FieldType, flag *uint) EvalType {
+func AggregateEvalType(fts []*ImmutableFieldType, flag *uint) EvalType {
 	var (
 		aggregatedEvalType = ETString
 		unsigned           bool
@@ -146,7 +147,7 @@ func AggregateEvalType(fts []*FieldType, flag *uint) EvalType {
 	return aggregatedEvalType
 }
 
-func mergeEvalType(lhs, rhs EvalType, lft, rft *FieldType, isLHSUnsigned, isRHSUnsigned bool) EvalType {
+func mergeEvalType(lhs, rhs EvalType, lft, rft *ImmutableFieldType, isLHSUnsigned, isRHSUnsigned bool) EvalType {
 	if lft.GetType() == mysql.TypeUnspecified || rft.GetType() == mysql.TypeUnspecified {
 		if lft.GetType() == rft.GetType() {
 			return ETString

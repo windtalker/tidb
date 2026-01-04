@@ -384,7 +384,7 @@ func (b *builtinCoalesceVectorFloat32Sig) evalVectorFloat32(ctx EvalContext, row
 }
 
 func aggregateType(ctx EvalContext, args []Expression) *types.FieldType {
-	fieldTypes := make([]*types.FieldType, len(args))
+	fieldTypes := make([]*types.ImmutableFieldType, len(args))
 	for i := range fieldTypes {
 		fieldTypes[i] = args[i].GetType(ctx)
 	}
@@ -450,7 +450,7 @@ const (
 // resolveType4Extremum gets compare type for GREATEST and LEAST and BETWEEN (mainly for datetime).
 func resolveType4Extremum(ctx EvalContext, args []Expression) (_ *types.FieldType, fieldTimeType GLRetTimeType, cmpStringMode GLCmpStringMode) {
 	aggType := aggregateType(ctx, args)
-	var temporalItem *types.FieldType
+	var temporalItem *types.ImmutableFieldType
 	if aggType.EvalType().IsStringKind() {
 		for i := range args {
 			item := args[i].GetType(ctx)
@@ -1401,7 +1401,7 @@ func (c *compareFunctionClass) getDisplayName() string {
 }
 
 // getBaseCmpType gets the EvalType that the two args will be treated as when comparing.
-func getBaseCmpType(lhs, rhs types.EvalType, lft, rft *types.FieldType) types.EvalType {
+func getBaseCmpType(lhs, rhs types.EvalType, lft, rft *types.ImmutableFieldType) types.EvalType {
 	if lft != nil && rft != nil && (lft.GetType() == mysql.TypeUnspecified || rft.GetType() == mysql.TypeUnspecified) {
 		if lft.GetType() == rft.GetType() {
 			return types.ETString
@@ -1661,7 +1661,7 @@ func RefineComparedConstant(ctx BuildContext, targetFieldType types.FieldType, c
 	return con, false
 }
 
-func matchRefineRule3Pattern(conEvalType types.EvalType, exprType *types.FieldType) bool {
+func matchRefineRule3Pattern(conEvalType types.EvalType, exprType *types.ImmutableFieldType) bool {
 	return (exprType.GetType() == mysql.TypeTimestamp || exprType.GetType() == mysql.TypeDatetime) &&
 		(conEvalType == types.ETReal || conEvalType == types.ETDecimal || conEvalType == types.ETInt)
 }
@@ -1810,7 +1810,7 @@ func (c *compareFunctionClass) refineArgs(ctx BuildContext, args []Expression) (
 
 	// int non-constant [cmp] non-int constant
 	if arg0IsInt && !arg0IsCon && !arg1IsInt && arg1IsCon {
-		arg1, isExceptional = RefineComparedConstant(ctx, *arg0Type, arg1, c.op)
+		arg1, isExceptional = RefineComparedConstant(ctx, *(*types.FieldType)(arg0Type), arg1, c.op)
 		// Why check not null flag
 		// eg: int_col > const_val(which is less than min_int32)
 		// If int_col got null, compare result cannot be true
@@ -1837,7 +1837,7 @@ func (c *compareFunctionClass) refineArgs(ctx BuildContext, args []Expression) (
 	}
 	// non-int constant [cmp] int non-constant
 	if arg1IsInt && !arg1IsCon && !arg0IsInt && arg0IsCon {
-		arg0, isExceptional = RefineComparedConstant(ctx, *arg1Type, arg0, symmetricOp[c.op])
+		arg0, isExceptional = RefineComparedConstant(ctx, *(*types.FieldType)(arg1Type), arg0, symmetricOp[c.op])
 		if !isExceptional || (isExceptional && mysql.HasNotNullFlag(arg1Type.GetFlag())) {
 			finalArg0 = arg0
 		}

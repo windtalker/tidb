@@ -29,7 +29,7 @@ var (
 
 // getChunkFromPool gets a Chunk from the Pool. In fact, initCap is the size of the bucket in the histogram.
 // so it will not have too many difference value.
-func getChunkFromPool(initCap int, fields []*types.FieldType) *Chunk {
+func getChunkFromPool(initCap int, fields []*types.ImmutableFieldType) *Chunk {
 	globalChunkPoolMutex.RLock()
 	pool, ok := globalChunkPool[initCap]
 	globalChunkPoolMutex.RUnlock()
@@ -42,7 +42,7 @@ func getChunkFromPool(initCap int, fields []*types.FieldType) *Chunk {
 	return globalChunkPool[initCap].GetChunk(fields)
 }
 
-func putChunkFromPool(initCap int, fields []*types.FieldType, chk *Chunk) {
+func putChunkFromPool(initCap int, fields []*types.ImmutableFieldType, chk *Chunk) {
 	globalChunkPoolMutex.RLock()
 	pool, ok := globalChunkPool[initCap]
 	globalChunkPoolMutex.RUnlock()
@@ -81,7 +81,7 @@ func NewPool(initCap int) *Pool {
 }
 
 // GetChunk gets a Chunk from the Pool.
-func (p *Pool) GetChunk(fields []*types.FieldType) *Chunk {
+func (p *Pool) GetChunk(fields []*types.ImmutableFieldType) *Chunk {
 	chk := new(Chunk)
 	chk.capacity = p.initCap
 	chk.requiredRows = p.initCap
@@ -104,7 +104,7 @@ func (p *Pool) GetChunk(fields []*types.FieldType) *Chunk {
 }
 
 // PutChunk puts a Chunk back to the Pool.
-func (p *Pool) PutChunk(fields []*types.FieldType, chk *Chunk) {
+func (p *Pool) PutChunk(fields []*types.ImmutableFieldType, chk *Chunk) {
 	for i, f := range fields {
 		c := chk.columns[i]
 		c.reset()

@@ -618,7 +618,7 @@ func (m *MockExpr) EvalVectorFloat32(ctx EvalContext, row chunk.Row) (val types.
 	}
 	return types.ZeroVectorFloat32, m.i == nil, m.err
 }
-func (m *MockExpr) GetType(_ EvalContext) *types.FieldType { return m.t }
+func (m *MockExpr) GetType(_ EvalContext) *types.ImmutableFieldType { return (*types.ImmutableFieldType)(m.t) }
 
 func (m *MockExpr) Clone() Expression {
 	cloned := new(MockExpr)

@@ -43,7 +43,7 @@ const DefaultChunkDataInDiskByChunksPath = "defaultChunkDataInDiskByChunksPath"
 // DataInDiskByChunks represents some data stored in temporary disk.
 // They can only be restored by chunks.
 type DataInDiskByChunks struct {
-	fieldTypes        []*types.FieldType
+	fieldTypes        []*types.ImmutableFieldType
 	offsetOfEachChunk []int64
 
 	totalDataSize int64
@@ -61,7 +61,7 @@ type DataInDiskByChunks struct {
 }
 
 // NewDataInDiskByChunks creates a new DataInDiskByChunks with field types.
-func NewDataInDiskByChunks(fieldTypes []*types.FieldType, fileNamePrefixForTest string) *DataInDiskByChunks {
+func NewDataInDiskByChunks(fieldTypes []*types.ImmutableFieldType, fileNamePrefixForTest string) *DataInDiskByChunks {
 	d := &DataInDiskByChunks{
 		fieldTypes:    fieldTypes,
 		totalDataSize: 0,

@@ -219,7 +219,7 @@ func replaceEqCondtionWithTrue(ctx BuildContext, src *Column, tgt *Column, cond 
 			}
 		}
 		if replaced {
-			return NewFunctionInternal(ctx, sf.FuncName.L, sf.GetType(ctx.GetEvalCtx()), args...), true
+			return NewFunctionInternal(ctx, sf.FuncName.L, sf.GetMutableType(ctx.GetEvalCtx()), args...), true
 		}
 	}
 	return cond, false
@@ -295,7 +295,7 @@ func tryToReplaceCond(ctx BuildContext, src *Column, tgt *Column, cond Expressio
 		}
 	}
 	if replaced {
-		return true, false, NewFunctionInternal(ctx, sf.FuncName.L, sf.GetType(ctx.GetEvalCtx()), args...)
+		return true, false, NewFunctionInternal(ctx, sf.FuncName.L, sf.GetMutableType(ctx.GetEvalCtx()), args...)
 	}
 	return false, false, cond
 }
@@ -537,7 +537,7 @@ func (s *propConstSolver) pickNewEQConds(visited []bool) (retMapper map[int]*Con
 			castedCon := con
 			if !colType.Equal(conType) {
 				oriWarningCnt := s.ctx.GetEvalCtx().WarningCount()
-				newExpr := BuildCastFunction(s.ctx, con, colType.DeepCopy())
+				newExpr := BuildCastFunction(s.ctx, con, (*types.FieldType)(colType).DeepCopy())
 				s.ctx.GetEvalCtx().TruncateWarnings(oriWarningCnt)
 				if newCon, ok := newExpr.(*Constant); ok {
 					castedCon = newCon

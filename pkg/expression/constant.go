@@ -225,8 +225,7 @@ func (c *Constant) Clone() Expression {
 	return &con
 }
 
-// GetType implements Expression interface.
-func (c *Constant) GetType(ctx EvalContext) *types.FieldType {
+func (c *Constant) GetMutableType(ctx EvalContext) *types.FieldType {
 	if c.ParamMarker != nil {
 		// GetType() may be called in multi-threaded context, e.g, in building inner executors of IndexJoin,
 		// so it should avoid data race. We achieve this by returning different FieldType pointer for each call.
@@ -241,6 +240,11 @@ func (c *Constant) GetType(ctx EvalContext) *types.FieldType {
 		return tp
 	}
 	return c.RetType
+}
+
+// GetType implements Expression interface.
+func (c *Constant) GetType(ctx EvalContext) *types.ImmutableFieldType {
+	return (*types.ImmutableFieldType)(c.GetMutableType(ctx))
 }
 
 // VecEvalInt evaluates this expression in a vectorized manner.

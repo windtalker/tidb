@@ -276,7 +276,7 @@ func newBaseBuiltinFuncWithFieldTypes(ctx BuildContext, funcName string, args []
 		// For decimal/datetime/timestamp/duration types, it is necessary to ensure that decimal are consistent with the output type,
 		// so adding a cast function here.
 		case types.ETDecimal, types.ETDatetime, types.ETTimestamp, types.ETDuration:
-			if !args[i].GetType(ctx.GetEvalCtx()).Equal(argTps[i]) {
+			if !(*types.FieldType)(args[i].GetType(ctx.GetEvalCtx())).Equal(argTps[i]) {
 				args[i] = BuildCastFunction(ctx, args[i], argTps[i])
 			}
 		}

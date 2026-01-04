@@ -114,6 +114,11 @@ func IsTypeBit(ft *FieldType) bool {
 	return ft.GetType() == mysql.TypeBit
 }
 
+// IsTypeBit returns a boolean indicating whether the tp is bit type.
+func IsTypeBitV2(ft *ImmutableFieldType) bool {
+	return ft.GetType() == mysql.TypeBit
+}
+
 // IsTemporalWithDate returns a boolean indicating
 // whether the tp is time type with date.
 func IsTemporalWithDate(tp byte) bool {
@@ -126,9 +131,20 @@ func IsBinaryStr(ft *FieldType) bool {
 	return ft.GetCollate() == charset.CollationBin && IsString(ft.GetType())
 }
 
+func IsBinaryStrV2(ft *ImmutableFieldType) bool {
+	return ft.GetCollate() == charset.CollationBin && IsString(ft.GetType())
+}
+
 // IsNonBinaryStr returns a boolean indicating
 // whether the field type is a non-binary string type.
 func IsNonBinaryStr(ft *FieldType) bool {
+	if ft.GetCollate() != charset.CollationBin && IsString(ft.GetType()) {
+		return true
+	}
+	return false
+}
+
+func IsNonBinaryStrV2(ft *ImmutableFieldType) bool {
 	if ft.GetCollate() != charset.CollationBin && IsString(ft.GetType()) {
 		return true
 	}

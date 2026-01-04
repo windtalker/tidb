@@ -276,7 +276,7 @@ func evalOneCell(ctx EvalContext, expr Expression, row chunk.Row, output *chunk.
 	return err
 }
 
-func executeToInt(ctx EvalContext, expr Expression, fieldType *types.FieldType, row chunk.Row, output *chunk.Chunk, colID int) error {
+func executeToInt(ctx EvalContext, expr Expression, fieldType *types.ImmutableFieldType, row chunk.Row, output *chunk.Chunk, colID int) error {
 	res, isNull, err := expr.EvalInt(ctx, row)
 	if err != nil {
 		return err
@@ -306,7 +306,7 @@ func executeToInt(ctx EvalContext, expr Expression, fieldType *types.FieldType, 
 	return nil
 }
 
-func executeToReal(ctx EvalContext, expr Expression, fieldType *types.FieldType, row chunk.Row, output *chunk.Chunk, colID int) error {
+func executeToReal(ctx EvalContext, expr Expression, fieldType *types.ImmutableFieldType, row chunk.Row, output *chunk.Chunk, colID int) error {
 	res, isNull, err := expr.EvalReal(ctx, row)
 	if err != nil {
 		return err
@@ -323,7 +323,7 @@ func executeToReal(ctx EvalContext, expr Expression, fieldType *types.FieldType,
 	return nil
 }
 
-func executeToDecimal(ctx EvalContext, expr Expression, fieldType *types.FieldType, row chunk.Row, output *chunk.Chunk, colID int) error {
+func executeToDecimal(ctx EvalContext, expr Expression, fieldType *types.ImmutableFieldType, row chunk.Row, output *chunk.Chunk, colID int) error {
 	res, isNull, err := expr.EvalDecimal(ctx, row)
 	if err != nil {
 		return err
@@ -336,7 +336,7 @@ func executeToDecimal(ctx EvalContext, expr Expression, fieldType *types.FieldTy
 	return nil
 }
 
-func executeToDatetime(ctx EvalContext, expr Expression, fieldType *types.FieldType, row chunk.Row, output *chunk.Chunk, colID int) error {
+func executeToDatetime(ctx EvalContext, expr Expression, fieldType *types.ImmutableFieldType, row chunk.Row, output *chunk.Chunk, colID int) error {
 	res, isNull, err := expr.EvalTime(ctx, row)
 	if err != nil {
 		return err
@@ -349,7 +349,7 @@ func executeToDatetime(ctx EvalContext, expr Expression, fieldType *types.FieldT
 	return nil
 }
 
-func executeToDuration(ctx EvalContext, expr Expression, fieldType *types.FieldType, row chunk.Row, output *chunk.Chunk, colID int) error {
+func executeToDuration(ctx EvalContext, expr Expression, fieldType *types.ImmutableFieldType, row chunk.Row, output *chunk.Chunk, colID int) error {
 	res, isNull, err := expr.EvalDuration(ctx, row)
 	if err != nil {
 		return err
@@ -362,7 +362,7 @@ func executeToDuration(ctx EvalContext, expr Expression, fieldType *types.FieldT
 	return nil
 }
 
-func executeToJSON(ctx EvalContext, expr Expression, fieldType *types.FieldType, row chunk.Row, output *chunk.Chunk, colID int) error {
+func executeToJSON(ctx EvalContext, expr Expression, fieldType *types.ImmutableFieldType, row chunk.Row, output *chunk.Chunk, colID int) error {
 	res, isNull, err := expr.EvalJSON(ctx, row)
 	if err != nil {
 		return err
@@ -375,7 +375,7 @@ func executeToJSON(ctx EvalContext, expr Expression, fieldType *types.FieldType,
 	return nil
 }
 
-func executeToVectorFloat32(ctx EvalContext, expr Expression, fieldType *types.FieldType, row chunk.Row, output *chunk.Chunk, colID int) error {
+func executeToVectorFloat32(ctx EvalContext, expr Expression, fieldType *types.ImmutableFieldType, row chunk.Row, output *chunk.Chunk, colID int) error {
 	res, isNull, err := expr.EvalVectorFloat32(ctx, row)
 	if err != nil {
 		return err
@@ -388,7 +388,7 @@ func executeToVectorFloat32(ctx EvalContext, expr Expression, fieldType *types.F
 	return nil
 }
 
-func executeToString(ctx EvalContext, expr Expression, fieldType *types.FieldType, row chunk.Row, output *chunk.Chunk, colID int) error {
+func executeToString(ctx EvalContext, expr Expression, fieldType *types.ImmutableFieldType, row chunk.Row, output *chunk.Chunk, colID int) error {
 	res, isNull, err := expr.EvalString(ctx, row)
 	if err != nil {
 		return err

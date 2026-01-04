@@ -65,7 +65,7 @@ var (
 
 // isConstantBinaryLiteral return true if expr is constant binary literal
 func isConstantBinaryLiteral(ctx EvalContext, expr Expression) bool {
-	if types.IsBinaryStr(expr.GetType(ctx)) {
+	if types.IsBinaryStrV2(expr.GetType(ctx)) {
 		if v, ok := expr.(*Constant); ok {
 			if k := v.Value.Kind(); k == types.KindBinaryLiteral {
 				return true
@@ -140,7 +140,7 @@ func setFlenDecimal4RealOrDecimal(ctx EvalContext, retTp *types.FieldType, arg0,
 	}
 }
 
-func (c *arithmeticDivideFunctionClass) setType4DivDecimal(retTp, a, b *types.FieldType, divPrecIncrement int) {
+func (c *arithmeticDivideFunctionClass) setType4DivDecimal(retTp *types.FieldType, a, b *types.ImmutableFieldType, divPrecIncrement int) {
 	var deca, decb = a.GetDecimal(), b.GetDecimal()
 	if deca == types.UnspecifiedFsp {
 		deca = 0
@@ -980,7 +980,7 @@ type arithmeticModFunctionClass struct {
 	baseFunctionClass
 }
 
-func (c *arithmeticModFunctionClass) setType4ModRealOrDecimal(retTp, a, b *types.FieldType, isDecimal bool) {
+func (c *arithmeticModFunctionClass) setType4ModRealOrDecimal(retTp *types.FieldType, a, b *types.ImmutableFieldType, isDecimal bool) {
 	if a.GetDecimal() == types.UnspecifiedLength || b.GetDecimal() == types.UnspecifiedLength {
 		retTp.SetDecimal(types.UnspecifiedLength)
 	} else {

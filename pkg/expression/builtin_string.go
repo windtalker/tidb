@@ -172,18 +172,18 @@ func reverseRunes(origin []rune) []rune {
 // SetBinFlagOrBinStr sets resTp to binary string if argTp is a binary string,
 // if not, sets the binary flag of resTp to true if argTp has binary flag.
 // We need to check if the tp is enum or set, if so, don't add binary flag directly unless it has binary flag.
-func SetBinFlagOrBinStr(argTp *types.FieldType, resTp *types.FieldType) {
+func SetBinFlagOrBinStr(argTp *types.ImmutableFieldType, resTp *types.FieldType) {
 	nonEnumOrSet := !(argTp.GetType() == mysql.TypeEnum || argTp.GetType() == mysql.TypeSet)
-	if types.IsBinaryStr(argTp) {
+	if types.IsBinaryStr((*types.FieldType)(argTp)) {
 		types.SetBinChsClnFlag(resTp)
-	} else if mysql.HasBinaryFlag(argTp.GetFlag()) || (!types.IsNonBinaryStr(argTp) && nonEnumOrSet) {
+	} else if mysql.HasBinaryFlag(argTp.GetFlag()) || (!types.IsNonBinaryStr((*types.FieldType)(argTp)) && nonEnumOrSet) {
 		resTp.AddFlag(mysql.BinaryFlag)
 	}
 }
 
 // addBinFlag add the binary flag to `tp` if its charset is binary
 func addBinFlag(tp *types.FieldType) {
-	SetBinFlagOrBinStr(tp, tp)
+	SetBinFlagOrBinStr((*types.ImmutableFieldType)(tp), tp)
 }
 
 type lengthFunctionClass struct {
@@ -460,7 +460,7 @@ func (c *leftFunctionClass) getFunction(ctx BuildContext, args []Expression) (bu
 	argType := args[0].GetType(ctx.GetEvalCtx())
 	bf.tp.SetFlen(argType.GetFlen())
 	SetBinFlagOrBinStr(argType, bf.tp)
-	if types.IsBinaryStr(argType) {
+	if types.IsBinaryStrV2(argType) {
 		sig := &builtinLeftSig{bf}
 		sig.setPbCode(tipb.ScalarFuncSig_Left)
 		return sig, nil
@@ -553,7 +553,7 @@ func (c *rightFunctionClass) getFunction(ctx BuildContext, args []Expression) (b
 	argType := args[0].GetType(ctx.GetEvalCtx())
 	bf.tp.SetFlen(argType.GetFlen())
 	SetBinFlagOrBinStr(argType, bf.tp)
-	if types.IsBinaryStr(argType) {
+	if types.IsBinaryStrV2(argType) {
 		sig := &builtinRightSig{bf}
 		sig.setPbCode(tipb.ScalarFuncSig_Right)
 		return sig, nil
@@ -707,7 +707,7 @@ func (c *lowerFunctionClass) getFunction(ctx BuildContext, args []Expression) (b
 	bf.tp.SetFlen(argTp.GetFlen())
 	SetBinFlagOrBinStr(argTp, bf.tp)
 	var sig builtinFunc
-	if types.IsBinaryStr(argTp) {
+	if types.IsBinaryStrV2(argTp) {
 		sig = &builtinLowerSig{bf}
 		sig.setPbCode(tipb.ScalarFuncSig_Lower)
 	} else {
@@ -784,7 +784,7 @@ func (c *reverseFunctionClass) getFunction(ctx BuildContext, args []Expression) 
 	bf.tp.SetFlen(args[0].GetType(ctx.GetEvalCtx()).GetFlen())
 	addBinFlag(bf.tp)
 	var sig builtinFunc
-	if types.IsBinaryStr(argTp) || types.IsTypeBit(argTp) {
+	if types.IsBinaryStrV2(argTp) || types.IsTypeBitV2(argTp) {
 		sig = &builtinReverseSig{bf}
 		sig.setPbCode(tipb.ScalarFuncSig_Reverse)
 	} else {
@@ -915,7 +915,7 @@ func (c *upperFunctionClass) getFunction(ctx BuildContext, args []Expression) (b
 	bf.tp.SetFlen(argTp.GetFlen())
 	SetBinFlagOrBinStr(argTp, bf.tp)
 	var sig builtinFunc
-	if types.IsBinaryStr(argTp) {
+	if types.IsBinaryStrV2(argTp) {
 		sig = &builtinUpperSig{bf}
 		sig.setPbCode(tipb.ScalarFuncSig_Upper)
 	} else {
@@ -1176,7 +1176,7 @@ func (b *builtinConvertSig) evalString(ctx EvalContext, row chunk.Row) (string, 
 	if !charset.IsSupportedEncoding(resultTp.GetCharset()) {
 		return "", false, errUnknownCharacterSet.GenWithStackByArgs(resultTp.GetCharset())
 	}
-	if types.IsBinaryStr(argTp) {
+	if types.IsBinaryStrV2(argTp) {
 		// Convert charset binary -> utf8. If it meets error, NULL is returned.
 		enc := charset.FindEncoding(resultTp.GetCharset())
 		ret, err := enc.Transform(nil, hack.Slice(expr), charset.OpDecodeReplace)
@@ -1218,13 +1218,13 @@ func (c *substringFunctionClass) getFunction(ctx BuildContext, args []Expression
 
 	var sig builtinFunc
 	switch {
-	case len(args) == 3 && types.IsBinaryStr(argType):
+	case len(args) == 3 && types.IsBinaryStrV2(argType):
 		sig = &builtinSubstring3ArgsSig{bf}
 		sig.setPbCode(tipb.ScalarFuncSig_Substring3Args)
 	case len(args) == 3:
 		sig = &builtinSubstring3ArgsUTF8Sig{bf}
 		sig.setPbCode(tipb.ScalarFuncSig_Substring3ArgsUTF8)
-	case len(args) == 2 && types.IsBinaryStr(argType):
+	case len(args) == 2 && types.IsBinaryStrV2(argType):
 		sig = &builtinSubstring2ArgsSig{bf}
 		sig.setPbCode(tipb.ScalarFuncSig_Substring2Args)
 	case len(args) == 2:
@@ -2155,7 +2155,7 @@ func (c *lpadFunctionClass) getFunction(ctx BuildContext, args []Expression) (bu
 	addBinFlag(bf.tp)
 
 	maxAllowedPacket := ctx.GetEvalCtx().GetMaxAllowedPacket()
-	if types.IsBinaryStr(args[0].GetType(ctx.GetEvalCtx())) || types.IsBinaryStr(args[2].GetType(ctx.GetEvalCtx())) {
+	if types.IsBinaryStrV2(args[0].GetType(ctx.GetEvalCtx())) || types.IsBinaryStrV2(args[2].GetType(ctx.GetEvalCtx())) {
 		sig := &builtinLpadSig{bf, maxAllowedPacket}
 		sig.setPbCode(tipb.ScalarFuncSig_Lpad)
 		return sig, nil
@@ -2286,7 +2286,7 @@ func (c *rpadFunctionClass) getFunction(ctx BuildContext, args []Expression) (bu
 	addBinFlag(bf.tp)
 
 	maxAllowedPacket := ctx.GetEvalCtx().GetMaxAllowedPacket()
-	if types.IsBinaryStr(args[0].GetType(ctx.GetEvalCtx())) || types.IsBinaryStr(args[2].GetType(ctx.GetEvalCtx())) {
+	if types.IsBinaryStrV2(args[0].GetType(ctx.GetEvalCtx())) || types.IsBinaryStrV2(args[2].GetType(ctx.GetEvalCtx())) {
 		sig := &builtinRpadSig{bf, maxAllowedPacket}
 		sig.setPbCode(tipb.ScalarFuncSig_Rpad)
 		return sig, nil
@@ -2557,7 +2557,7 @@ func (c *charLengthFunctionClass) getFunction(ctx BuildContext, args []Expressio
 	if err != nil {
 		return nil, err
 	}
-	if types.IsBinaryStr(args[0].GetType(ctx.GetEvalCtx())) {
+	if types.IsBinaryStrV2(args[0].GetType(ctx.GetEvalCtx())) {
 		sig := &builtinCharLengthBinarySig{bf}
 		sig.setPbCode(tipb.ScalarFuncSig_CharLength)
 		return sig, nil
@@ -3227,7 +3227,7 @@ func (c *eltFunctionClass) getFunction(ctx BuildContext, args []Expression) (bui
 	}
 	for _, arg := range args[1:] {
 		argType := arg.GetType(ctx.GetEvalCtx())
-		if types.IsBinaryStr(argType) {
+		if types.IsBinaryStrV2(argType) {
 			types.SetBinChsClnFlag(bf.tp)
 		}
 		flen := argType.GetFlen()
@@ -4286,7 +4286,7 @@ func (c *translateFunctionClass) getFunction(ctx BuildContext, args []Expression
 	argType := args[0].GetType(ctx.GetEvalCtx())
 	bf.tp.SetFlen(argType.GetFlen())
 	SetBinFlagOrBinStr(argType, bf.tp)
-	if types.IsBinaryStr(args[0].GetType(ctx.GetEvalCtx())) || types.IsBinaryStr(args[1].GetType(ctx.GetEvalCtx())) || types.IsBinaryStr(args[2].GetType(ctx.GetEvalCtx())) {
+	if types.IsBinaryStrV2(args[0].GetType(ctx.GetEvalCtx())) || types.IsBinaryStrV2(args[1].GetType(ctx.GetEvalCtx())) || types.IsBinaryStrV2(args[2].GetType(ctx.GetEvalCtx())) {
 		sig := &builtinTranslateBinarySig{bf}
 		return sig, nil
 	}

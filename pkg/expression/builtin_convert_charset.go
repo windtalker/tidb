@@ -138,7 +138,7 @@ func (b *builtinInternalToBinarySig) vecEvalString(ctx EvalContext, input *chunk
 type tidbFromBinaryFunctionClass struct {
 	baseFunctionClass
 
-	tp                           *types.FieldType
+	tp                           *types.ImmutableFieldType
 	cannotConvertStringAsWarning bool
 }
 
@@ -154,7 +154,7 @@ func (c *tidbFromBinaryFunctionClass) getFunction(ctx BuildContext, args []Expre
 		if err != nil {
 			return nil, err
 		}
-		bf.tp = c.tp
+		bf.tp = c.tp.Clone()
 		sig = &builtinInternalFromBinarySig{bf, c.cannotConvertStringAsWarning}
 		sig.setPbCode(tipb.ScalarFuncSig_FromBinary)
 	default:
@@ -267,7 +267,7 @@ func BuildToBinaryFunction(ctx BuildContext, expr Expression) (res Expression) {
 }
 
 // BuildFromBinaryFunction builds from_binary function.
-func BuildFromBinaryFunction(ctx BuildContext, expr Expression, tp *types.FieldType, cannotConvertStringAsWarning bool) (res Expression) {
+func BuildFromBinaryFunction(ctx BuildContext, expr Expression, tp *types.ImmutableFieldType, cannotConvertStringAsWarning bool) (res Expression) {
 	fc := &tidbFromBinaryFunctionClass{baseFunctionClass{InternalFuncFromBinary, 1, 1}, tp, cannotConvertStringAsWarning}
 	f, err := fc.getFunction(ctx, []Expression{expr})
 	if err != nil {
@@ -275,7 +275,7 @@ func BuildFromBinaryFunction(ctx BuildContext, expr Expression, tp *types.FieldT
 	}
 	res = &ScalarFunction{
 		FuncName: ast.NewCIStr(InternalFuncFromBinary),
-		RetType:  tp,
+		RetType:  f.getRetTp(),
 		Function: f,
 	}
 	return FoldConstant(ctx, res)

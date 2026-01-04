@@ -434,7 +434,7 @@ type timeDiffFunctionClass struct {
 	baseFunctionClass
 }
 
-func (c *timeDiffFunctionClass) getArgEvalTp(fieldTp *types.FieldType) types.EvalType {
+func (c *timeDiffFunctionClass) getArgEvalTp(fieldTp *types.ImmutableFieldType) types.EvalType {
 	argTp := types.ETString
 	switch tp := fieldTp.EvalType(); tp {
 	case types.ETDuration, types.ETDatetime, types.ETTimestamp:
@@ -4760,7 +4760,7 @@ func getFsp4TimeAddSub(s string) int {
 
 // getBf4TimeAddSub parses input types, generates baseBuiltinFunc and set related attributes for
 // builtin function 'ADDTIME' and 'SUBTIME'
-func getBf4TimeAddSub(ctx BuildContext, funcName string, args []Expression) (tp1, tp2 *types.FieldType, bf baseBuiltinFunc, err error) {
+func getBf4TimeAddSub(ctx BuildContext, funcName string, args []Expression) (tp1, tp2 *types.ImmutableFieldType, bf baseBuiltinFunc, err error) {
 	tp1, tp2 = args[0].GetType(ctx.GetEvalCtx()), args[1].GetType(ctx.GetEvalCtx())
 	var argTp1, argTp2, retTp types.EvalType
 	switch tp1.GetType() {

@@ -97,7 +97,7 @@ type Storage interface {
 type StorageRC struct {
 	err     error
 	rc      *chunk.RowContainer
-	tp      []*types.FieldType
+	tp      []*types.ImmutableFieldType
 	refCnt  int
 	chkSize int
 	iter    int
@@ -106,7 +106,7 @@ type StorageRC struct {
 }
 
 // NewStorageRowContainer create a new StorageRC.
-func NewStorageRowContainer(tp []*types.FieldType, chkSize int) *StorageRC {
+func NewStorageRowContainer(tp []*types.ImmutableFieldType, chkSize int) *StorageRC {
 	return &StorageRC{tp: tp, chkSize: chkSize}
 }
 

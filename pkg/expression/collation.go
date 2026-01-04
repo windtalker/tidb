@@ -421,7 +421,7 @@ func safeConvert(ctx BuildContext, ec *ExprCollation, args ...Expression) bool {
 		}
 
 		// If value has ASCII repertoire, or it is binary string, just skip it.
-		if arg.Repertoire() == ASCII || types.IsBinaryStr(arg.GetType(ctx.GetEvalCtx())) {
+		if arg.Repertoire() == ASCII || types.IsBinaryStrV2(arg.GetType(ctx.GetEvalCtx())) {
 			continue
 		}
 
@@ -464,7 +464,7 @@ func inferCollation(ctx EvalContext, exprs ...Expression) *ExprCollation {
 	dstCharset, dstCollation := exprs[0].GetType(ctx).GetCharset(), exprs[0].GetType(ctx).GetCollate()
 	if exprs[0].GetType(ctx).EvalType() == types.ETJson {
 		dstCharset, dstCollation = charset.CharsetUTF8MB4, charset.CollationUTF8MB4
-	} else if types.IsTypeBit(exprs[0].GetType(ctx)) {
+	} else if types.IsTypeBitV2(exprs[0].GetType(ctx)) {
 		dstCharset, dstCollation = charset.CharsetBin, charset.CollationBin
 	}
 	unknownCS := false
@@ -476,7 +476,7 @@ func inferCollation(ctx EvalContext, exprs ...Expression) *ExprCollation {
 		// see details https://github.com/pingcap/tidb/issues/31320#issuecomment-1010599311
 		if arg.GetType(ctx).EvalType() == types.ETJson {
 			argCharset, argCollation = charset.CharsetUTF8MB4, charset.CollationUTF8MB4
-		} else if types.IsTypeBit(arg.GetType(ctx)) {
+		} else if types.IsTypeBitV2(arg.GetType(ctx)) {
 			argCharset, argCollation = charset.CharsetBin, charset.CollationBin
 		}
 		// If one of the arguments is binary charset, we allow it can be used with other charsets.

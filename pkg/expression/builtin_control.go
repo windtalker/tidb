@@ -66,7 +66,7 @@ func maxlen(lhsFlen, rhsFlen int) int {
 	return max(lhsFlen, rhsFlen)
 }
 
-func setFlenFromArgs(evalType types.EvalType, resultFieldType *types.FieldType, argTps ...*types.FieldType) {
+func setFlenFromArgs(evalType types.EvalType, resultFieldType *types.FieldType, argTps ...*types.ImmutableFieldType) {
 	if evalType == types.ETDecimal || evalType == types.ETInt {
 		maxArgFlen := 0
 		for i := range argTps {
@@ -118,7 +118,7 @@ func setFlenFromArgs(evalType types.EvalType, resultFieldType *types.FieldType, 
 	}
 }
 
-func setDecimalFromArgs(evalType types.EvalType, resultFieldType *types.FieldType, argTps ...*types.FieldType) {
+func setDecimalFromArgs(evalType types.EvalType, resultFieldType *types.FieldType, argTps ...*types.ImmutableFieldType) {
 	if evalType == types.ETInt {
 		resultFieldType.SetDecimal(0)
 	} else {
@@ -135,12 +135,12 @@ func setDecimalFromArgs(evalType types.EvalType, resultFieldType *types.FieldTyp
 }
 
 // NonBinaryStr means the arg is a string but not binary string
-func hasNonBinaryStr(args []*types.FieldType) bool {
-	return slices.ContainsFunc(args, types.IsNonBinaryStr)
+func hasNonBinaryStr(args []*types.ImmutableFieldType) bool {
+	return slices.ContainsFunc(args, types.IsNonBinaryStrV2)
 }
 
-func hasBinaryStr(args []*types.FieldType) bool {
-	return slices.ContainsFunc(args, types.IsBinaryStr)
+func hasBinaryStr(args []*types.ImmutableFieldType) bool {
+	return slices.ContainsFunc(args, types.IsBinaryStrV2)
 }
 
 func addCollateAndCharsetAndFlagFromArgs(ctx BuildContext, funcName string, evalType types.EvalType, resultFieldType *types.FieldType, args ...Expression) error {
@@ -151,7 +151,7 @@ func addCollateAndCharsetAndFlagFromArgs(ctx BuildContext, funcName string, eval
 		}
 		lexp, rexp := args[0], args[1]
 		lhs, rhs := lexp.GetType(ctx.GetEvalCtx()), rexp.GetType(ctx.GetEvalCtx())
-		if types.IsNonBinaryStr(lhs) && !types.IsBinaryStr(rhs) {
+		if types.IsNonBinaryStrV2(lhs) && !types.IsBinaryStrV2(rhs) {
 			ec, err := CheckAndDeriveCollationFromExprs(ctx, funcName, evalType, lexp, rexp)
 			if err != nil {
 				return err
@@ -159,10 +159,10 @@ func addCollateAndCharsetAndFlagFromArgs(ctx BuildContext, funcName string, eval
 			resultFieldType.SetCollate(ec.Collation)
 			resultFieldType.SetCharset(ec.Charset)
 			resultFieldType.SetFlag(0)
-			if mysql.HasBinaryFlag(lhs.GetFlag()) || !types.IsNonBinaryStr(rhs) {
+			if mysql.HasBinaryFlag(lhs.GetFlag()) || !types.IsNonBinaryStrV2(rhs) {
 				resultFieldType.AddFlag(mysql.BinaryFlag)
 			}
-		} else if types.IsNonBinaryStr(rhs) && !types.IsBinaryStr(lhs) {
+		} else if types.IsNonBinaryStrV2(rhs) && !types.IsBinaryStrV2(lhs) {
 			ec, err := CheckAndDeriveCollationFromExprs(ctx, funcName, evalType, lexp, rexp)
 			if err != nil {
 				return err
@@ -170,10 +170,10 @@ func addCollateAndCharsetAndFlagFromArgs(ctx BuildContext, funcName string, eval
 			resultFieldType.SetCollate(ec.Collation)
 			resultFieldType.SetCharset(ec.Charset)
 			resultFieldType.SetFlag(0)
-			if mysql.HasBinaryFlag(rhs.GetFlag()) || !types.IsNonBinaryStr(lhs) {
+			if mysql.HasBinaryFlag(rhs.GetFlag()) || !types.IsNonBinaryStrV2(lhs) {
 				resultFieldType.AddFlag(mysql.BinaryFlag)
 			}
-		} else if types.IsBinaryStr(lhs) || types.IsBinaryStr(rhs) || !evalType.IsStringKind() {
+		} else if types.IsBinaryStrV2(lhs) || types.IsBinaryStrV2(rhs) || !evalType.IsStringKind() {
 			types.SetBinChsClnFlag(resultFieldType)
 		} else {
 			resultFieldType.SetCharset(mysql.DefaultCharset)
@@ -191,13 +191,13 @@ func addCollateAndCharsetAndFlagFromArgs(ctx BuildContext, funcName string, eval
 		resultFieldType.SetCollate(ec.Collation)
 		resultFieldType.SetCharset(ec.Charset)
 		for i := range args {
-			if mysql.HasBinaryFlag(args[i].GetType(ctx.GetEvalCtx()).GetFlag()) || !types.IsNonBinaryStr(args[i].GetType(ctx.GetEvalCtx())) {
+			if mysql.HasBinaryFlag(args[i].GetType(ctx.GetEvalCtx()).GetFlag()) || !types.IsNonBinaryStrV2(args[i].GetType(ctx.GetEvalCtx())) {
 				resultFieldType.AddFlag(mysql.BinaryFlag)
 				break
 			}
 		}
 	case ast.Coalesce: // TODO ast.Case and ast.Coalesce should be merged into the same branch
-		argTypes := make([]*types.FieldType, 0)
+		argTypes := make([]*types.ImmutableFieldType, 0)
 		for _, arg := range args {
 			argTypes = append(argTypes, arg.GetType(ctx.GetEvalCtx()))
 		}
@@ -244,8 +244,8 @@ func InferType4ControlFuncs(ctx BuildContext, funcName string, args ...Expressio
 	if argsNum == 0 {
 		panic("unexpected length 0 of args")
 	}
-	nullFields := make([]*types.FieldType, 0, argsNum)
-	notNullFields := make([]*types.FieldType, 0, argsNum)
+	nullFields := make([]*types.ImmutableFieldType, 0, argsNum)
+	notNullFields := make([]*types.ImmutableFieldType, 0, argsNum)
 	for i := range args {
 		if args[i].GetType(ctx.GetEvalCtx()).GetType() == mysql.TypeNull {
 			nullFields = append(nullFields, args[i].GetType(ctx.GetEvalCtx()))
@@ -255,7 +255,7 @@ func InferType4ControlFuncs(ctx BuildContext, funcName string, args ...Expressio
 	}
 	resultFieldType := &types.FieldType{}
 	if len(nullFields) == argsNum { // all field is TypeNull
-		*resultFieldType = *nullFields[0]
+		*resultFieldType = *(*types.FieldType)(nullFields[0])
 		// If any of arg is NULL, result type need unset NotNullFlag.
 		tempFlag := resultFieldType.GetFlag()
 		types.SetTypeFlag(&tempFlag, mysql.NotNullFlag, false)
@@ -267,7 +267,7 @@ func InferType4ControlFuncs(ctx BuildContext, funcName string, args ...Expressio
 		types.SetBinChsClnFlag(resultFieldType)
 	} else {
 		if len(notNullFields) == 1 {
-			*resultFieldType = *notNullFields[0]
+			*resultFieldType = *(*types.FieldType)(notNullFields[0])
 		} else {
 			resultFieldType = types.AggFieldType(notNullFields)
 			var tempFlag uint
@@ -343,7 +343,7 @@ func (c *caseWhenFunctionClass) getFunction(ctx BuildContext, args []Expression)
 		if args[i], err = wrapWithIsTrue(ctx, true, args[i], false); err != nil {
 			return nil, err
 		}
-		argTps = append(argTps, args[i].GetType(ctx.GetEvalCtx()), fieldTp.Clone())
+		argTps = append(argTps, (*types.FieldType)(args[i].GetType(ctx.GetEvalCtx())), fieldTp.Clone())
 	}
 	if l%2 == 1 {
 		argTps = append(argTps, fieldTp.Clone())

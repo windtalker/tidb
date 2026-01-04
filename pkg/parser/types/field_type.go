@@ -40,6 +40,8 @@ var (
 	TiDBStrictIntegerDisplayWidth bool
 )
 
+
+type ImmutableFieldType FieldType
 // FieldType records field type information.
 type FieldType struct {
 	// tp is type of the field
@@ -182,14 +184,27 @@ func (ft *FieldType) GetType() byte {
 	return ft.tp
 }
 
+// GetType returns the type of the FieldType.
+func (ft *ImmutableFieldType) GetType() byte {
+	return (*FieldType)(ft).GetType()
+}
+
 // GetFlag returns the flag of the FieldType.
 func (ft *FieldType) GetFlag() uint {
 	return ft.flag
+}
+// GetFlag returns the flag of the FieldType.
+func (ft *ImmutableFieldType) GetFlag() uint {
+	return (*FieldType)(ft).GetFlag()
 }
 
 // GetFlen returns the length of the field.
 func (ft *FieldType) GetFlen() int {
 	return ft.flen
+}
+// GetFlen returns the length of the field.
+func (ft *ImmutableFieldType) GetFlen() int {
+	return (*FieldType)(ft).GetFlen()
 }
 
 // GetDecimal returns the decimal of the FieldType.
@@ -197,19 +212,37 @@ func (ft *FieldType) GetDecimal() int {
 	return ft.decimal
 }
 
+// GetDecimal returns the decimal of the FieldType.
+func (ft *ImmutableFieldType) GetDecimal() int {
+	return (*FieldType)(ft).GetDecimal()
+}
+
 // GetCharset returns the field's charset
 func (ft *FieldType) GetCharset() string {
 	return ft.charset
 }
 
+// GetCharset returns the field's charset
+func (ft *ImmutableFieldType) GetCharset() string {
+	return (*FieldType)(ft).GetCharset()
+}
 // GetCollate returns the collation of the field.
 func (ft *FieldType) GetCollate() string {
 	return ft.collate
+}
+// GetCollate returns the collation of the field.
+func (ft *ImmutableFieldType) GetCollate() string {
+	return (*FieldType)(ft).GetCollate()
 }
 
 // GetElems returns the elements of the FieldType.
 func (ft *FieldType) GetElems() []string {
 	return ft.elems
+}
+
+// GetElems returns the elements of the FieldType.
+func (ft *ImmutableFieldType) GetElems() []string {
+	return (*FieldType)(ft).GetElems()
 }
 
 // SetType sets the type of the FieldType.
@@ -319,6 +352,11 @@ func (ft *FieldType) IsArray() bool {
 	return ft.array
 }
 
+// IsArray return true if the filed type is array.
+func (ft *ImmutableFieldType) IsArray() bool {
+	return (*FieldType)(ft).IsArray()
+}
+
 // ArrayType return the type of the array.
 func (ft *FieldType) ArrayType() *FieldType {
 	if !ft.array {
@@ -346,12 +384,22 @@ func (ft *FieldType) GetElem(idx int) string {
 	return ft.elems[idx]
 }
 
+// GetElem returns the element of the FieldType.
+func (ft *ImmutableFieldType) GetElem(idx int) string {
+	return (*FieldType)(ft).GetElem(idx)
+}
+
 // GetElemIsBinaryLit returns the binary literal flag of the element at index idx.
 func (ft *FieldType) GetElemIsBinaryLit(idx int) bool {
 	if len(ft.elemsIsBinaryLit) == 0 {
 		return false
 	}
 	return ft.elemsIsBinaryLit[idx]
+}
+
+// GetElemIsBinaryLit returns the binary literal flag of the element at index idx.
+func (ft *ImmutableFieldType) GetElemIsBinaryLit(idx int) bool {
+	return (*FieldType)(ft).GetElemIsBinaryLit(idx)
 }
 
 // CleanElemIsBinaryLit cleans the binary literal flag of the element at index idx.
@@ -364,6 +412,12 @@ func (ft *FieldType) CleanElemIsBinaryLit() {
 // Clone returns a copy of itself.
 func (ft *FieldType) Clone() *FieldType {
 	ret := *ft
+	return &ret
+}
+
+// Clone returns a copy of itself.
+func (ft *ImmutableFieldType) Clone() *FieldType {
+	ret := *((*FieldType)(ft))
 	return &ret
 }
 
@@ -387,6 +441,10 @@ func (ft *FieldType) Equal(other *FieldType) bool {
 		return false
 	}
 	return slices.Equal(ft.elems, other.elems)
+}
+
+func (ft *ImmutableFieldType) Equal(other *ImmutableFieldType) bool {
+	return (*FieldType)(ft).Equal((*FieldType)(other))
 }
 
 // PartialEqual checks whether two FieldType objects are equal. Please use this function with caution.
@@ -413,6 +471,9 @@ func (ft *FieldType) PartialEqual(other *FieldType, unsafe bool) bool {
 	return true
 }
 
+func (ft *ImmutableFieldType) EvalType() EvalType {
+	return (*FieldType)(ft).EvalType()
+}
 // EvalType gets the type in evaluation.
 func (ft *FieldType) EvalType() EvalType {
 	switch ft.GetType() {
@@ -444,6 +505,10 @@ func (ft *FieldType) EvalType() EvalType {
 // Hybrid checks whether a type is a hybrid type, which can represent different types of value in specific context.
 func (ft *FieldType) Hybrid() bool {
 	return ft.GetType() == mysql.TypeEnum || ft.GetType() == mysql.TypeBit || ft.GetType() == mysql.TypeSet
+}
+
+func (ft *ImmutableFieldType) Hybrid() bool {
+	return (*FieldType)(ft).Hybrid()
 }
 
 // Init initializes the FieldType data.

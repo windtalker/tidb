@@ -83,19 +83,19 @@ type Column struct {
 
 // ColumnAllocator defines an allocator for Column.
 type ColumnAllocator interface {
-	NewColumn(ft *types.FieldType, count int) *Column
+	NewColumn(ft *types.ImmutableFieldType, count int) *Column
 }
 
 // DefaultColumnAllocator is the default implementation of ColumnAllocator.
 type DefaultColumnAllocator struct{}
 
 // NewColumn implements the ColumnAllocator interface.
-func (DefaultColumnAllocator) NewColumn(ft *types.FieldType, capacity int) *Column {
+func (DefaultColumnAllocator) NewColumn(ft *types.ImmutableFieldType, capacity int) *Column {
 	return newColumn(getFixedLen(ft), capacity)
 }
 
 // NewEmptyColumn creates a new column with nothing.
-func NewEmptyColumn(ft *types.FieldType) *Column {
+func NewEmptyColumn(ft *types.ImmutableFieldType) *Column {
 	elemLen := getFixedLen(ft)
 	col := Column{}
 	if elemLen != VarElemLen {
@@ -107,7 +107,7 @@ func NewEmptyColumn(ft *types.FieldType) *Column {
 }
 
 // NewColumn creates a new column with the specific type and capacity.
-func NewColumn(ft *types.FieldType, capacity int) *Column {
+func NewColumn(ft *types.ImmutableFieldType, capacity int) *Column {
 	return newColumn(getFixedLen(ft), capacity)
 }
 

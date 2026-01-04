@@ -1191,7 +1191,7 @@ func (b *builtinSetTimeVarSig) evalTime(ctx EvalContext, row chunk.Row) (types.T
 }
 
 // BuildGetVarFunction builds a GetVar ScalarFunction from the Expression.
-func BuildGetVarFunction(ctx BuildContext, expr Expression, retType *types.FieldType) (Expression, error) {
+func BuildGetVarFunction(ctx BuildContext, expr Expression, retType *types.ImmutableFieldType) (Expression, error) {
 	var fc functionClass
 	switch retType.EvalType() {
 	case types.ETInt:
@@ -1209,12 +1209,13 @@ func BuildGetVarFunction(ctx BuildContext, expr Expression, retType *types.Field
 	if err != nil {
 		return nil, err
 	}
-	if builtinRetTp := f.getRetTp(); builtinRetTp.GetType() != mysql.TypeUnspecified || retType.GetType() == mysql.TypeUnspecified {
-		retType = builtinRetTp
+	builtinRetTp := f.getRetTp()
+	if builtinRetTp.GetType() == mysql.TypeUnspecified {
+		return nil, errors.New("cannot determine the return type of GetVar function")
 	}
 	sf := &ScalarFunction{
 		FuncName: ast.NewCIStr(ast.GetVar),
-		RetType:  retType,
+		RetType:  builtinRetTp,
 		Function: f,
 	}
 	return convertReadonlyVarToConst(ctx, sf), nil
@@ -1250,7 +1251,7 @@ func convertReadonlyVarToConst(ctx BuildContext, getVar *ScalarFunction) Express
 type getVarFunctionClass struct {
 	baseFunctionClass
 
-	tp *types.FieldType
+	tp *types.ImmutableFieldType
 }
 
 type getStringVarFunctionClass struct {

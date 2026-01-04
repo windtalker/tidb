@@ -39,12 +39,15 @@ func init() {
 // FoldConstant does constant folding optimization on an expression excluding deferred ones.
 func FoldConstant(ctx BuildContext, expr Expression) Expression {
 	e, _ := foldConstant(ctx, expr)
+	if e == expr {
+		return e
+	}
 	// keep the original coercibility, charset, collation and repertoire values after folding
 	e.SetCoercibility(expr.Coercibility())
 
 	charset, collate := expr.GetType(ctx.GetEvalCtx()).GetCharset(), expr.GetType(ctx.GetEvalCtx()).GetCollate()
-	e.GetType(ctx.GetEvalCtx()).SetCharset(charset)
-	e.GetType(ctx.GetEvalCtx()).SetCollate(collate)
+	e.GetMutableType(ctx.GetEvalCtx()).SetCharset(charset)
+	e.GetMutableType(ctx.GetEvalCtx()).SetCollate(collate)
 	e.SetRepertoire(expr.Repertoire())
 	return e
 }
@@ -106,8 +109,8 @@ func ifNullFoldHandler(ctx BuildContext, expr *ScalarFunction) (Expression, bool
 			// See https://github.com/pingcap/tidb/issues/51765. If the first argument can
 			// be folded into NULL, the collation of IFNULL should be the same as the second
 			// arguments.
-			expr.GetType(ctx.GetEvalCtx()).SetCharset(args[1].GetType(ctx.GetEvalCtx()).GetCharset())
-			expr.GetType(ctx.GetEvalCtx()).SetCollate(args[1].GetType(ctx.GetEvalCtx()).GetCollate())
+			expr.GetMutableType(ctx.GetEvalCtx()).SetCharset(args[1].GetType(ctx.GetEvalCtx()).GetCharset())
+			expr.GetMutableType(ctx.GetEvalCtx()).SetCollate(args[1].GetType(ctx.GetEvalCtx()).GetCollate())
 
 			return foldedExpr, isConstant
 		}
@@ -138,7 +141,7 @@ func caseWhenHandler(ctx BuildContext, expr *ScalarFunction) (Expression, bool) 
 			foldedExpr, isDeferred := foldConstant(ctx, args[i+1])
 			isDeferredConst = isDeferredConst || isDeferred
 			if _, isConst := foldedExpr.(*Constant); isConst {
-				foldedExpr.GetType(ctx.GetEvalCtx()).SetDecimal(expr.GetType(ctx.GetEvalCtx()).GetDecimal())
+				foldedExpr.GetMutableType(ctx.GetEvalCtx()).SetDecimal(expr.GetType(ctx.GetEvalCtx()).GetDecimal())
 				return foldedExpr, isDeferredConst
 			}
 			return foldedExpr, isDeferredConst
@@ -151,7 +154,7 @@ func caseWhenHandler(ctx BuildContext, expr *ScalarFunction) (Expression, bool) 
 		foldedExpr, isDeferred := foldConstant(ctx, args[l-1])
 		isDeferredConst = isDeferredConst || isDeferred
 		if _, isConst := foldedExpr.(*Constant); isConst {
-			foldedExpr.GetType(ctx.GetEvalCtx()).SetDecimal(expr.GetType(ctx.GetEvalCtx()).GetDecimal())
+			foldedExpr.GetMutableType(ctx.GetEvalCtx()).SetDecimal(expr.GetType(ctx.GetEvalCtx()).GetDecimal())
 			return foldedExpr, isDeferredConst
 		}
 		return foldedExpr, isDeferredConst

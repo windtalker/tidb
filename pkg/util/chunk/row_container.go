@@ -97,7 +97,7 @@ type RowContainer struct {
 }
 
 // NewRowContainer creates a new RowContainer in memory.
-func NewRowContainer(fieldType []*types.FieldType, chunkSize int) *RowContainer {
+func NewRowContainer(fieldType []*types.ImmutableFieldType, chunkSize int) *RowContainer {
 	li := NewList(fieldType, chunkSize, chunkSize)
 	rc := &RowContainer{
 		m: &mutexForRowContainer{
@@ -513,7 +513,7 @@ type SortedRowContainer struct {
 }
 
 // NewSortedRowContainer creates a new SortedRowContainer in memory.
-func NewSortedRowContainer(fieldType []*types.FieldType, chunkSize int, byItemsDesc []bool,
+func NewSortedRowContainer(fieldType []*types.ImmutableFieldType, chunkSize int, byItemsDesc []bool,
 	keyColumns []int, keyCmpFuncs []CompareFunc) *SortedRowContainer {
 	src := SortedRowContainer{RowContainer: NewRowContainer(fieldType, chunkSize),
 		ByItemsDesc: byItemsDesc, keyColumns: keyColumns, keyCmpFuncs: keyCmpFuncs}

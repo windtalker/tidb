@@ -24,7 +24,7 @@ import (
 
 // List holds a slice of chunks, use to append rows with max chunk size properly handled.
 type List struct {
-	fieldTypes    []*types.FieldType
+	fieldTypes    []*types.ImmutableFieldType
 	initChunkSize int
 	maxChunkSize  int
 	length        int
@@ -46,7 +46,7 @@ type RowPtr struct {
 }
 
 // NewListWithMemTracker creates a new List with field types, init chunk size, max chunk size and memory tracker.
-func NewListWithMemTracker(fieldTypes []*types.FieldType, initChunkSize, maxChunkSize int, tracker *memory.Tracker) *List {
+func NewListWithMemTracker(fieldTypes []*types.ImmutableFieldType, initChunkSize, maxChunkSize int, tracker *memory.Tracker) *List {
 	l := &List{
 		fieldTypes:    fieldTypes,
 		initChunkSize: initChunkSize,
@@ -58,7 +58,7 @@ func NewListWithMemTracker(fieldTypes []*types.FieldType, initChunkSize, maxChun
 }
 
 // NewList creates a new List with field types, init chunk size and max chunk size.
-func NewList(fieldTypes []*types.FieldType, initChunkSize, maxChunkSize int) *List {
+func NewList(fieldTypes []*types.ImmutableFieldType, initChunkSize, maxChunkSize int) *List {
 	return NewListWithMemTracker(fieldTypes, initChunkSize, maxChunkSize, memory.NewTracker(memory.LabelForChunkList, -1))
 }
 
@@ -78,7 +78,7 @@ func (l *List) NumChunks() int {
 }
 
 // FieldTypes returns the fieldTypes of the list
-func (l *List) FieldTypes() []*types.FieldType {
+func (l *List) FieldTypes() []*types.ImmutableFieldType {
 	return l.fieldTypes
 }
 

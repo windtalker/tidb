@@ -364,7 +364,7 @@ func (c *castAsStringFunctionClass) getFunction(ctx BuildContext, args []Express
 	return sig, nil
 }
 
-func adjustRetFtForCastString(retFt, argFt *types.FieldType) {
+func adjustRetFtForCastString(retFt *types.FieldType, argFt *types.ImmutableFieldType) {
 	originalFlen := retFt.GetFlen()
 
 	// Only estimate the length for variable length string types, because different length for fixed
@@ -1262,7 +1262,7 @@ func (b *builtinCastStringAsJSONSig) evalJSON(ctx EvalContext, row chunk.Row) (r
 	}
 
 	typ := b.args[0].GetType(ctx)
-	if types.IsBinaryStr(typ) {
+	if types.IsBinaryStrV2(typ) {
 		buf := []byte(val)
 		if typ.GetType() == mysql.TypeString && typ.GetFlen() > 0 {
 			// the tailing zero should also be in the opaque json
@@ -2913,7 +2913,7 @@ func TryPushCastIntoControlFunctionForHybridType(ctx BuildContext, expr Expressi
 		return expr
 	}
 
-	isHybrid := func(ft *types.FieldType) bool {
+	isHybrid := func(ft *types.ImmutableFieldType) bool {
 		// todo: compatible with mysql control function using bit type. issue 24725
 		return ft.Hybrid() && ft.GetType() != mysql.TypeBit
 	}
@@ -2979,7 +2979,7 @@ func TryPushCastIntoControlFunctionForHybridType(ctx BuildContext, expr Expressi
 	return expr
 }
 
-func decimalPrecisionToLength(ft *types.FieldType) int {
+func decimalPrecisionToLength(ft *types.ImmutableFieldType) int {
 	precision := ft.GetFlen()
 	scale := ft.GetDecimal()
 	unsigned := mysql.HasUnsignedFlag(ft.GetFlag())

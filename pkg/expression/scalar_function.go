@@ -170,7 +170,7 @@ func typeInferForNull(ctx EvalContext, args []Expression) {
 		return ok && cons.RetType.GetType() == mysql.TypeNull && cons.Value.IsNull()
 	}
 	// Infer the actual field type of the NULL constant.
-	var retFieldTp *types.FieldType
+	var retFieldTp *types.ImmutableFieldType
 	var hasNullArg bool
 	for i := len(args) - 1; i >= 0; i-- {
 		isNullArg := isNull(args[i])
@@ -188,10 +188,10 @@ func typeInferForNull(ctx EvalContext, args []Expression) {
 	}
 	for i, arg := range args {
 		argflags := arg.GetType(ctx)
-		if isNull(arg) && !(argflags.Equals(retFieldTp) && mysql.HasNotNullFlag(retFieldTp.GetFlag())) {
+		if isNull(arg) && !((*types.FieldType)(argflags).Equals((*types.FieldType)(retFieldTp)) && mysql.HasNotNullFlag(retFieldTp.GetFlag())) {
 			newarg := arg.Clone()
-			*newarg.GetType(ctx) = *retFieldTp.Clone()
-			newarg.GetType(ctx).DelFlag(mysql.NotNullFlag) // Remove NotNullFlag of NullConst
+			*newarg.GetMutableType(ctx) = *((*types.FieldType)(retFieldTp).Clone())
+			newarg.GetMutableType(ctx).DelFlag(mysql.NotNullFlag) // Remove NotNullFlag of NullConst
 			args[i] = newarg
 		}
 	}
@@ -200,7 +200,7 @@ func typeInferForNull(ctx EvalContext, args []Expression) {
 // newFunctionImpl creates a new scalar function or constant.
 // fold: 1 means folding constants, while 0 means not,
 // -1 means try to fold constants if without errors/warnings, otherwise not.
-func newFunctionImpl(ctx BuildContext, fold int, funcName string, retType *types.FieldType, checkOrInit ScalarFunctionCallBack, args ...Expression) (ret Expression, err error) {
+func newFunctionImpl(ctx BuildContext, fold int, funcName string, retType *types.ImmutableFieldType, checkOrInit ScalarFunctionCallBack, args ...Expression) (ret Expression, err error) {
 	if retType == nil {
 		return nil, errors.Errorf("RetType cannot be nil for ScalarFunction")
 	}
@@ -260,12 +260,13 @@ func newFunctionImpl(ctx BuildContext, fold int, funcName string, retType *types
 	if err != nil {
 		return nil, err
 	}
-	if builtinRetTp := f.getRetTp(); builtinRetTp.GetType() != mysql.TypeUnspecified || retType.GetType() == mysql.TypeUnspecified {
-		retType = builtinRetTp
+	builtinRetTp := f.getRetTp()
+	if builtinRetTp.GetType() == mysql.TypeUnspecified {
+		return nil, errors.New("no valid return type")
 	}
 	sf := &ScalarFunction{
 		FuncName: ast.NewCIStr(funcName),
-		RetType:  retType,
+		RetType:  builtinRetTp,
 		Function: f,
 	}
 	if checkOrInit != nil {
@@ -364,7 +365,12 @@ func (sf *ScalarFunction) Clone() Expression {
 }
 
 // GetType implements Expression interface.
-func (sf *ScalarFunction) GetType(_ EvalContext) *types.FieldType {
+func (sf *ScalarFunction) GetType(_ EvalContext) *types.ImmutableFieldType {
+	return (*types.ImmutableFieldType)(sf.GetStaticType())
+}
+
+// GetType implements Expression interface.
+func (sf *ScalarFunction) GetMutableType(_ EvalContext) *types.FieldType {
 	return sf.GetStaticType()
 }
 

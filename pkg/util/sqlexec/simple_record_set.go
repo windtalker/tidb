@@ -53,9 +53,9 @@ func (r *SimpleRecordSet) Next(_ context.Context, req *chunk.Chunk) error {
 
 // NewChunk implements the sqlexec.RecordSet interface.
 func (r *SimpleRecordSet) NewChunk(alloc chunk.Allocator) *chunk.Chunk {
-	fields := make([]*types.FieldType, 0, len(r.ResultFields))
+	fields := make([]*types.ImmutableFieldType, 0, len(r.ResultFields))
 	for _, field := range r.ResultFields {
-		fields = append(fields, &field.Column.FieldType)
+		fields = append(fields, (*types.ImmutableFieldType)(&field.Column.FieldType))
 	}
 	if alloc != nil {
 		return alloc.Alloc(fields, 0, r.MaxChunkSize)

@@ -1256,7 +1256,7 @@ func (c *nameConstFunctionClass) getFunction(ctx BuildContext, args []Expression
 	if err != nil {
 		return nil, err
 	}
-	*bf.tp = *args[1].GetType(ctx.GetEvalCtx())
+	*bf.tp = *(*types.FieldType)(args[1].GetType(ctx.GetEvalCtx()))
 	var sig builtinFunc
 	switch argTp {
 	case types.ETDecimal:

@@ -473,7 +473,11 @@ func (col *Column) string(redact string) string {
 }
 
 // GetType implements Expression interface.
-func (col *Column) GetType(_ EvalContext) *types.FieldType {
+func (col *Column) GetType(_ EvalContext) *types.ImmutableFieldType {
+	return (*types.ImmutableFieldType)(col.GetStaticType())
+}
+// GetMutableType implements Expression interface.
+func (col *Column) GetMutableType(_ EvalContext) *types.FieldType {
 	return col.GetStaticType()
 }
 

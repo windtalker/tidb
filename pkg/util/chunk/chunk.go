@@ -60,7 +60,7 @@ const (
 )
 
 // NewEmptyChunk creates an empty chunk
-func NewEmptyChunk(fields []*types.FieldType) *Chunk {
+func NewEmptyChunk(fields []*types.ImmutableFieldType) *Chunk {
 	chk := &Chunk{
 		columns: make([]*Column, 0, len(fields)),
 	}
@@ -72,12 +72,12 @@ func NewEmptyChunk(fields []*types.FieldType) *Chunk {
 }
 
 // NewChunkWithCapacity creates a new chunk with field types and capacity.
-func NewChunkWithCapacity(fields []*types.FieldType, capacity int) *Chunk {
+func NewChunkWithCapacity(fields []*types.ImmutableFieldType, capacity int) *Chunk {
 	return New(fields, capacity, capacity)
 }
 
 // NewChunkFromPoolWithCapacity creates a new chunk with field types and capacity from the pool.
-func NewChunkFromPoolWithCapacity(fields []*types.FieldType, initCap int) *Chunk {
+func NewChunkFromPoolWithCapacity(fields []*types.ImmutableFieldType, initCap int) *Chunk {
 	return getChunkFromPool(initCap, fields)
 }
 
@@ -85,7 +85,7 @@ func NewChunkFromPoolWithCapacity(fields []*types.FieldType, initCap int) *Chunk
 //
 //	cap: the limit for the max number of rows.
 //	maxChunkSize: the max limit for the number of rows.
-func New(fields []*types.FieldType, capacity, maxChunkSize int) *Chunk {
+func New(fields []*types.ImmutableFieldType, capacity, maxChunkSize int) *Chunk {
 	chk := &Chunk{
 		columns:  make([]*Column, 0, len(fields)),
 		capacity: min(capacity, maxChunkSize),
@@ -754,6 +754,6 @@ func (c *Chunk) AppendPartialRows(colOff int, rows []Row) {
 }
 
 // Destroy is to destroy the Chunk and put Chunk into the pool
-func (c *Chunk) Destroy(initCap int, fields []*types.FieldType) {
+func (c *Chunk) Destroy(initCap int, fields []*types.ImmutableFieldType) {
 	putChunkFromPool(initCap, fields, c)
 }

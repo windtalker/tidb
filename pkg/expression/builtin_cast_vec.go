@@ -844,7 +844,7 @@ func (b *builtinCastStringAsJSONSig) vecEvalJSON(ctx EvalContext, input *chunk.C
 
 	result.ReserveJSON(n)
 	typ := b.args[0].GetType(ctx)
-	if types.IsBinaryStr(typ) {
+	if types.IsBinaryStrV2(typ) {
 		var res types.BinaryJSON
 		for i := range n {
 			if buf.IsNull(i) {

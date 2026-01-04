@@ -30,7 +30,7 @@ import (
 // DataInDiskByRows represents some data stored in temporary disk.
 // These data are stored in row format, so they can only be restored by rows.
 type DataInDiskByRows struct {
-	fieldTypes                []*types.FieldType
+	fieldTypes                []*types.ImmutableFieldType
 	numRowsOfEachChunk        []int
 	rowNumOfEachChunkFirstRow []int
 	totalNumRows              int
@@ -44,7 +44,7 @@ var defaultChunkDataInDiskByRowsPath = "chunk.DataInDiskByRows"
 var defaultChunkDataInDiskByRowsOffsetPath = "chunk.DataInDiskByRowsOffset"
 
 // NewDataInDiskByRows creates a new DataInDiskByRows with field types.
-func NewDataInDiskByRows(fieldTypes []*types.FieldType) *DataInDiskByRows {
+func NewDataInDiskByRows(fieldTypes []*types.ImmutableFieldType) *DataInDiskByRows {
 	l := &DataInDiskByRows{
 		fieldTypes: fieldTypes,
 		// TODO(fengliyuan): set the quota of disk usage.
@@ -352,7 +352,7 @@ func convertFromRow(row Row, reuse *diskFormatRow) (format *diskFormatRow) {
 }
 
 // toRow deserializes diskFormatRow to Row.
-func (format *diskFormatRow) toRow(fields []*types.FieldType, chk *Chunk) (Row, *Chunk) {
+func (format *diskFormatRow) toRow(fields []*types.ImmutableFieldType, chk *Chunk) (Row, *Chunk) {
 	if chk == nil || chk.IsFull() {
 		chk = NewChunkWithCapacity(fields, 1024)
 	}

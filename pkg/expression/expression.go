@@ -211,7 +211,10 @@ type Expression interface {
 	EvalVectorFloat32(ctx EvalContext, row chunk.Row) (val types.VectorFloat32, isNull bool, err error)
 
 	// GetType gets the type that the expression returns.
-	GetType(ctx EvalContext) *types.FieldType
+	GetType(ctx EvalContext) *types.ImmutableFieldType
+
+	// GetType gets the type that the expression returns.
+	GetMutableType(ctx EvalContext) *types.FieldType
 
 	// Clone copies an expression totally.
 	Clone() Expression
@@ -493,7 +496,7 @@ func VecEvalBool(ctx EvalContext, vecEnabled bool, exprList CNFExprs, input *chu
 	return selected, nulls, nil
 }
 
-func toBool(tc types.Context, tp *types.FieldType, eType types.EvalType, buf *chunk.Column, sel []int, isZero []int8) error {
+func toBool(tc types.Context, tp *types.ImmutableFieldType, eType types.EvalType, buf *chunk.Column, sel []int, isZero []int8) error {
 	switch eType {
 	case types.ETInt:
 		i64s := buf.Int64s()
@@ -1277,8 +1280,8 @@ func PropagateType(ctx EvalContext, evalType types.EvalType, args ...Expression)
 					}
 				}
 			}
-			args[0].GetType(ctx).SetFlenUnderLimit(newFlen)
-			args[0].GetType(ctx).SetDecimalUnderLimit(newDecimal)
+			args[0].GetMutableType(ctx).SetFlenUnderLimit(newFlen)
+			args[0].GetMutableType(ctx).SetDecimalUnderLimit(newDecimal)
 		}
 	}
 }

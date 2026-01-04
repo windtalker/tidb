@@ -711,7 +711,7 @@ func (b *builtinConvertSig) vecEvalString(ctx EvalContext, input *chunk.Chunk, r
 	}
 	argTp, resultTp := b.args[0].GetType(ctx), b.tp
 	result.ReserveString(n)
-	done := vecEvalStringConvertBinary(result, n, expr, argTp, resultTp)
+	done := vecEvalStringConvertBinary(result, n, expr, argTp, (*types.ImmutableFieldType)(resultTp))
 	if done {
 		return nil
 	}
@@ -734,13 +734,13 @@ func (b *builtinConvertSig) vecEvalString(ctx EvalContext, input *chunk.Chunk, r
 }
 
 func vecEvalStringConvertBinary(result *chunk.Column, n int, expr *chunk.Column,
-	argTp, resultTp *types.FieldType) (done bool) {
+	argTp, resultTp *types.ImmutableFieldType) (done bool) {
 	var chs string
 	var op charset.Op
-	if types.IsBinaryStr(argTp) {
+	if types.IsBinaryStrV2(argTp) {
 		chs = resultTp.GetCharset()
 		op = charset.OpDecode
-	} else if types.IsBinaryStr(resultTp) {
+	} else if types.IsBinaryStrV2(resultTp) {
 		chs = argTp.GetCharset()
 		op = charset.OpEncode
 	} else {

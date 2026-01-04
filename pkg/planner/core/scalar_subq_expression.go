@@ -152,8 +152,8 @@ func (*ScalarSubQueryExpr) EvalJSON(_ expression.EvalContext, _ chunk.Row) (val 
 }
 
 // GetType implements the Expression interface.
-func (s *ScalarSubQueryExpr) GetType(_ expression.EvalContext) *types.FieldType {
-	return s.RetType
+func (s *ScalarSubQueryExpr) GetType(_ expression.EvalContext) *types.ImmutableFieldType {
+	return (*types.ImmutableFieldType)(s.RetType)
 }
 
 // Clone copies an expression totally.
