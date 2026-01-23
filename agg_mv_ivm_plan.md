@@ -23,6 +23,7 @@
    - MV log 物理上是普通 TiDB 表，包含 `op` 列（`I/D`）与必要投影列。
 3. **MV table**
    - 目标物化视图表，用于应用增量结果。
+   - **列顺序需与 MV 创建 query 的输出顺序一致**（执行器按顺序做映射）。
 
 说明：在单表聚合场景下，query 已隐含基表与聚合元信息，因此不强制要求额外的 MV 元信息输入。MV log 物理上是普通表，但需要约定规范 schema 作为 IVM 的输入契约（包含 `op`、主键与必要投影列）。
 
@@ -99,6 +100,30 @@ GROUP BY G
 - `SUM(x)` -> `SUM(IF(op='I', x, -x))`
 
 其中 `count_expr(x)` 复用现有 `COUNT` 的 NULL 处理语义。
+
+### 3.6 MIN/MAX 的可行增量策略（允许多余回表）
+
+在不引入 `min_count` 或辅助结构的情况下，可使用“安全但可能回表”的策略：
+
+以 MIN 为例，定义：
+
+- `old_min`：MV 表当前最小值
+- `insert_min`：本批 INSERT 记录的最小值（无增量则为 NULL）
+- `delete_min`：本批 DELETE 记录的最小值（无增量则为 NULL）
+
+规则：
+
+1. `old_min` 为 NULL：
+   - `insert_min` 为 NULL → `new_min = NULL`
+   - 否则 → `new_min = insert_min`
+2. `old_min` 非 NULL：
+   - `insert_min` 非 NULL 且 `insert_min < old_min` → `new_min = insert_min`
+   - 否则：
+     - `delete_min` 为 NULL → `new_min = old_min`
+     - `delete_min > old_min` → `new_min = old_min`
+     - `delete_min <= old_min` → 回表重算 `new_min`
+
+说明：该策略在信息不足时宁可回表，保证结果 100% 正确。
 
 ## 4. 增量计划生成流程
 
@@ -200,12 +225,20 @@ GenerateDeltaPlan(
 ```
 LogicalMVApplyDelta(
   TargetTable, TargetInfo, TargetDBName,
-  GroupByItems, AggFuncs, OpColumnName
+  GroupByItems, AggFuncs, OpColumnName,
+  GroupKeyTargetColIDs, AggMappings
 )
   └── <delta logical plan>
 ```
 
 该算子负责把增量结果合并回 MV 表，执行器可基于其元信息做 merge/upsert 和 drop empty。
+
+`AggMappings` 按 MV 输出列顺序构建，不依赖列命名规则：
+
+- 输出列 i 对应 MV 表列 i
+- 通过 `agg.Schema()` 定位该列对应的聚合函数
+- `first_row` 视为 group key
+- `min/max` 通过同一 MV 列上的两次 agg（insert/delete）配对
 
 ## 9. 示例：逻辑计划到增量计划
 

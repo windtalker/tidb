@@ -7334,10 +7334,14 @@ func (b *PlanBuilder) GenerateDeltaPlan(ctx context.Context, queryText string, m
 	if err != nil {
 		return nil, err
 	}
+	plan, err = plan.PruneColumns(plan.Schema().Columns)
+	if err != nil {
+		return nil, err
+	}
 	if err := validateDeltaPlanSupport(plan, mvLogSchema); err != nil {
 		return nil, err
 	}
-	return rewriteToDeltaPlan(plan, mvLog, mvLogSchema, mvTable)
+	return b.rewriteToDeltaPlan(ctx, plan, mvLog, mvLogSchema, mvTable)
 }
 
 func validateDeltaPlanSupport(plan base.LogicalPlan, mvLogSchema *expression.Schema) error {
@@ -7358,24 +7362,31 @@ func validateDeltaPlanSupport(plan base.LogicalPlan, mvLogSchema *expression.Sch
 	if state.dataSourceCount > 1 {
 		return errors.New("mv query must read from exactly one base table")
 	}
+	if state.hasMinMaxAgg && state.hasNonColumnProjection {
+		return errors.New("min/max aggregation does not support non-column projection in mv delta plan")
+	}
 	return nil
 }
 
-func rewriteToDeltaPlan(plan base.LogicalPlan, mvLog table.Table, mvLogSchema *expression.Schema, mvTable table.Table) (base.LogicalPlan, error) {
+func (b *PlanBuilder) rewriteToDeltaPlan(ctx context.Context, plan base.LogicalPlan, mvLog table.Table, mvLogSchema *expression.Schema, mvTable table.Table) (base.LogicalPlan, error) {
 	if plan == nil || mvLog == nil || mvLogSchema == nil || mvTable == nil {
 		return nil, errors.New("invalid delta plan input")
 	}
-	dataSource := findFirstDataSource(plan)
-	if dataSource == nil {
+	oldDataSource := findFirstDataSource(plan)
+	if oldDataSource == nil {
 		return nil, errors.New("mv query must read from exactly one base table")
 	}
-	replace, err := buildColumnReplaceMap(dataSource.Schema(), mvLogSchema)
+	newDataSource, err := b.buildMVLogDataSource(ctx, mvLog, oldDataSource)
+	if err != nil {
+		return nil, err
+	}
+	plan = replaceDataSourceInPlan(plan, oldDataSource, newDataSource)
+	replace, err := buildColumnReplaceMap(oldDataSource.Schema(), newDataSource.Schema())
 	if err != nil {
 		return nil, err
 	}
 	replaceExprColumnsInPlan(plan, replace)
 	replaceColumnsInPlanSchemas(plan, replace)
-	replaceDataSourceWithMVLog(dataSource, mvLog, mvLogSchema)
 	aggNode := findAggregationNode(plan)
 	if aggNode == nil {
 		return nil, errors.New("mv query must contain aggregation")
@@ -7383,13 +7394,22 @@ func rewriteToDeltaPlan(plan base.LogicalPlan, mvLog table.Table, mvLogSchema *e
 	if err := rewriteAggToDelta(plan); err != nil {
 		return nil, err
 	}
+	if hasMinMaxAgg(aggNode.AggFuncs) {
+		plan = stripColumnProjection(plan)
+	}
+	groupKeyIDs, aggMappings, err := buildMVApplyMappings(plan, aggNode, mvTable)
+	if err != nil {
+		return nil, err
+	}
 	apply := logicalop.LogicalMVApplyDelta{
-		TargetTable:  mvTable,
-		TargetInfo:   mvTable.Meta(),
-		TargetDBName: dataSource.DBName,
-		GroupByItems: aggNode.GroupByItems,
-		AggFuncs:     aggNode.AggFuncs,
-		OpColumnName: "op",
+		TargetTable:          mvTable,
+		TargetInfo:           mvTable.Meta(),
+		TargetDBName:         oldDataSource.DBName,
+		GroupByItems:         aggNode.GroupByItems,
+		AggFuncs:             aggNode.AggFuncs,
+		OpColumnName:         "op",
+		GroupKeyTargetColIDs: groupKeyIDs,
+		AggMappings:          aggMappings,
 	}.Init(plan.SCtx(), plan.QueryBlockOffset())
 	apply.SetChildren(plan)
 	apply.SetSchema(plan.Schema().Clone())
@@ -7398,15 +7418,21 @@ func rewriteToDeltaPlan(plan base.LogicalPlan, mvLog table.Table, mvLogSchema *e
 }
 
 type deltaPlanValidateState struct {
-	aggCount        int
-	dataSourceCount int
-	hasTableDual    bool
+	aggCount               int
+	dataSourceCount        int
+	hasTableDual           bool
+	hasProjection          bool
+	hasMinMaxAgg           bool
+	hasNonColumnProjection bool
 }
 
 func validateDeltaPlanNode(plan base.LogicalPlan, mvLogColumnNames map[string]struct{}, state *deltaPlanValidateState) error {
 	switch p := plan.(type) {
 	case *logicalop.LogicalAggregation:
 		state.aggCount++
+		if hasMinMaxAgg(p.AggFuncs) {
+			state.hasMinMaxAgg = true
+		}
 		if err := validateAggFuncs(p.AggFuncs); err != nil {
 			return err
 		}
@@ -7429,6 +7455,10 @@ func validateDeltaPlanNode(plan base.LogicalPlan, mvLogColumnNames map[string]st
 			}
 		}
 	case *logicalop.LogicalProjection:
+		state.hasProjection = true
+		if !isColumnProjection(p) {
+			state.hasNonColumnProjection = true
+		}
 		// Projection is allowed. Expressions are validated via selection/aggregation checks.
 	case *logicalop.DataSource:
 		state.dataSourceCount++
@@ -7456,11 +7486,22 @@ func validateAggFuncs(aggs []*aggregation.AggFuncDesc) error {
 		}
 		switch agg.Name {
 		case ast.AggFuncCount, ast.AggFuncSum, ast.AggFuncAvg:
+		case ast.AggFuncFirstRow:
+		case ast.AggFuncMin, ast.AggFuncMax:
 		default:
 			return errors.Errorf("unsupported aggregation function: %s", agg.Name)
 		}
 	}
 	return nil
+}
+
+func hasMinMaxAgg(aggs []*aggregation.AggFuncDesc) bool {
+	for _, agg := range aggs {
+		if agg.Name == ast.AggFuncMin || agg.Name == ast.AggFuncMax {
+			return true
+		}
+	}
+	return false
 }
 
 func validateExprColumnsInMVLog(expr expression.Expression, mvLogColumnNames map[string]struct{}, context string) error {
@@ -7469,6 +7510,9 @@ func validateExprColumnsInMVLog(expr expression.Expression, mvLogColumnNames map
 	}
 	cols := expression.ExtractColumns(expr)
 	for _, col := range cols {
+		if isInternalHandleColumn(col) {
+			continue
+		}
 		name := normalizeColumnName(col.OrigName)
 		if name == "" {
 			return errors.Errorf("empty column name in %s", context)
@@ -7576,6 +7620,8 @@ func rewriteAggToDelta(plan base.LogicalPlan) error {
 		}
 		ctx := p.SCtx().GetExprCtx()
 		newAggs := make([]*aggregation.AggFuncDesc, 0, len(p.AggFuncs))
+		extraAggs := make([]*aggregation.AggFuncDesc, 0)
+		gbyCols := expression.ExtractColumnsFromExpressions(p.GroupByItems, nil)
 		for _, agg := range p.AggFuncs {
 			var newAgg *aggregation.AggFuncDesc
 			switch agg.Name {
@@ -7604,12 +7650,58 @@ func rewriteAggToDelta(plan base.LogicalPlan) error {
 				newAgg.RetTp = agg.RetTp
 			case ast.AggFuncAvg:
 				return errors.New("avg delta aggregation is not implemented yet")
+			case ast.AggFuncFirstRow:
+				if len(agg.Args) != 1 {
+					return errors.New("first_row must have exactly one argument")
+				}
+				if !isFirstRowForGroupBy(agg.Args[0], gbyCols) {
+					return errors.New("first_row is only allowed for group by columns")
+				}
+				newAgg = agg.Clone()
+			case ast.AggFuncMin, ast.AggFuncMax:
+				if len(agg.Args) != 1 {
+					return errors.New("min/max must have exactly one argument")
+				}
+				insertExpr, err := buildMinMaxDeltaExpr(ctx, opCol, agg.Args[0], "I")
+				if err != nil {
+					return err
+				}
+				deleteExpr, err := buildMinMaxDeltaExpr(ctx, opCol, agg.Args[0], "D")
+				if err != nil {
+					return err
+				}
+				newAgg = agg.Clone()
+				newAgg.Args = []expression.Expression{insertExpr}
+				deleteAgg := agg.Clone()
+				deleteAgg.Args = []expression.Expression{deleteExpr}
+				extraAggs = append(extraAggs, deleteAgg)
 			default:
 				return errors.Errorf("unsupported aggregation function: %s", agg.Name)
 			}
 			newAggs = append(newAggs, newAgg)
 		}
+		if len(extraAggs) > 0 {
+			newAggs = append(newAggs, extraAggs...)
+		}
 		p.AggFuncs = newAggs
+		if len(p.Schema().Columns) < len(newAggs) {
+			extraCnt := len(newAggs) - len(p.Schema().Columns)
+			names := p.OutputNames()
+			for i := 0; i < extraCnt; i++ {
+				agg := extraAggs[i]
+				col := &expression.Column{
+					UniqueID: p.SCtx().GetSessionVars().AllocPlanColumnID(),
+					RetType:  agg.RetTp,
+				}
+				p.Schema().Append(col)
+				if names != nil {
+					names = append(names, types.EmptyName)
+				}
+			}
+			if names != nil {
+				p.SetOutputNames(names)
+			}
+		}
 		for i := range p.Schema().Columns {
 			if i < len(newAggs) {
 				p.Schema().Columns[i].RetType = newAggs[i].RetTp
@@ -7650,22 +7742,59 @@ func buildDeltaSignedExpr(ctx expression.BuildContext, opCol *expression.Column,
 	return expression.NewFunctionInternal(ctx, ast.If, expr.GetType(ctx.GetEvalCtx()), opEq, expr, neg), nil
 }
 
-func replaceDataSourceWithMVLog(ds *logicalop.DataSource, mvLog table.Table, mvLogSchema *expression.Schema) {
-	tableInfo := mvLog.Meta()
-	ds.Table = mvLog
-	ds.TableInfo = tableInfo
-	ds.PhysicalTableID = tableInfo.ID
-	ds.Columns = ds.Columns[:0]
-	for _, col := range mvLog.Cols() {
-		ds.Columns = append(ds.Columns, col.ToInfo())
+func buildMinMaxDeltaExpr(ctx expression.BuildContext, opCol *expression.Column, arg expression.Expression, op string) (expression.Expression, error) {
+	constOp := &expression.Constant{Value: types.NewStringDatum(op), RetType: types.NewFieldType(mysql.TypeString)}
+	opEq := expression.NewFunctionInternal(ctx, ast.EQ, types.NewFieldType(mysql.TypeTiny), opCol, constOp)
+	nullVal := expression.NewNullWithFieldType(arg.GetType(ctx.GetEvalCtx()))
+	return expression.NewFunctionInternal(ctx, ast.If, arg.GetType(ctx.GetEvalCtx()), opEq, arg, nullVal), nil
+}
+
+func (b *PlanBuilder) buildMVLogDataSource(ctx context.Context, mvLog table.Table, baseDS *logicalop.DataSource) (*logicalop.DataSource, error) {
+	if mvLog == nil || baseDS == nil {
+		return nil, errors.New("invalid mv log datasource input")
 	}
-	ds.TblCols = ds.TblCols[:0]
-	ds.TblColsByID = make(map[int64]*expression.Column, len(mvLogSchema.Columns))
-	for _, col := range mvLogSchema.Columns {
-		ds.TblCols = append(ds.TblCols, col)
-		ds.TblColsByID[col.ID] = col
+	pushedHints := false
+	if b.TableHints() == nil {
+		b.tableHintInfo = append(b.tableHintInfo, &h.PlanHints{})
+		pushedHints = true
 	}
-	ds.SetSchema(mvLogSchema.Clone())
+	defer func() {
+		if pushedHints {
+			b.tableHintInfo = b.tableHintInfo[:len(b.tableHintInfo)-1]
+		}
+	}()
+	asName := baseDS.TableAsName
+	if asName == nil {
+		empty := ast.NewCIStr("")
+		asName = &empty
+	}
+	tn := &ast.TableName{
+		Schema: baseDS.DBName,
+		Name:   mvLog.Meta().Name,
+	}
+	dsPlan, err := b.buildDataSource(ctx, tn, asName)
+	if err != nil {
+		return nil, err
+	}
+	ds, ok := dsPlan.(*logicalop.DataSource)
+	if !ok {
+		return nil, errors.New("mv log table must be a base table")
+	}
+	return ds, nil
+}
+
+func replaceDataSourceInPlan(plan base.LogicalPlan, oldDS, newDS *logicalop.DataSource) base.LogicalPlan {
+	if plan == oldDS {
+		return newDS
+	}
+	children := plan.Children()
+	for i, child := range children {
+		replaced := replaceDataSourceInPlan(child, oldDS, newDS)
+		if replaced != child {
+			plan.SetChild(i, replaced)
+		}
+	}
+	return plan
 }
 
 func buildSchemaFromTable(sessionVars *variable.SessionVars, tbl table.Table) *expression.Schema {
@@ -7692,6 +7821,19 @@ func normalizeColumnName(name string) string {
 	return strings.ToLower(parts[len(parts)-1])
 }
 
+func isInternalHandleColumn(col *expression.Column) bool {
+	if col == nil {
+		return false
+	}
+	if col.ID == model.ExtraHandleID {
+		return true
+	}
+	if normalizeColumnName(col.OrigName) == strings.ToLower(model.ExtraHandleName.O) {
+		return true
+	}
+	return false
+}
+
 func findColumnByName(schema *expression.Schema, name string) *expression.Column {
 	if schema == nil {
 		return nil
@@ -7709,6 +7851,19 @@ func findColumnByName(schema *expression.Schema, name string) *expression.Column
 	return nil
 }
 
+func isFirstRowForGroupBy(arg expression.Expression, gbyCols []*expression.Column) bool {
+	col, ok := arg.(*expression.Column)
+	if !ok {
+		return false
+	}
+	for _, gby := range gbyCols {
+		if gby.EqualColumn(col) {
+			return true
+		}
+	}
+	return false
+}
+
 func findAggregationNode(plan base.LogicalPlan) *logicalop.LogicalAggregation {
 	switch p := plan.(type) {
 	case *logicalop.LogicalAggregation:
@@ -7720,4 +7875,91 @@ func findAggregationNode(plan base.LogicalPlan) *logicalop.LogicalAggregation {
 		}
 	}
 	return nil
+}
+
+func isColumnProjection(proj *logicalop.LogicalProjection) bool {
+	if proj == nil || len(proj.Children()) == 0 {
+		return false
+	}
+	childSchema := proj.Children()[0].Schema()
+	if childSchema == nil || len(proj.Exprs) != childSchema.Len() {
+		return false
+	}
+	for _, expr := range proj.Exprs {
+		col, ok := expr.(*expression.Column)
+		if !ok {
+			return false
+		}
+		if childSchema.ColumnIndex(col) == -1 {
+			return false
+		}
+	}
+	return true
+}
+
+func stripColumnProjection(plan base.LogicalPlan) base.LogicalPlan {
+	if proj, ok := plan.(*logicalop.LogicalProjection); ok && isColumnProjection(proj) {
+		return stripColumnProjection(proj.Children()[0])
+	}
+	for i, child := range plan.Children() {
+		plan.SetChild(i, stripColumnProjection(child))
+	}
+	return plan
+}
+
+func buildMVApplyMappings(plan base.LogicalPlan, agg *logicalop.LogicalAggregation, mvTable table.Table) ([]int64, []logicalop.AggMapping, error) {
+	if plan == nil || agg == nil || mvTable == nil {
+		return nil, nil, errors.New("invalid mv apply mapping input")
+	}
+	mvCols := mvTable.Meta().Columns
+	outCols := plan.Schema().Columns
+	if len(outCols) != len(mvCols) {
+		return nil, nil, errors.Errorf("mv output columns %d not match mv table columns %d", len(outCols), len(mvCols))
+	}
+
+	groupKeyIDs := make([]int64, 0, len(agg.GroupByItems))
+	groupKeySet := make(map[int64]struct{})
+	mappings := make([]logicalop.AggMapping, 0)
+	minMaxFirstIdx := make(map[string]int)
+	minMaxTargetID := make(map[string]int64)
+
+	for i, outCol := range outCols {
+		mvCol := mvCols[i]
+		aggIdx := agg.Schema().ColumnIndex(outCol)
+		if aggIdx < 0 || aggIdx >= len(agg.AggFuncs) {
+			return nil, nil, errors.New("output column not found in aggregation schema")
+		}
+		aggFunc := agg.AggFuncs[aggIdx]
+		switch aggFunc.Name {
+		case ast.AggFuncFirstRow:
+			if _, ok := groupKeySet[mvCol.ID]; !ok {
+				groupKeySet[mvCol.ID] = struct{}{}
+				groupKeyIDs = append(groupKeyIDs, mvCol.ID)
+			}
+		case ast.AggFuncSum, ast.AggFuncCount:
+			mappings = append(mappings, logicalop.AggMapping{
+				TargetColID:  mvCol.ID,
+				AggFuncName:  aggFunc.Name,
+				AggIdx:       aggIdx,
+				DeleteAggIdx: -1,
+			})
+		case ast.AggFuncMin, ast.AggFuncMax:
+			key := aggFunc.Name + ":" + strconv.FormatInt(mvCol.ID, 10)
+			if first, ok := minMaxFirstIdx[key]; !ok {
+				minMaxFirstIdx[key] = aggIdx
+				minMaxTargetID[key] = mvCol.ID
+			} else {
+				mappings = append(mappings, logicalop.AggMapping{
+					TargetColID:  minMaxTargetID[key],
+					AggFuncName:  aggFunc.Name,
+					AggIdx:       first,
+					DeleteAggIdx: aggIdx,
+				})
+			}
+		default:
+			continue
+		}
+	}
+
+	return groupKeyIDs, mappings, nil
 }

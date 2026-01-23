@@ -31,18 +31,21 @@ import (
 	"github.com/pingcap/tidb/pkg/domain"
 	"github.com/pingcap/tidb/pkg/expression"
 	"github.com/pingcap/tidb/pkg/expression/aggregation"
+	"github.com/pingcap/tidb/pkg/infoschema"
 	"github.com/pingcap/tidb/pkg/kv"
 	"github.com/pingcap/tidb/pkg/meta/model"
 	"github.com/pingcap/tidb/pkg/parser"
 	"github.com/pingcap/tidb/pkg/parser/ast"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
 	"github.com/pingcap/tidb/pkg/planner/core/base"
+	"github.com/pingcap/tidb/pkg/planner/core/operator/logicalop"
 	"github.com/pingcap/tidb/pkg/planner/core/operator/physicalop"
 	"github.com/pingcap/tidb/pkg/planner/core/resolve"
 	"github.com/pingcap/tidb/pkg/planner/property"
 	"github.com/pingcap/tidb/pkg/planner/util"
 	"github.com/pingcap/tidb/pkg/planner/util/coretestsdk"
 	"github.com/pingcap/tidb/pkg/statistics"
+	"github.com/pingcap/tidb/pkg/table/tables"
 	"github.com/pingcap/tidb/pkg/types"
 	"github.com/pingcap/tidb/pkg/util/dbterror/plannererrors"
 	"github.com/pingcap/tidb/pkg/util/hint"
@@ -950,6 +953,328 @@ func TestImportIntoCollAssignmentChecker(t *testing.T) {
 			require.Equal(t, expectedNeededVars, checker.neededVars, c.expr)
 		})
 	}
+}
+
+func TestGenerateDeltaPlan(t *testing.T) {
+	ctx := coretestsdk.MockContext()
+	defer func() {
+		domain.GetDomain(ctx).StatsHandle().Close()
+	}()
+	ctx.GetSessionVars().CurrentDB = "test"
+
+	baseTableInfo := buildTestTableInfo("t", 1, []testColDef{
+		{name: "c1", id: 1, tp: mysql.TypeLonglong},
+		{name: "c2", id: 2, tp: mysql.TypeLonglong},
+		{name: "c3", id: 3, tp: mysql.TypeLonglong},
+	})
+	mvLogInfo := buildTestTableInfo("mvlog_t", 2, []testColDef{
+		{name: "c1", id: 1, tp: mysql.TypeLonglong},
+		{name: "c2", id: 2, tp: mysql.TypeLonglong},
+		{name: "c3", id: 3, tp: mysql.TypeLonglong},
+		{name: "op", id: 4, tp: mysql.TypeString, flen: 1},
+	})
+	mvTableInfo := buildTestTableInfo("mv_t", 3, []testColDef{
+		{name: "c1", id: 1, tp: mysql.TypeLonglong},
+		{name: "sum_c2", id: 2, tp: mysql.TypeLonglong},
+	})
+	is := infoschema.MockInfoSchema([]*model.TableInfo{baseTableInfo, mvLogInfo, mvTableInfo})
+	builder, _ := NewPlanBuilder().Init(ctx, is, hint.NewQBHintHandler(nil))
+
+	mvLog := tables.MockTableFromMeta(mvLogInfo)
+	mvTable := tables.MockTableFromMeta(mvTableInfo)
+
+	query := "select c1, sum(c2) from t where c3 > 10 group by c1"
+	plan, err := builder.GenerateDeltaPlan(context.Background(), query, mvLog, mvTable)
+	require.NoError(t, err)
+
+	apply, ok := plan.(*logicalop.LogicalMVApplyDelta)
+	require.True(t, ok)
+	require.Equal(t, mvTableInfo, apply.TargetInfo)
+	require.Equal(t, "op", apply.OpColumnName)
+	require.Len(t, apply.GroupByItems, 1)
+	require.GreaterOrEqual(t, len(apply.AggFuncs), 1)
+	require.True(t, hasAggFunc(apply.AggFuncs, ast.AggFuncSum))
+
+	agg := findFirstAgg(plan)
+	require.NotNil(t, agg)
+	sumAgg := findAggByName(agg.AggFuncs, ast.AggFuncSum)
+	require.NotNil(t, sumAgg)
+	ifFn, ok := sumAgg.Args[0].(*expression.ScalarFunction)
+	require.True(t, ok)
+	require.Equal(t, ast.If, ifFn.FuncName.L)
+}
+
+func TestGenerateDeltaPlanMinMax(t *testing.T) {
+	ctx := coretestsdk.MockContext()
+	defer func() {
+		domain.GetDomain(ctx).StatsHandle().Close()
+	}()
+	ctx.GetSessionVars().CurrentDB = "test"
+
+	baseTableInfo := buildTestTableInfo("t", 10, []testColDef{
+		{name: "c1", id: 1, tp: mysql.TypeLonglong},
+		{name: "c2", id: 2, tp: mysql.TypeLonglong},
+	})
+	mvLogInfo := buildTestTableInfo("mvlog_t", 11, []testColDef{
+		{name: "c1", id: 1, tp: mysql.TypeLonglong},
+		{name: "c2", id: 2, tp: mysql.TypeLonglong},
+		{name: "op", id: 3, tp: mysql.TypeString, flen: 1},
+	})
+	mvTableInfo := buildTestTableInfo("mv_min_t", 12, []testColDef{
+		{name: "c1", id: 1, tp: mysql.TypeLonglong},
+		{name: "min_c2", id: 2, tp: mysql.TypeLonglong},
+	})
+
+	is := infoschema.MockInfoSchema([]*model.TableInfo{baseTableInfo, mvLogInfo, mvTableInfo})
+	builder, _ := NewPlanBuilder().Init(ctx, is, hint.NewQBHintHandler(nil))
+
+	mvLog := tables.MockTableFromMeta(mvLogInfo)
+	mvTable := tables.MockTableFromMeta(mvTableInfo)
+
+	query := "select c1, min(c2) from t group by c1"
+	plan, err := builder.GenerateDeltaPlan(context.Background(), query, mvLog, mvTable)
+	require.NoError(t, err)
+
+	agg := findFirstAgg(plan)
+	require.NotNil(t, agg)
+	require.Equal(t, 2, countAggByName(agg.AggFuncs, ast.AggFuncMin))
+
+	minAggs := findAggsByName(agg.AggFuncs, ast.AggFuncMin)
+	require.Len(t, minAggs, 2)
+	require.True(t, hasIfOpConst(minAggs[0].Args[0], "I") || hasIfOpConst(minAggs[1].Args[0], "I"))
+	require.True(t, hasIfOpConst(minAggs[0].Args[0], "D") || hasIfOpConst(minAggs[1].Args[0], "D"))
+}
+
+func TestGenerateDeltaPlanMultipleAggs(t *testing.T) {
+	ctx := coretestsdk.MockContext()
+	defer func() {
+		domain.GetDomain(ctx).StatsHandle().Close()
+	}()
+	ctx.GetSessionVars().CurrentDB = "test"
+
+	baseTableInfo := buildTestTableInfo("t", 20, []testColDef{
+		{name: "c1", id: 1, tp: mysql.TypeLonglong},
+		{name: "c2", id: 2, tp: mysql.TypeLonglong},
+		{name: "c3", id: 3, tp: mysql.TypeLonglong},
+	})
+	mvLogInfo := buildTestTableInfo("mvlog_t", 21, []testColDef{
+		{name: "c1", id: 1, tp: mysql.TypeLonglong},
+		{name: "c2", id: 2, tp: mysql.TypeLonglong},
+		{name: "c3", id: 3, tp: mysql.TypeLonglong},
+		{name: "op", id: 4, tp: mysql.TypeString, flen: 1},
+	})
+	mvTableInfo := buildTestTableInfo("mv_multi_t", 22, []testColDef{
+		{name: "c1", id: 1, tp: mysql.TypeLonglong},
+		{name: "sum_c2", id: 2, tp: mysql.TypeLonglong},
+		{name: "cnt_c3", id: 3, tp: mysql.TypeLonglong},
+	})
+
+	is := infoschema.MockInfoSchema([]*model.TableInfo{baseTableInfo, mvLogInfo, mvTableInfo})
+	builder, _ := NewPlanBuilder().Init(ctx, is, hint.NewQBHintHandler(nil))
+
+	mvLog := tables.MockTableFromMeta(mvLogInfo)
+	mvTable := tables.MockTableFromMeta(mvTableInfo)
+
+	query := "select c1, sum(c2), count(c3) from t group by c1"
+	plan, err := builder.GenerateDeltaPlan(context.Background(), query, mvLog, mvTable)
+	require.NoError(t, err)
+
+	agg := findFirstAgg(plan)
+	require.NotNil(t, agg)
+	require.True(t, hasAggFunc(agg.AggFuncs, ast.AggFuncSum))
+	require.True(t, hasAggFunc(agg.AggFuncs, ast.AggFuncCount))
+
+	sumAgg := findAggByName(agg.AggFuncs, ast.AggFuncSum)
+	require.NotNil(t, sumAgg)
+	ifFn, ok := sumAgg.Args[0].(*expression.ScalarFunction)
+	require.True(t, ok)
+	require.Equal(t, ast.If, ifFn.FuncName.L)
+}
+
+func TestGenerateDeltaPlanAggsWithFilter(t *testing.T) {
+	ctx := coretestsdk.MockContext()
+	defer func() {
+		domain.GetDomain(ctx).StatsHandle().Close()
+	}()
+	ctx.GetSessionVars().CurrentDB = "test"
+
+	baseTableInfo := buildTestTableInfo("t", 30, []testColDef{
+		{name: "c1", id: 1, tp: mysql.TypeLonglong},
+		{name: "c2", id: 2, tp: mysql.TypeLonglong},
+		{name: "c3", id: 3, tp: mysql.TypeLonglong},
+		{name: "c4", id: 4, tp: mysql.TypeLonglong},
+	})
+	mvLogInfo := buildTestTableInfo("mvlog_t", 31, []testColDef{
+		{name: "c1", id: 1, tp: mysql.TypeLonglong},
+		{name: "c2", id: 2, tp: mysql.TypeLonglong},
+		{name: "c3", id: 3, tp: mysql.TypeLonglong},
+		{name: "c4", id: 4, tp: mysql.TypeLonglong},
+		{name: "op", id: 5, tp: mysql.TypeString, flen: 1},
+	})
+	mvTableInfo := buildTestTableInfo("mv_all_t", 32, []testColDef{
+		{name: "c1", id: 1, tp: mysql.TypeLonglong},
+		{name: "sum_c2", id: 2, tp: mysql.TypeLonglong},
+		{name: "cnt_c3", id: 3, tp: mysql.TypeLonglong},
+		{name: "min_c2", id: 4, tp: mysql.TypeLonglong},
+		{name: "max_c2", id: 5, tp: mysql.TypeLonglong},
+	})
+
+	is := infoschema.MockInfoSchema([]*model.TableInfo{baseTableInfo, mvLogInfo, mvTableInfo})
+	builder, _ := NewPlanBuilder().Init(ctx, is, hint.NewQBHintHandler(nil))
+
+	mvLog := tables.MockTableFromMeta(mvLogInfo)
+	mvTable := tables.MockTableFromMeta(mvTableInfo)
+
+	query := "select c1, sum(c2), count(c3), min(c2), max(c2) from t where c4 > 10 group by c1"
+	plan, err := builder.GenerateDeltaPlan(context.Background(), query, mvLog, mvTable)
+	require.NoError(t, err)
+
+	agg := findFirstAgg(plan)
+	require.NotNil(t, agg)
+	require.True(t, hasAggFunc(agg.AggFuncs, ast.AggFuncSum))
+	require.GreaterOrEqual(t, countAggByName(agg.AggFuncs, ast.AggFuncSum), 2)
+	require.Equal(t, 2, countAggByName(agg.AggFuncs, ast.AggFuncMin))
+	require.Equal(t, 2, countAggByName(agg.AggFuncs, ast.AggFuncMax))
+
+	sumAgg := findAggByName(agg.AggFuncs, ast.AggFuncSum)
+	require.NotNil(t, sumAgg)
+	ifFn, ok := sumAgg.Args[0].(*expression.ScalarFunction)
+	require.True(t, ok)
+	require.Equal(t, ast.If, ifFn.FuncName.L)
+	require.True(t, hasSumWithCountExpr(agg.AggFuncs))
+
+	minAggs := findAggsByName(agg.AggFuncs, ast.AggFuncMin)
+	require.Len(t, minAggs, 2)
+	require.True(t, hasIfOpConst(minAggs[0].Args[0], "I") || hasIfOpConst(minAggs[1].Args[0], "I"))
+	require.True(t, hasIfOpConst(minAggs[0].Args[0], "D") || hasIfOpConst(minAggs[1].Args[0], "D"))
+}
+
+type testColDef struct {
+	name string
+	id   int64
+	tp   byte
+	flen int
+}
+
+func buildTestTableInfo(name string, id int64, cols []testColDef) *model.TableInfo {
+	tableInfo := &model.TableInfo{
+		ID:    id,
+		Name:  ast.NewCIStr(name),
+		State: model.StatePublic,
+	}
+	tableInfo.Columns = make([]*model.ColumnInfo, 0, len(cols))
+	for i, col := range cols {
+		ft := *types.NewFieldType(col.tp)
+		if col.flen > 0 {
+			ft.SetFlen(col.flen)
+		}
+		tableInfo.Columns = append(tableInfo.Columns, &model.ColumnInfo{
+			ID:        col.id,
+			Name:      ast.NewCIStr(col.name),
+			Offset:    i,
+			State:     model.StatePublic,
+			FieldType: ft,
+		})
+	}
+	return tableInfo
+}
+
+func findFirstAgg(plan base.LogicalPlan) *logicalop.LogicalAggregation {
+	if agg, ok := plan.(*logicalop.LogicalAggregation); ok {
+		return agg
+	}
+	for _, child := range plan.Children() {
+		if agg := findFirstAgg(child); agg != nil {
+			return agg
+		}
+	}
+	return nil
+}
+
+func hasAggFunc(aggs []*aggregation.AggFuncDesc, name string) bool {
+	return findAggByName(aggs, name) != nil
+}
+
+func findAggByName(aggs []*aggregation.AggFuncDesc, name string) *aggregation.AggFuncDesc {
+	for _, agg := range aggs {
+		if agg.Name == name {
+			return agg
+		}
+	}
+	return nil
+}
+
+func countAggByName(aggs []*aggregation.AggFuncDesc, name string) int {
+	count := 0
+	for _, agg := range aggs {
+		if agg.Name == name {
+			count++
+		}
+	}
+	return count
+}
+
+func findAggsByName(aggs []*aggregation.AggFuncDesc, name string) []*aggregation.AggFuncDesc {
+	result := make([]*aggregation.AggFuncDesc, 0, len(aggs))
+	for _, agg := range aggs {
+		if agg.Name == name {
+			result = append(result, agg)
+		}
+	}
+	return result
+}
+
+func hasIfOpConst(expr expression.Expression, op string) bool {
+	ifFn, ok := expr.(*expression.ScalarFunction)
+	if !ok || ifFn.FuncName.L != ast.If {
+		return false
+	}
+	args := ifFn.GetArgs()
+	if len(args) < 1 {
+		return false
+	}
+	eqFn, ok := args[0].(*expression.ScalarFunction)
+	if !ok || eqFn.FuncName.L != ast.EQ {
+		return false
+	}
+	for _, arg := range eqFn.GetArgs() {
+		if c, ok := arg.(*expression.Constant); ok {
+			if c.Value.Kind() == types.KindString && c.Value.GetString() == op {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func hasSumWithCountExpr(aggs []*aggregation.AggFuncDesc) bool {
+	for _, agg := range aggs {
+		if agg.Name != ast.AggFuncSum || len(agg.Args) == 0 {
+			continue
+		}
+		ifFn, ok := agg.Args[0].(*expression.ScalarFunction)
+		if !ok || ifFn.FuncName.L != ast.If {
+			continue
+		}
+		if containsIsNull(ifFn.GetArgs()) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsIsNull(exprs []expression.Expression) bool {
+	for _, expr := range exprs {
+		if sf, ok := expr.(*expression.ScalarFunction); ok {
+			if sf.FuncName.L == ast.IsNull {
+				return true
+			}
+			if containsIsNull(sf.GetArgs()) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func TestTraffic(t *testing.T) {

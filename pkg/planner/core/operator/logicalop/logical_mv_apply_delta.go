@@ -40,6 +40,20 @@ type LogicalMVApplyDelta struct {
 
 	// OpColumnName is the name of op column in mv log.
 	OpColumnName string
+
+	// GroupKeyTargetColIDs maps group by columns to MV table columns.
+	GroupKeyTargetColIDs []int64
+
+	// AggMappings maps delta aggregation outputs to MV table columns.
+	AggMappings []AggMapping
+}
+
+// AggMapping maps a delta aggregation result to MV table column(s).
+type AggMapping struct {
+	TargetColID  int64
+	AggFuncName  string
+	AggIdx       int
+	DeleteAggIdx int
 }
 
 // Init initializes LogicalMVApplyDelta.
