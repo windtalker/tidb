@@ -34,6 +34,11 @@ type LogicalMVApplyDelta struct {
 	TargetInfo   *model.TableInfo `hash64-equals:"true"`
 	TargetDBName ast.CIStr
 
+	// BaseTable is the original base table used for mv query.
+	BaseTable  table.Table
+	BaseInfo   *model.TableInfo `hash64-equals:"true"`
+	BaseDBName ast.CIStr
+
 	// GroupByItems and AggFuncs describe how to merge delta results.
 	GroupByItems []expression.Expression    `hash64-equals:"true" shallow-ref:"true"`
 	AggFuncs     []*aggregation.AggFuncDesc `hash64-equals:"true" shallow-ref:"true"`
