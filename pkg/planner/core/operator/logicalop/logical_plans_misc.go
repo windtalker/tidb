@@ -54,6 +54,7 @@ var (
 	_ base.LogicalPlan = &LogicalCTE{}
 	_ base.LogicalPlan = &LogicalCTETable{}
 	_ base.LogicalPlan = &LogicalSequence{}
+	_ base.LogicalPlan = &LogicalMVApplyDelta{}
 )
 
 // HasMaxOneRow returns if the LogicalPlan will output at most one row.

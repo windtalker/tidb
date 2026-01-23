@@ -7309,3 +7309,415 @@ func getResultCTESchema(seedSchema *expression.Schema, svar *variable.SessionVar
 	}
 	return res
 }
+
+// GenerateDeltaPlan builds a logical plan for incremental MV maintenance.
+// It currently parses the MV query and builds the base logical plan, and leaves
+// the delta rewrite as a follow-up step.
+func (b *PlanBuilder) GenerateDeltaPlan(ctx context.Context, queryText string, mvLog table.Table, mvTable table.Table) (base.LogicalPlan, error) {
+	if mvLog == nil {
+		return nil, errors.New("mv log table is required")
+	}
+	if mvTable == nil {
+		return nil, errors.New("mv table is required")
+	}
+	mvLogSchema := buildSchemaFromTable(b.ctx.GetSessionVars(), mvLog)
+	p := parser.New()
+	stmt, err := p.ParseOneStmt(queryText, "", "")
+	if err != nil {
+		return nil, err
+	}
+	sel, ok := stmt.(*ast.SelectStmt)
+	if !ok {
+		return nil, errors.New("mv query must be a SELECT statement")
+	}
+	plan, err := b.buildSelect(ctx, sel)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateDeltaPlanSupport(plan, mvLogSchema); err != nil {
+		return nil, err
+	}
+	return rewriteToDeltaPlan(plan, mvLog, mvLogSchema, mvTable)
+}
+
+func validateDeltaPlanSupport(plan base.LogicalPlan, mvLogSchema *expression.Schema) error {
+	if plan == nil || mvLogSchema == nil {
+		return errors.New("invalid delta plan input")
+	}
+	colNames := buildMVLogColumnNameSet(mvLogSchema)
+	state := deltaPlanValidateState{}
+	if err := validateDeltaPlanNode(plan, colNames, &state); err != nil {
+		return err
+	}
+	if state.aggCount == 0 {
+		return errors.New("mv query must contain aggregation")
+	}
+	if state.dataSourceCount == 0 && !state.hasTableDual {
+		return errors.New("mv query must read from exactly one base table")
+	}
+	if state.dataSourceCount > 1 {
+		return errors.New("mv query must read from exactly one base table")
+	}
+	return nil
+}
+
+func rewriteToDeltaPlan(plan base.LogicalPlan, mvLog table.Table, mvLogSchema *expression.Schema, mvTable table.Table) (base.LogicalPlan, error) {
+	if plan == nil || mvLog == nil || mvLogSchema == nil || mvTable == nil {
+		return nil, errors.New("invalid delta plan input")
+	}
+	dataSource := findFirstDataSource(plan)
+	if dataSource == nil {
+		return nil, errors.New("mv query must read from exactly one base table")
+	}
+	replace, err := buildColumnReplaceMap(dataSource.Schema(), mvLogSchema)
+	if err != nil {
+		return nil, err
+	}
+	replaceExprColumnsInPlan(plan, replace)
+	replaceColumnsInPlanSchemas(plan, replace)
+	replaceDataSourceWithMVLog(dataSource, mvLog, mvLogSchema)
+	aggNode := findAggregationNode(plan)
+	if aggNode == nil {
+		return nil, errors.New("mv query must contain aggregation")
+	}
+	if err := rewriteAggToDelta(plan); err != nil {
+		return nil, err
+	}
+	apply := logicalop.LogicalMVApplyDelta{
+		TargetTable:  mvTable,
+		TargetInfo:   mvTable.Meta(),
+		TargetDBName: dataSource.DBName,
+		GroupByItems: aggNode.GroupByItems,
+		AggFuncs:     aggNode.AggFuncs,
+		OpColumnName: "op",
+	}.Init(plan.SCtx(), plan.QueryBlockOffset())
+	apply.SetChildren(plan)
+	apply.SetSchema(plan.Schema().Clone())
+	apply.SetOutputNames(plan.OutputNames())
+	return apply, nil
+}
+
+type deltaPlanValidateState struct {
+	aggCount        int
+	dataSourceCount int
+	hasTableDual    bool
+}
+
+func validateDeltaPlanNode(plan base.LogicalPlan, mvLogColumnNames map[string]struct{}, state *deltaPlanValidateState) error {
+	switch p := plan.(type) {
+	case *logicalop.LogicalAggregation:
+		state.aggCount++
+		if err := validateAggFuncs(p.AggFuncs); err != nil {
+			return err
+		}
+		for _, item := range p.GroupByItems {
+			if err := validateExprColumnsInMVLog(item, mvLogColumnNames, "group by"); err != nil {
+				return err
+			}
+		}
+		for _, agg := range p.AggFuncs {
+			for _, arg := range agg.Args {
+				if err := validateExprColumnsInMVLog(arg, mvLogColumnNames, "aggregate args"); err != nil {
+					return err
+				}
+			}
+		}
+	case *logicalop.LogicalSelection:
+		for _, cond := range p.Conditions {
+			if err := validateExprColumnsInMVLog(cond, mvLogColumnNames, "selection"); err != nil {
+				return err
+			}
+		}
+	case *logicalop.LogicalProjection:
+		// Projection is allowed. Expressions are validated via selection/aggregation checks.
+	case *logicalop.DataSource:
+		state.dataSourceCount++
+	case *logicalop.LogicalTableDual:
+		state.hasTableDual = true
+	default:
+		return errors.Errorf("unsupported logical plan node: %T", plan)
+	}
+
+	for _, child := range plan.Children() {
+		if err := validateDeltaPlanNode(child, mvLogColumnNames, state); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateAggFuncs(aggs []*aggregation.AggFuncDesc) error {
+	for _, agg := range aggs {
+		if agg.HasDistinct {
+			return errors.New("distinct aggregation is not supported")
+		}
+		if len(agg.OrderByItems) > 0 {
+			return errors.New("order by in aggregation is not supported")
+		}
+		switch agg.Name {
+		case ast.AggFuncCount, ast.AggFuncSum, ast.AggFuncAvg:
+		default:
+			return errors.Errorf("unsupported aggregation function: %s", agg.Name)
+		}
+	}
+	return nil
+}
+
+func validateExprColumnsInMVLog(expr expression.Expression, mvLogColumnNames map[string]struct{}, context string) error {
+	if len(expression.ExtractCorColumns(expr)) > 0 {
+		return errors.Errorf("correlated column in %s is not supported", context)
+	}
+	cols := expression.ExtractColumns(expr)
+	for _, col := range cols {
+		name := normalizeColumnName(col.OrigName)
+		if name == "" {
+			return errors.Errorf("empty column name in %s", context)
+		}
+		if _, ok := mvLogColumnNames[name]; !ok {
+			return errors.Errorf("column %s in %s not found in mv log schema", col.OrigName, context)
+		}
+	}
+	return nil
+}
+
+func buildMVLogColumnNameSet(schema *expression.Schema) map[string]struct{} {
+	colNames := make(map[string]struct{}, len(schema.Columns))
+	for _, col := range schema.Columns {
+		name := normalizeColumnName(col.OrigName)
+		if name == "" {
+			name = normalizeColumnName(col.String())
+		}
+		if name == "" {
+			continue
+		}
+		colNames[name] = struct{}{}
+	}
+	return colNames
+}
+
+func buildMVLogColumnMap(schema *expression.Schema) map[string]*expression.Column {
+	colMap := make(map[string]*expression.Column, len(schema.Columns))
+	for _, col := range schema.Columns {
+		name := normalizeColumnName(col.OrigName)
+		if name == "" {
+			name = normalizeColumnName(col.String())
+		}
+		if name == "" {
+			continue
+		}
+		colMap[name] = col
+	}
+	return colMap
+}
+
+func buildColumnReplaceMap(oldSchema *expression.Schema, mvLogSchema *expression.Schema) (map[string]*expression.Column, error) {
+	if oldSchema == nil || mvLogSchema == nil {
+		return nil, errors.New("invalid schema for column replacement")
+	}
+	mvLogCols := buildMVLogColumnMap(mvLogSchema)
+	replace := make(map[string]*expression.Column, len(oldSchema.Columns))
+	for _, col := range oldSchema.Columns {
+		name := normalizeColumnName(col.OrigName)
+		if name == "" {
+			return nil, errors.Errorf("column name missing for %s", col.String())
+		}
+		target, ok := mvLogCols[name]
+		if !ok {
+			return nil, errors.Errorf("column %s not found in mv log schema", col.OrigName)
+		}
+		replace[string(col.HashCode())] = target
+	}
+	return replace, nil
+}
+
+func findFirstDataSource(plan base.LogicalPlan) *logicalop.DataSource {
+	switch p := plan.(type) {
+	case *logicalop.DataSource:
+		return p
+	}
+	for _, child := range plan.Children() {
+		if ds := findFirstDataSource(child); ds != nil {
+			return ds
+		}
+	}
+	return nil
+}
+
+func replaceExprColumnsInPlan(plan base.LogicalPlan, replace map[string]*expression.Column) {
+	plan.ReplaceExprColumns(replace)
+	for _, child := range plan.Children() {
+		replaceExprColumnsInPlan(child, replace)
+	}
+}
+
+func replaceColumnsInPlanSchemas(plan base.LogicalPlan, replace map[string]*expression.Column) {
+	if schema := plan.Schema(); schema != nil {
+		replaceColumnsInSchema(schema, replace)
+	}
+	for _, child := range plan.Children() {
+		replaceColumnsInPlanSchemas(child, replace)
+	}
+}
+
+func replaceColumnsInSchema(schema *expression.Schema, replace map[string]*expression.Column) {
+	for i, col := range schema.Columns {
+		if target := replace[string(col.HashCode())]; target != nil {
+			schema.Columns[i] = target.Clone().(*expression.Column)
+		}
+	}
+}
+
+func rewriteAggToDelta(plan base.LogicalPlan) error {
+	switch p := plan.(type) {
+	case *logicalop.LogicalAggregation:
+		opCol := findColumnByName(p.Children()[0].Schema(), "op")
+		if opCol == nil {
+			return errors.New("mv log schema must include op column")
+		}
+		ctx := p.SCtx().GetExprCtx()
+		newAggs := make([]*aggregation.AggFuncDesc, 0, len(p.AggFuncs))
+		for _, agg := range p.AggFuncs {
+			var newAgg *aggregation.AggFuncDesc
+			switch agg.Name {
+			case ast.AggFuncCount:
+				deltaExpr, err := buildDeltaCountExpr(ctx, opCol, agg.Args)
+				if err != nil {
+					return err
+				}
+				newAgg, err = aggregation.NewAggFuncDesc(ctx, ast.AggFuncSum, []expression.Expression{deltaExpr}, false)
+				if err != nil {
+					return err
+				}
+				newAgg.RetTp = agg.RetTp
+			case ast.AggFuncSum:
+				if len(agg.Args) != 1 {
+					return errors.New("sum must have exactly one argument")
+				}
+				deltaExpr, err := buildDeltaSignedExpr(ctx, opCol, agg.Args[0])
+				if err != nil {
+					return err
+				}
+				newAgg, err = aggregation.NewAggFuncDesc(ctx, ast.AggFuncSum, []expression.Expression{deltaExpr}, false)
+				if err != nil {
+					return err
+				}
+				newAgg.RetTp = agg.RetTp
+			case ast.AggFuncAvg:
+				return errors.New("avg delta aggregation is not implemented yet")
+			default:
+				return errors.Errorf("unsupported aggregation function: %s", agg.Name)
+			}
+			newAggs = append(newAggs, newAgg)
+		}
+		p.AggFuncs = newAggs
+		for i := range p.Schema().Columns {
+			if i < len(newAggs) {
+				p.Schema().Columns[i].RetType = newAggs[i].RetTp
+			}
+		}
+	}
+	for _, child := range plan.Children() {
+		if err := rewriteAggToDelta(child); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func buildDeltaCountExpr(ctx expression.BuildContext, opCol *expression.Column, args []expression.Expression) (expression.Expression, error) {
+	var countExpr expression.Expression
+	if len(args) == 0 {
+		countExpr = expression.NewOne()
+	} else {
+		isNullExprs := make([]expression.Expression, 0, len(args))
+		for _, arg := range args {
+			if mysql.HasNotNullFlag(arg.GetType(ctx.GetEvalCtx()).GetFlag()) {
+				isNullExprs = append(isNullExprs, expression.NewZero())
+				continue
+			}
+			isNullExprs = append(isNullExprs, expression.NewFunctionInternal(ctx, ast.IsNull, types.NewFieldType(mysql.TypeTiny), arg))
+		}
+		innerExpr := expression.ComposeDNFCondition(ctx, isNullExprs...)
+		countExpr = expression.NewFunctionInternal(ctx, ast.If, types.NewFieldType(mysql.TypeLonglong), innerExpr, expression.NewZero(), expression.NewOne())
+	}
+	return buildDeltaSignedExpr(ctx, opCol, countExpr)
+}
+
+func buildDeltaSignedExpr(ctx expression.BuildContext, opCol *expression.Column, expr expression.Expression) (expression.Expression, error) {
+	constI := &expression.Constant{Value: types.NewStringDatum("I"), RetType: types.NewFieldType(mysql.TypeString)}
+	opEq := expression.NewFunctionInternal(ctx, ast.EQ, types.NewFieldType(mysql.TypeTiny), opCol, constI)
+	neg := expression.NewFunctionInternal(ctx, ast.UnaryMinus, expr.GetType(ctx.GetEvalCtx()), expr)
+	return expression.NewFunctionInternal(ctx, ast.If, expr.GetType(ctx.GetEvalCtx()), opEq, expr, neg), nil
+}
+
+func replaceDataSourceWithMVLog(ds *logicalop.DataSource, mvLog table.Table, mvLogSchema *expression.Schema) {
+	tableInfo := mvLog.Meta()
+	ds.Table = mvLog
+	ds.TableInfo = tableInfo
+	ds.PhysicalTableID = tableInfo.ID
+	ds.Columns = ds.Columns[:0]
+	for _, col := range mvLog.Cols() {
+		ds.Columns = append(ds.Columns, col.ToInfo())
+	}
+	ds.TblCols = ds.TblCols[:0]
+	ds.TblColsByID = make(map[int64]*expression.Column, len(mvLogSchema.Columns))
+	for _, col := range mvLogSchema.Columns {
+		ds.TblCols = append(ds.TblCols, col)
+		ds.TblColsByID[col.ID] = col
+	}
+	ds.SetSchema(mvLogSchema.Clone())
+}
+
+func buildSchemaFromTable(sessionVars *variable.SessionVars, tbl table.Table) *expression.Schema {
+	cols := tbl.Cols()
+	schema := expression.NewSchema()
+	for _, col := range cols {
+		schema.Append(&expression.Column{
+			UniqueID: sessionVars.AllocPlanColumnID(),
+			ID:       col.ID,
+			RetType:  col.FieldType.Clone(),
+			OrigName: col.Name.O,
+			IsHidden: col.Hidden,
+		})
+	}
+	return schema
+}
+
+func normalizeColumnName(name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return ""
+	}
+	parts := strings.Split(name, ".")
+	return strings.ToLower(parts[len(parts)-1])
+}
+
+func findColumnByName(schema *expression.Schema, name string) *expression.Column {
+	if schema == nil {
+		return nil
+	}
+	target := strings.ToLower(name)
+	for _, col := range schema.Columns {
+		colName := normalizeColumnName(col.OrigName)
+		if colName == "" {
+			colName = normalizeColumnName(col.String())
+		}
+		if colName == target {
+			return col
+		}
+	}
+	return nil
+}
+
+func findAggregationNode(plan base.LogicalPlan) *logicalop.LogicalAggregation {
+	switch p := plan.(type) {
+	case *logicalop.LogicalAggregation:
+		return p
+	}
+	for _, child := range plan.Children() {
+		if agg := findAggregationNode(child); agg != nil {
+			return agg
+		}
+	}
+	return nil
+}
