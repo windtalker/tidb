@@ -48,6 +48,10 @@ func TestCreateMaterializedViewLogBasic(t *testing.T) {
 	require.NotNil(t, baseTable.Meta().MaterializedViewBase)
 	require.Equal(t, mlogTable.Meta().ID, baseTable.Meta().MaterializedViewBase.MLogID)
 
+	// Lock row for PURGE MATERIALIZED VIEW LOG should be inserted on CREATE MATERIALIZED VIEW LOG success.
+	tk.MustQuery(fmt.Sprintf("select count(*) from mysql.tidb_mlog_purge where mlog_id = %d", mlogTable.Meta().ID)).
+		Check(testkit.Rows("1"))
+
 	mlogInfo := mlogTable.Meta().MaterializedViewLog
 	require.NotNil(t, mlogInfo)
 	require.Equal(t, baseTable.Meta().ID, mlogInfo.BaseTableID)
