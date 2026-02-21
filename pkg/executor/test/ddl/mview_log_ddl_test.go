@@ -21,6 +21,7 @@ import (
 	"testing"
 
 	"github.com/pingcap/tidb/pkg/errno"
+	"github.com/pingcap/tidb/pkg/parser/auth"
 	pmodel "github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
 	"github.com/pingcap/tidb/pkg/testkit"
@@ -193,4 +194,107 @@ func TestDropMaterializedViewLogTableAfterBaseDropped(t *testing.T) {
 	tk.MustExec("create materialized view log on t_drop_seq (a)")
 	tk.MustExec("drop table if exists t_drop_seq")
 	tk.MustExec("drop table if exists `$mlog$t_drop_seq`")
+}
+
+func TestPurgeMaterializedViewLogNoDB(t *testing.T) {
+	store := testkit.CreateMockStore(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustGetErrCode("purge materialized view log on t", errno.ErrNoDB)
+}
+
+func TestPurgeMaterializedViewLogMissingMLog(t *testing.T) {
+	store := testkit.CreateMockStore(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("create table t_purge_no_mlog (a int)")
+	err := tk.ExecToErr("purge materialized view log on t_purge_no_mlog")
+	require.ErrorContains(t, err, "materialized view log does not exist")
+}
+
+func TestPurgeMaterializedViewLogPrivilege(t *testing.T) {
+	store := testkit.CreateMockStore(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("create table t_purge_priv (a int)")
+	tk.MustExec("create materialized view log on t_purge_priv (a) purge immediate")
+	tk.MustExec("create user 'u1'@'%'")
+	tk.MustExec("grant select on test.t_purge_priv to 'u1'@'%'")
+
+	tkUser := testkit.NewTestKit(t, store)
+	require.NoError(t, tkUser.Session().Auth(&auth.UserIdentity{Username: "u1", Hostname: "%"}, nil, nil, nil))
+	tkUser.MustExec("use test")
+
+	err := tkUser.ExecToErr("purge materialized view log on t_purge_priv")
+	require.ErrorContains(t, err, "ALTER command denied")
+
+	tk.MustExec("grant alter on test.t_purge_priv to 'u1'@'%'")
+	tkUser.MustExec("purge materialized view log on t_purge_priv")
+}
+
+func TestPurgeMaterializedViewLogLockRowMissing(t *testing.T) {
+	store, dom := testkit.CreateMockStoreAndDomain(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("create table t_purge_lock_row_missing (a int)")
+	tk.MustExec("create materialized view log on t_purge_lock_row_missing (a) purge immediate")
+
+	is := dom.InfoSchema()
+	mlogTable, err := is.TableByName(context.Background(), pmodel.NewCIStr("test"), pmodel.NewCIStr("$mlog$t_purge_lock_row_missing"))
+	require.NoError(t, err)
+	mlogID := mlogTable.Meta().ID
+
+	tk.MustExec(fmt.Sprintf("delete from mysql.tidb_mlog_purge where mlog_id = %d", mlogID))
+	err = tk.ExecToErr("purge materialized view log on t_purge_lock_row_missing")
+	require.ErrorContains(t, err, "mlog purge lock row does not exist")
+}
+
+func TestPurgeMaterializedViewLogNowaitConflict(t *testing.T) {
+	store, dom := testkit.CreateMockStoreAndDomain(t)
+	tk1 := testkit.NewTestKit(t, store)
+	tk2 := testkit.NewTestKit(t, store)
+	tk1.MustExec("use test")
+	tk2.MustExec("use test")
+	tk1.MustExec("create table t_purge_nowait_conflict (a int)")
+	tk1.MustExec("create materialized view log on t_purge_nowait_conflict (a) purge immediate")
+
+	is := dom.InfoSchema()
+	mlogTable, err := is.TableByName(context.Background(), pmodel.NewCIStr("test"), pmodel.NewCIStr("$mlog$t_purge_nowait_conflict"))
+	require.NoError(t, err)
+	mlogID := mlogTable.Meta().ID
+
+	tk1.MustExec("begin pessimistic")
+	tk1.MustQuery(fmt.Sprintf("select 1 from mysql.tidb_mlog_purge where mlog_id = %d for update", mlogID)).
+		Check(testkit.Rows("1"))
+	rolledBack := false
+	defer func() {
+		if !rolledBack {
+			tk1.MustExec("rollback")
+		}
+	}()
+
+	err = tk2.ExecToErr("purge materialized view log on t_purge_nowait_conflict")
+	require.ErrorContains(t, err, "another purge is running")
+
+	tk1.MustExec("rollback")
+	rolledBack = true
+	tk2.MustExec("purge materialized view log on t_purge_nowait_conflict")
+}
+
+func TestPurgeMaterializedViewLogMissingPublicMViewRefreshRow(t *testing.T) {
+	store, dom := testkit.CreateMockStoreAndDomain(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+
+	tk.MustExec("create table t_purge_missing_public_refresh (a int)")
+	tk.MustExec("create materialized view log on t_purge_missing_public_refresh (a) purge immediate")
+	tk.MustExec("create materialized view mv_purge_missing_public_refresh (a, cnt) refresh fast next 300 as select a, count(1) from t_purge_missing_public_refresh group by a")
+
+	is := dom.InfoSchema()
+	mvTable, err := is.TableByName(context.Background(), pmodel.NewCIStr("test"), pmodel.NewCIStr("mv_purge_missing_public_refresh"))
+	require.NoError(t, err)
+	mvID := mvTable.Meta().ID
+
+	tk.MustExec(fmt.Sprintf("delete from mysql.tidb_mview_refresh where mview_id = %d", mvID))
+	err = tk.ExecToErr("purge materialized view log on t_purge_missing_public_refresh")
+	require.ErrorContains(t, err, "materialized view refresh info is missing")
 }

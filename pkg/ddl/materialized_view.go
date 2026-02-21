@@ -15,11 +15,14 @@
 package ddl
 
 import (
+	"context"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/failpoint"
+	sess "github.com/pingcap/tidb/pkg/ddl/session"
 	"github.com/pingcap/tidb/pkg/expression"
 	"github.com/pingcap/tidb/pkg/infoschema"
 	"github.com/pingcap/tidb/pkg/kv"
@@ -30,10 +33,12 @@ import (
 	"github.com/pingcap/tidb/pkg/parser/mysql"
 	"github.com/pingcap/tidb/pkg/sessionctx"
 	"github.com/pingcap/tidb/pkg/sessionctx/variable"
+	storeerr "github.com/pingcap/tidb/pkg/store/driver/error"
 	"github.com/pingcap/tidb/pkg/types"
 	driver "github.com/pingcap/tidb/pkg/types/parser_driver"
 	"github.com/pingcap/tidb/pkg/util/dbterror"
 	plannererrors "github.com/pingcap/tidb/pkg/util/dbterror/plannererrors"
+	"github.com/pingcap/tidb/pkg/util/sqlescape"
 )
 
 func (e *executor) CreateMaterializedView(ctx sessionctx.Context, s *ast.CreateMaterializedViewStmt) error {
@@ -275,6 +280,220 @@ func (e *executor) DropMaterializedViewLog(ctx sessionctx.Context, s *ast.DropMa
 
 	dropStmt := &ast.DropTableStmt{Tables: []*ast.TableName{{Schema: schemaName, Name: mlogName}}}
 	return e.dropTableObject(ctx, dropStmt.Tables, dropStmt.IfExists, tableObject, true)
+}
+
+func (e *executor) PurgeMaterializedViewLog(ctx sessionctx.Context, s *ast.PurgeMaterializedViewLogStmt) (err error) {
+	is := e.infoCache.GetLatest()
+	schemaName := s.Table.Schema
+	if schemaName.O == "" {
+		if ctx.GetSessionVars().CurrentDB == "" {
+			return errors.Trace(plannererrors.ErrNoDB)
+		}
+		schemaName = pmodel.NewCIStr(ctx.GetSessionVars().CurrentDB)
+		s.Table.Schema = schemaName
+	}
+	if _, ok := is.SchemaByName(schemaName); !ok {
+		return infoschema.ErrDatabaseNotExists.GenWithStackByArgs(schemaName)
+	}
+	baseTable, err := is.TableByName(e.ctx, schemaName, s.Table.Name)
+	if err != nil {
+		return err
+	}
+	if baseTable.Meta().IsView() || baseTable.Meta().IsSequence() || baseTable.Meta().TempTableType != model.TempTableNone {
+		return dbterror.ErrWrongObject.GenWithStackByArgs(schemaName, s.Table.Name, "BASE TABLE")
+	}
+	baseTableID := baseTable.Meta().ID
+
+	mlogName := pmodel.NewCIStr("$mlog$" + baseTable.Meta().Name.O)
+	mlogTable, err := is.TableByName(e.ctx, schemaName, mlogName)
+	if err != nil {
+		if infoschema.ErrTableNotExists.Equal(err) {
+			return errors.Errorf("materialized view log does not exist for base table %s.%s", schemaName.O, s.Table.Name.O)
+		}
+		return err
+	}
+	if mlogTable.Meta().MaterializedViewLog == nil || mlogTable.Meta().MaterializedViewLog.BaseTableID != baseTableID {
+		return errors.Errorf("table %s.%s is not a materialized view log for base table %s.%s", schemaName.O, mlogName.O, schemaName.O, s.Table.Name.O)
+	}
+	mlogID := mlogTable.Meta().ID
+
+	sysSe, err := e.sessPool.Get()
+	if err != nil {
+		return errors.Trace(err)
+	}
+	defer e.sessPool.Put(sysSe)
+
+	ddlSe := sess.NewSession(sysSe)
+	execCtx := kv.WithInternalSourceType(context.Background(), kv.InternalTxnDDL)
+	if err = ddlSe.BeginPessimistic(execCtx); err != nil {
+		return errors.Trace(err)
+	}
+	defer func() {
+		if err != nil {
+			ddlSe.Rollback()
+		}
+	}()
+
+	txn, err := ddlSe.Txn()
+	if err != nil {
+		return errors.Trace(err)
+	}
+	purgeStartTS := txn.StartTS()
+
+	// Acquire the mutual exclusion lock row for this MLOG_ID. NOWAIT ensures we fail fast if another purge is running.
+	lockSQL := sqlescape.MustEscapeSQL("SELECT 1 FROM mysql.tidb_mlog_purge WHERE MLOG_ID = %? FOR UPDATE NOWAIT", mlogID)
+	rows, err := ddlSe.Execute(execCtx, lockSQL, "mlog-purge-lock-row")
+	if err != nil {
+		if storeerr.ErrLockAcquireFailAndNoWaitSet.Equal(err) {
+			return errors.Errorf("another purge is running for materialized view log on %s.%s, please retry later", schemaName.O, s.Table.Name.O)
+		}
+		if infoschema.ErrTableNotExists.Equal(err) {
+			return errors.New("required system table mysql.tidb_mlog_purge does not exist")
+		}
+		return errors.Trace(err)
+	}
+	if len(rows) == 0 {
+		return errors.Errorf("mlog purge lock row does not exist for mlog id %d", mlogID)
+	}
+
+	// Collect all dependent MV IDs (Public + in-building CREATE MATERIALIZED VIEW jobs).
+	publicMVIDs := make(map[int64]struct{})
+	if baseMeta := baseTable.Meta().MaterializedViewBase; baseMeta != nil {
+		for _, id := range baseMeta.MViewIDs {
+			if id > 0 {
+				publicMVIDs[id] = struct{}{}
+			}
+		}
+	}
+	jobSQL := sqlescape.MustEscapeSQL(
+		"SELECT job_meta FROM mysql.tidb_ddl_job WHERE type = %? AND FIND_IN_SET(%?, table_ids)",
+		model.ActionCreateMaterializedView,
+		mlogID,
+	)
+	jobRows, err := ddlSe.Execute(execCtx, jobSQL, "mlog-purge-find-building-mv-jobs")
+	if err != nil {
+		if infoschema.ErrTableNotExists.Equal(err) {
+			return errors.New("required system table mysql.tidb_ddl_job does not exist")
+		}
+		return errors.Trace(err)
+	}
+	buildingMVIDs := make(map[int64]struct{})
+	for _, row := range jobRows {
+		jobBytes := row.GetBytes(0)
+		if len(jobBytes) == 0 {
+			continue
+		}
+		job := model.Job{}
+		if err := job.Decode(jobBytes); err != nil {
+			return errors.Trace(err)
+		}
+		if job.TableID > 0 {
+			// `MaterializedViewBase.MViewIDs` may already include the MV ID when the job enters later phases.
+			// Prefer the semantics of Public MVs (missing refresh record blocks purge) for overlapped IDs.
+			if _, ok := publicMVIDs[job.TableID]; !ok {
+				buildingMVIDs[job.TableID] = struct{}{}
+			}
+		}
+	}
+
+	// Calculate safe purge tso. If there are no dependent MVs, it is safe to purge up to the start tso of this transaction.
+	safePurgeTSO := purgeStartTS
+	buildINList := func(ids []int64) string {
+		var sb strings.Builder
+		for i, id := range ids {
+			if i > 0 {
+				sb.WriteString(",")
+			}
+			sb.WriteString(strconv.FormatInt(id, 10))
+		}
+		return sb.String()
+	}
+
+	publicIDs := make([]int64, 0, len(publicMVIDs))
+	for mvID := range publicMVIDs {
+		publicIDs = append(publicIDs, mvID)
+	}
+	if len(publicIDs) > 0 {
+		// Public MVs should always have a refresh record. If not, treat it as metadata inconsistency and abort.
+		countSQL := fmt.Sprintf(
+			"SELECT COUNT(1) FROM mysql.tidb_mview_refresh WHERE MVIEW_ID IN (%s)",
+			buildINList(publicIDs),
+		)
+		countRows, err := ddlSe.Execute(execCtx, countSQL, "mlog-purge-check-public-mview-refresh-count")
+		if err != nil {
+			if infoschema.ErrTableNotExists.Equal(err) {
+				return errors.New("required system table mysql.tidb_mview_refresh does not exist")
+			}
+			return errors.Trace(err)
+		}
+		var cnt int64
+		if len(countRows) > 0 {
+			cnt = countRows[0].GetInt64(0)
+		}
+		if cnt != int64(len(publicIDs)) {
+			return errors.Errorf(
+				"materialized view refresh info is missing for some dependent materialized views on base table %s.%s (expected %d, got %d)",
+				schemaName.O,
+				s.Table.Name.O,
+				len(publicIDs),
+				cnt,
+			)
+		}
+	}
+
+	allMVIDs := make(map[int64]struct{}, len(publicMVIDs)+len(buildingMVIDs))
+	for mvID := range publicMVIDs {
+		allMVIDs[mvID] = struct{}{}
+	}
+	for mvID := range buildingMVIDs {
+		allMVIDs[mvID] = struct{}{}
+	}
+	allIDs := make([]int64, 0, len(allMVIDs))
+	for mvID := range allMVIDs {
+		allIDs = append(allIDs, mvID)
+	}
+	if len(allIDs) > 0 {
+		minSQL := fmt.Sprintf(
+			"SELECT MIN(COALESCE(LAST_SUCCESSFUL_REFRESH_READ_TSO, 0)) FROM mysql.tidb_mview_refresh WHERE MVIEW_ID IN (%s)",
+			buildINList(allIDs),
+		)
+		minRows, err := ddlSe.Execute(execCtx, minSQL, "mlog-purge-calc-safe-purge-tso")
+		if err != nil {
+			if infoschema.ErrTableNotExists.Equal(err) {
+				return errors.New("required system table mysql.tidb_mview_refresh does not exist")
+			}
+			return errors.Trace(err)
+		}
+		if len(minRows) > 0 && !minRows[0].IsNull(0) {
+			v := minRows[0].GetInt64(0)
+			if v <= 0 {
+				safePurgeTSO = 0
+			} else {
+				safePurgeTSO = uint64(v)
+				if safePurgeTSO > purgeStartTS {
+					safePurgeTSO = purgeStartTS
+				}
+			}
+		}
+	}
+
+	if safePurgeTSO > 0 {
+		const mlogAlias = "mlog"
+		deleteSQL := sqlescape.MustEscapeSQL(
+			"DELETE /*+ read_from_storage(tiflash[%n]) */ FROM %n.%n AS %n WHERE _tidb_commit_ts <= %?",
+			mlogAlias,
+			schemaName.O,
+			mlogName.O,
+			mlogAlias,
+			safePurgeTSO,
+		)
+		_, err = ddlSe.Execute(execCtx, deleteSQL, "mlog-purge-delete")
+		if err != nil {
+			return errors.Trace(err)
+		}
+	}
+
+	return errors.Trace(ddlSe.Commit(execCtx))
 }
 
 func (e *executor) AlterMaterializedView(ctx sessionctx.Context, s *ast.AlterMaterializedViewStmt) error {

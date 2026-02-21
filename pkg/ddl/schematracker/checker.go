@@ -322,6 +322,11 @@ func (d *Checker) AlterMaterializedViewLog(ctx sessionctx.Context, stmt *ast.Alt
 	return d.realExecutor.AlterMaterializedViewLog(ctx, stmt)
 }
 
+// PurgeMaterializedViewLog implements the DDL interface.
+func (d *Checker) PurgeMaterializedViewLog(ctx sessionctx.Context, stmt *ast.PurgeMaterializedViewLogStmt) error {
+	return d.realExecutor.PurgeMaterializedViewLog(ctx, stmt)
+}
+
 // RefreshMaterializedView implements the DDL interface.
 func (d *Checker) RefreshMaterializedView(ctx sessionctx.Context, stmt *ast.RefreshMaterializedViewStmt) error {
 	return d.realExecutor.RefreshMaterializedView(ctx, stmt)

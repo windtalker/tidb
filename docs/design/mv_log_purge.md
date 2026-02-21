@@ -127,7 +127,8 @@ TiDB 的 base table 元数据里维护了依赖 MV 的列表：
 
 异常/降级处理建议（偏保守）：
 
-- 若某个 MV 在 `tidb_mview_refresh` 中不存在记录，或 `LAST_SUCCESSFUL_REFRESH_READ_TSO` 为 `NULL`，则认为其 watermark 为 `0`，从而使得整体 safe purge TSO 也为 `0`（即不允许 purge 推进）。
+- 对 **已存在（Public）的 MV**：预期每个 MV 在 `tidb_mview_refresh` 中都存在一条记录。若发现依赖的 Public MV 在 `tidb_mview_refresh` 中不存在记录，视为系统表与元数据不一致，purge 应直接报错并中止；若记录存在但 `LAST_SUCCESSFUL_REFRESH_READ_TSO` 为 `NULL`，则认为其 watermark 为 `0`（即不允许 purge 推进）。
+- 对 **正在创建中的 MV**（通过 `mysql.tidb_ddl_job` 发现）：若在 purge 事务的 snapshot 下 **看不到**该 MV 在 `tidb_mview_refresh` 中的记录，则可将其视为“尚未开始消费”（不会限制 safe purge TSO）；若记录存在但 `LAST_SUCCESSFUL_REFRESH_READ_TSO` 为 `NULL`，则仍按 `0` 处理（保守：不推进 purge）。
 - 若 `mysql.tidb_mview_refresh` 系统表缺失（异常集群状态），则 purge 应直接报错（因为无法正确计算 safe boundary）。
 
 ### 单个 MV 的已消费 watermark（正在创建中）
@@ -137,6 +138,7 @@ TiDB 的 base table 元数据里维护了依赖 MV 的列表：
 这里引入一个实现层面的约束/假设（需要与后续 `CREATE MATERIALIZED VIEW` 实现对齐）：
 
 - 在 MV **init build 开始之前**，会在 `mysql.tidb_mview_refresh` 中为该 MV 写入一条记录；
+- 且该写入必须在 init build 获取/使用 read TSO（记为 `T_build`）之前 **完成 commit**（形成明确的 happens-before 关系）；
 - 该记录的 `LAST_SUCCESSFUL_REFRESH_READ_TSO` 记为 `T_init`，并保证：
   - `T_init` **小于**本次 init build 使用的 read TSO（记为 `T_build`），即 `T_init < T_build`。
 
@@ -144,14 +146,16 @@ TiDB 的 base table 元数据里维护了依赖 MV 的列表：
 
 - `W(mv) = LAST_SUCCESSFUL_REFRESH_READ_TSO`
 
-并复用前文的保守降级策略（缺失/NULL 视为 0），从而：
+并采用以下规则：
 
-- 在建 MV 能“阻止” purge 推进到超过其 `T_init` 的位置（更保守，但正确性更安全）；
-- 也允许将来把 `T_init` 设为一个更合理的初始值（例如接近 `T_build` 的位置），从而在建 MV 存在时仍可推进 purge。
+- 若 purge 事务在其 snapshot 下能看到该记录，则将该 MV 的 watermark 视为 `T_init`（或后续 refresh 更新后的 watermark）。
+- 若 purge 事务在其 snapshot 下看不到该记录，则可将该在建 MV 视为“尚未开始消费”，不限制 safe purge TSO。
+  - 直观解释：由于该记录在 init build 开始前必须 commit，purge snapshot 看不到记录反向说明 `T_purge_start < T_build`，因此 purge 至多清理到 `T_purge_start` 仍是安全的。
+- 若记录存在但 `LAST_SUCCESSFUL_REFRESH_READ_TSO` 为 `NULL`，仍按 `0` 处理（保守：不推进 purge）。
 
 ### MLog 的 safe purge TSO 计算（已存在 MV + 在建 MV）
 
-给定 base table 的 MLog，设其依赖的 MV 集合为 `MVs`（包含已创建完成且 Public 的 MV，以及正在创建中的 MV；依赖 MV IDs 的汇总方式见后文“汇总依赖的 MV IDs（已存在 + 在建）”），每个 MV 的 watermark 为 `W(mv)`（来自 `LAST_SUCCESSFUL_REFRESH_READ_TSO`，缺失/NULL 视为 0），则：
+给定 base table 的 MLog，设其依赖的 MV 集合为 `MVs`（包含已创建完成且 Public 的 MV，以及正在创建中的 MV；依赖 MV IDs 的汇总方式见后文“汇总依赖的 MV IDs（已存在 + 在建）”），每个 MV 的 watermark 为 `W(mv)`（来自 `LAST_SUCCESSFUL_REFRESH_READ_TSO`），则：
 
 ```text
 safe_purge_tso(mlog) = min( W(mv) )  for mv in MVs
@@ -164,10 +168,10 @@ safe_purge_tso(mlog) = min( W(mv) )  for mv in MVs
 - `safe_purge_tso(mlog) = T_purge_start`
 - `T_purge_start` 为 purge 事务的 start TSO（用于表达“无消费者时可以清理到当前事务开始时的边界”）。
 
-工程实现上，可以直接用系统表聚合得到 `safe_purge_tso`（`xxx` 为汇总得到的 MV IDs 列表）：
+工程实现上，可以对 “purge snapshot 下可见的 refresh 记录” 做聚合得到 `safe_purge_tso`（`xxx` 为汇总得到的 MV IDs 列表）。其中 `NULL` watermark 需要按 `0` 处理（保守：不推进 purge）。若聚合结果为空（例如仅存在在建 MV 且其 refresh 记录在该 snapshot 下不可见），则可回退为 `T_purge_start`：
 
 ```sql
-SELECT COALESCE(MIN(LAST_SUCCESSFUL_REFRESH_READ_TSO), 0) AS safe_purge_tso
+SELECT MIN(COALESCE(LAST_SUCCESSFUL_REFRESH_READ_TSO, 0)) AS safe_purge_tso
 FROM mysql.tidb_mview_refresh
 WHERE MVIEW_ID IN (xxx)
 ```
@@ -343,7 +347,7 @@ make parser_unit_test
 涉及改动（预期文件）：
 
 - `pkg/planner/core/preprocess.go`
-  - 设定 `stmtTp`（建议归类为 `TypeAlter` 或新增类型视现有枚举约束而定）。
+  - 设定 `stmtTp`（当前实现暂归类为 `TypeAlter`；TODO：后续再确认是否需要新增/调整 statement type 分类）。
 - `pkg/planner/core/planbuilder.go`
   - 补齐 visitInfo（权限校验），并确保 `ErrNoDB` 等错误行为一致。
 - `pkg/parser/ast/ast.go`

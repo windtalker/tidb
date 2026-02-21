@@ -186,6 +186,8 @@ func GetStmtLabel(stmtNode StmtNode) string {
 		return "DropMaterializedViewLog"
 	case *RefreshMaterializedViewStmt:
 		return "RefreshMaterializedView"
+	case *PurgeMaterializedViewLogStmt:
+		return "PurgeMaterializedViewLog"
 	case *CreateUserStmt:
 		return "CreateUser"
 	case *DeleteStmt:
