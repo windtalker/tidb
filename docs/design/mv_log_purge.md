@@ -1,7 +1,7 @@
 # Design: `PURGE MATERIALIZED VIEW LOG`
 
 - Status: Ready for implementation
-- Last updated: 2026-02-20
+- Last updated: 2026-02-21
 
 ## 背景
 
@@ -396,12 +396,90 @@ TODO（后续补齐审计能力）：
 
 ### Milestone 4：执行方式与性能迭代（避免长事务）
 
-v1 采用同步 `DELETE` 实现后，建议再按实际压测与反馈迭代以下方向（不改变 safe purge 语义）：
+目标：将当前“单语句 = 单事务”的 purge 执行方式改为“单语句 = 多事务分批删除”，降低大事务导致的 OOM/写放大风险，同时保持 safe purge 语义不变。
 
-- **分批与限速**：避免一次性大事务（按 rows/范围/tso 分段删除）。
-- **可中断/可重试**：失败后从 checkpoint 恢复（如引入 checkpoint 字段或任务表）。
-- **降低阻塞面**：评估 purge 与 refresh/base DML 的资源竞争与锁等待，并通过实现策略减少影响。
-- **更强可观测性**：rows/s、扫描/删除耗时分解、失败原因分类等。
+本里程碑先聚焦于“分批执行 + 语义稳定”，暂不引入后台任务化/checkpoint 表等复杂机制。
+
+#### 设计决策（本里程碑）
+
+- **执行 session 保持内部 session**
+  - `PURGE MATERIALIZED VIEW LOG` 的实际删除事务继续在 DDL 内部 session 中执行（沿用当前 DDL 子系统模式）。
+  - 用户 session 负责解析/权限校验/接收 warning，不直接承载 purge 的内部事务循环。
+- **新增分批参数**
+  - 增加 session/global 变量：`tidb_mlog_purge_batch_size`。
+  - 建议默认值：`100000`。
+  - 用途：控制每个 purge 子事务最多删除的行数。
+- **safe purge tso 仅计算一次**
+  - 在首个成功拿到锁的 purge 子事务中计算 `safe_purge_tso`。
+  - 后续 batch 固定复用该值，不重新计算，不向前推进边界。
+- **允许部分成功**
+  - 一个 statement 中，如果至少有一个 batch 已成功删除并提交，后续 batch 因锁冲突中断时，statement 返回成功并附带 warning。
+  - 如果一个 batch 都没成功提交就发生锁冲突，则返回 error。
+
+#### 详细执行流程（建议实现顺序）
+
+1. **入口阶段（用户 session）**
+   - 解析 base table -> mlog 元数据（沿用现有逻辑）。
+   - 读取当前 session 的 `tidb_mlog_purge_batch_size`。
+   - 初始化 statement 级统计项：`totalDeletedRows`、`safePurgeTSO`、`batchCount`、`startTime`。
+
+2. **batch 循环（内部 session，每批一个悲观事务）**
+   - 开启新事务。
+   - 执行 `SELECT ... FOR UPDATE NOWAIT` 获取 `mysql.tidb_mlog_purge` 行锁。
+   - 若是首批：收集依赖 MV IDs 并计算 `safe_purge_tso`（逻辑与 M2/M3 一致）。
+   - 若 `safe_purge_tso > 0`：执行带 `LIMIT` 的删除语句，例如：
+     - `DELETE ... WHERE _tidb_commit_ts <= safe_purge_tso LIMIT batch_size`
+   - 读取本批 `affected_rows`，累计到 `totalDeletedRows`。
+   - 更新 `mysql.tidb_mlog_purge` 的最新状态（行数写累计值，耗时写 statement 级累计耗时）。
+   - 提交事务。
+
+3. **循环退出条件**
+   - 本批 `affected_rows == 0`：表示无可删数据，结束。
+   - 本批 `affected_rows < batch_size`：表示已到边界尾部，结束。
+   - 本批 `affected_rows == batch_size`：继续下一批。
+
+4. **错误与 warning 语义**
+   - **锁冲突（NOWAIT）**
+     - `totalDeletedRows == 0`：返回 error（与当前行为一致）。
+     - `totalDeletedRows > 0`：向用户 session `StmtCtx` 追加 warning，返回成功。
+   - **非锁冲突错误**（系统表缺失、safe tso 计算失败、delete 执行失败、状态表写失败）
+     - 直接返回 error（即使已有部分 batch 成功，已提交部分不回滚）。
+
+#### 语义与兼容性说明
+
+- 该改动引入明确 tradeoff：statement 不再保证“全有或全无”。
+- 但 purge 语义仍保持幂等推进：重复执行仅会继续清理 `safe_purge_tso` 之前尚未删除的数据。
+- 在并发场景下，`MLOG_ID` 级别仍通过 `FOR UPDATE NOWAIT` 保证“每个子事务串行化”。
+
+#### `tidb_mlog_purge_batch_size` 约束建议
+
+- 变量类型：`GLOBAL | SESSION`，整型正数。
+- 默认值：`100000`。
+- 建议范围：`[1, 1000000]`（超范围按现有系统变量风格截断并给 warning）。
+- 实现细节建议：
+  - purge 执行时读取用户 session 的变量值，作为该 statement 的固定 batch size。
+  - 即使执行发生在内部 session，也不在循环中动态变更 batch size。
+
+#### 测试与验收建议（M4）
+
+- **变量行为**
+  - `set/show`、边界值、非法值、warning 行为与现有系统变量风格一致。
+- **分批正确性**
+  - 构造超过单批规模的数据，验证 statement 会发生多批提交，且最终删除完整。
+- **锁冲突语义**
+  - 首批即冲突：报错。
+  - 首批成功、后续批冲突：statement 成功且 `show warnings` 可见提示信息。
+- **safe tso 只算一次**
+  - 通过 failpoint/观测点验证后续 batch 不重复计算 `safe_purge_tso`。
+- **状态落表**
+  - `LAST_PURGE_ROWS` 为 statement 累计删除行数，不是单批行数。
+  - `LAST_PURGE_TIME` / `LAST_PURGE_DURATION` 在结束后可反映本次 statement 的最终状态。
+
+#### 后续迭代（不在本里程碑内）
+
+- 可中断/可重试（checkpoint 表或任务表）。
+- 分批限速（sleep/令牌桶/负载反馈）。
+- 更强可观测性（batch 级 rows/s、失败分类、耗时拆解）。
 
 ### Milestone 5：集成测试与文档补齐
 

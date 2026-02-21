@@ -42,6 +42,8 @@ import (
 	"github.com/pingcap/tidb/pkg/util/sqlescape"
 )
 
+var errMLogPurgeLockConflict = errors.NewNoStackError("mlog purge lock conflict")
+
 func (e *executor) CreateMaterializedView(ctx sessionctx.Context, s *ast.CreateMaterializedViewStmt) error {
 	is := e.infoCache.GetLatest()
 	schemaName := s.ViewName.Schema
@@ -284,8 +286,8 @@ func (e *executor) DropMaterializedViewLog(ctx sessionctx.Context, s *ast.DropMa
 }
 
 func calcMaterializedViewLogSafePurgeTSO(
-	ddlSe *sess.Session,
 	execCtx context.Context,
+	ddlSe *sess.Session,
 	baseSchema string,
 	baseTable string,
 	purgeStartTS uint64,
@@ -431,18 +433,34 @@ func (e *executor) resolvePurgeMaterializedViewLogMeta(
 }
 
 func acquireMaterializedViewLogPurgeLock(
-	ddlSe *sess.Session,
 	execCtx context.Context,
+	ddlSe *sess.Session,
 	schemaName pmodel.CIStr,
 	baseTableName pmodel.CIStr,
 	mlogID int64,
 ) error {
+	forceConflict := false
+	failpoint.Inject("mockPurgeMaterializedViewLogLockConflict", func(val failpoint.Value) {
+		if v, ok := val.(bool); ok && v {
+			forceConflict = true
+		}
+	})
+	if forceConflict {
+		return errors.Annotatef(
+			errMLogPurgeLockConflict,
+			"another purge is running for materialized view log on %s.%s, please retry later",
+			schemaName.O,
+			baseTableName.O,
+		)
+	}
+
 	// Acquire the mutual exclusion lock row for this MLOG_ID. NOWAIT ensures we fail fast if another purge is running.
 	lockSQL := sqlescape.MustEscapeSQL("SELECT 1 FROM mysql.tidb_mlog_purge WHERE MLOG_ID = %? FOR UPDATE NOWAIT", mlogID)
 	rows, err := ddlSe.Execute(execCtx, lockSQL, "mlog-purge-lock-row")
 	if err != nil {
 		if storeerr.ErrLockAcquireFailAndNoWaitSet.Equal(err) {
-			return errors.Errorf(
+			return errors.Annotatef(
+				errMLogPurgeLockConflict,
 				"another purge is running for materialized view log on %s.%s, please retry later",
 				schemaName.O,
 				baseTableName.O,
@@ -459,9 +477,13 @@ func acquireMaterializedViewLogPurgeLock(
 	return nil
 }
 
+func isMLogPurgeLockConflict(err error) bool {
+	return err != nil && errors.ErrorEqual(err, errMLogPurgeLockConflict)
+}
+
 func collectDependentMViewIDsForMLogPurge(
-	ddlSe *sess.Session,
 	execCtx context.Context,
+	ddlSe *sess.Session,
 	baseTableMeta *model.TableInfo,
 	mlogID int64,
 ) (publicMVIDs, buildingMVIDs map[int64]struct{}, _ error) {
@@ -508,20 +530,37 @@ func collectDependentMViewIDsForMLogPurge(
 }
 
 func purgeMaterializedViewLogData(
-	ddlSe *sess.Session,
 	execCtx context.Context,
+	ddlSe *sess.Session,
 	schemaName string,
 	mlogName string,
 	safePurgeTSO uint64,
+	batchSize int64,
 ) (int64, error) {
+	failpoint.Inject("mockPurgeMaterializedViewLogDeleteErr", func(val failpoint.Value) {
+		if v, ok := val.(bool); ok && v {
+			failpoint.Return(int64(0), errors.New("mock purge mlog delete error"))
+		}
+	})
+
+	failpoint.Inject("mockPurgeMaterializedViewLogDeleteRows", func(val failpoint.Value) {
+		switch v := val.(type) {
+		case int:
+			failpoint.Return(int64(v), nil)
+		case int64:
+			failpoint.Return(v, nil)
+		}
+	})
+
 	const mlogAlias = "mlog"
 	deleteSQL := sqlescape.MustEscapeSQL(
-		"DELETE /*+ read_from_storage(tiflash[%n]) */ FROM %n.%n AS %n WHERE _tidb_commit_ts <= %?",
+		"DELETE /*+ read_from_storage(tiflash[%n]) */ FROM %n.%n AS %n WHERE _tidb_commit_ts <= %? LIMIT %?",
 		mlogAlias,
 		schemaName,
 		mlogName,
 		mlogAlias,
 		safePurgeTSO,
+		batchSize,
 	)
 	_, err := ddlSe.Execute(execCtx, deleteSQL, "mlog-purge-delete")
 	if err != nil {
@@ -531,8 +570,8 @@ func purgeMaterializedViewLogData(
 }
 
 func updateMaterializedViewLogPurgeState(
-	ddlSe *sess.Session,
 	execCtx context.Context,
+	ddlSe *sess.Session,
 	mlogID int64,
 	purgeEndTime time.Time,
 	purgeRows int64,
@@ -566,6 +605,10 @@ func (e *executor) PurgeMaterializedViewLog(ctx sessionctx.Context, s *ast.Purge
 	if err != nil {
 		return err
 	}
+	batchSize := int64(ctx.GetSessionVars().MLogPurgeBatchSize)
+	if batchSize <= 0 {
+		batchSize = int64(variable.DefTiDBMLogPurgeBatchSize)
+	}
 
 	sysSe, err := e.sessPool.Get()
 	if err != nil {
@@ -575,63 +618,91 @@ func (e *executor) PurgeMaterializedViewLog(ctx sessionctx.Context, s *ast.Purge
 
 	ddlSe := sess.NewSession(sysSe)
 	execCtx := kv.WithInternalSourceType(context.Background(), kv.InternalTxnDDL)
-	if err = ddlSe.BeginPessimistic(execCtx); err != nil {
-		return errors.Trace(err)
-	}
-	needRollback := true
-	defer func() {
-		if needRollback {
-			ddlSe.Rollback()
-		}
-	}()
-
-	txn, err := ddlSe.Txn()
-	if err != nil {
-		return errors.Trace(err)
-	}
-	purgeStartTS := txn.StartTS()
 	purgeStartTime := time.Now()
+	totalPurgeRows := int64(0)
+	safePurgeTSOReady := false
+	safePurgeTSO := uint64(0)
 
-	if err := acquireMaterializedViewLogPurgeLock(ddlSe, execCtx, schemaName, s.Table.Name, mlogID); err != nil {
-		return err
+	for {
+		if err = ddlSe.BeginPessimistic(execCtx); err != nil {
+			return errors.Trace(err)
+		}
+
+		if err := acquireMaterializedViewLogPurgeLock(execCtx, ddlSe, schemaName, s.Table.Name, mlogID); err != nil {
+			ddlSe.Rollback()
+			if isMLogPurgeLockConflict(err) && totalPurgeRows > 0 {
+				ctx.GetSessionVars().StmtCtx.AppendWarning(errors.NewNoStackErrorf(
+					"purge materialized view log on %s.%s stopped before deleting all eligible rows due to lock conflict after deleting %d rows; please retry later",
+					schemaName.O,
+					s.Table.Name.O,
+					totalPurgeRows,
+				))
+				return nil
+			}
+			return err
+		}
+
+		var batchErr error
+		batchPurgeRows := int64(0)
+
+		// Calculate safe purge tso once at the first successful lock acquisition.
+		if !safePurgeTSOReady {
+			txn, err := ddlSe.Txn()
+			if err != nil {
+				ddlSe.Rollback()
+				return errors.Trace(err)
+			}
+			purgeStartTS := txn.StartTS()
+			safePurgeTSO = purgeStartTS
+
+			// Collect all dependent MV IDs (Public + in-building CREATE MATERIALIZED VIEW jobs).
+			publicMVIDs, buildingMVIDs, collectErr := collectDependentMViewIDsForMLogPurge(execCtx, ddlSe, baseTableMeta, mlogID)
+			if collectErr != nil {
+				batchErr = collectErr
+			} else {
+				// If there are no dependent MVs, it is safe to purge up to the start tso of this transaction.
+				safePurgeTSO, batchErr = calcMaterializedViewLogSafePurgeTSO(
+					execCtx,
+					ddlSe,
+					schemaName.O,
+					s.Table.Name.O,
+					purgeStartTS,
+					publicMVIDs,
+					buildingMVIDs,
+				)
+			}
+			safePurgeTSOReady = true
+		}
+
+		if batchErr == nil && safePurgeTSO > 0 {
+			batchPurgeRows, batchErr = purgeMaterializedViewLogData(execCtx, ddlSe, schemaName.O, mlogName.O, safePurgeTSO, batchSize)
+		}
+
+		purgeEndTime := time.Now()
+		purgeDuration := purgeEndTime.Sub(purgeStartTime).Milliseconds()
+		purgeRowsForState := totalPurgeRows
+		if batchErr == nil {
+			purgeRowsForState += batchPurgeRows
+		}
+		// Keep state bookkeeping even when batchErr != nil. The failed DELETE statement has already
+		// been rolled back at statement level by session execution, so committing here will only
+		// persist this state update and will not include failed DELETE writes.
+		if err := updateMaterializedViewLogPurgeState(execCtx, ddlSe, mlogID, purgeEndTime, purgeRowsForState, purgeDuration); err != nil {
+			ddlSe.Rollback()
+			return err
+		}
+		if err := ddlSe.Commit(execCtx); err != nil {
+			return errors.Trace(err)
+		}
+
+		if batchErr != nil {
+			return errors.Trace(batchErr)
+		}
+		totalPurgeRows += batchPurgeRows
+		if batchPurgeRows < batchSize {
+			return nil
+		}
 	}
-
-	var purgeErr error
-
-	// Collect all dependent MV IDs (Public + in-building CREATE MATERIALIZED VIEW jobs).
-	publicMVIDs, buildingMVIDs, purgeErr := collectDependentMViewIDsForMLogPurge(ddlSe, execCtx, baseTableMeta, mlogID)
-
-	// Calculate safe purge tso. If there are no dependent MVs, it is safe to purge up to the start tso of this transaction.
-	safePurgeTSO := purgeStartTS
-	if purgeErr == nil {
-		safePurgeTSO, purgeErr = calcMaterializedViewLogSafePurgeTSO(
-			ddlSe,
-			execCtx,
-			schemaName.O,
-			s.Table.Name.O,
-			purgeStartTS,
-			publicMVIDs,
-			buildingMVIDs,
-		)
-	}
-
-	purgeRows := int64(0)
-	if purgeErr == nil && safePurgeTSO > 0 {
-		purgeRows, purgeErr = purgeMaterializedViewLogData(ddlSe, execCtx, schemaName.O, mlogName.O, safePurgeTSO)
-	}
-
-	purgeEndTime := time.Now()
-	purgeDuration := purgeEndTime.Sub(purgeStartTime).Milliseconds()
-
-	if err := updateMaterializedViewLogPurgeState(ddlSe, execCtx, mlogID, purgeEndTime, purgeRows, purgeDuration); err != nil {
-		return err
-	}
-
-	if err := ddlSe.Commit(execCtx); err != nil {
-		return errors.Trace(err)
-	}
-	needRollback = false
-	return errors.Trace(purgeErr)
 }
 
 func (e *executor) AlterMaterializedView(ctx sessionctx.Context, s *ast.AlterMaterializedViewStmt) error {

@@ -470,6 +470,18 @@ func TestSetVar(t *testing.T) {
 	tk.MustExec("set session tidb_dml_batch_size = -120")
 	tk.MustQuery(`show warnings`).Check(testkit.Rows("Warning 1292 Truncated incorrect tidb_dml_batch_size value: '-120'")) // without redaction
 
+	tk.MustQuery("select @@tidb_mlog_purge_batch_size;").Check(testkit.Rows(strconv.Itoa(variable.DefTiDBMLogPurgeBatchSize)))
+	tk.MustExec("set @@session.tidb_mlog_purge_batch_size = 120000")
+	tk.MustQuery("select @@tidb_mlog_purge_batch_size;").Check(testkit.Rows("120000"))
+	tk.MustExec("set @@session.tidb_mlog_purge_batch_size = -1")
+	tk.MustQuery(`show warnings`).Check(testkit.Rows("Warning 1292 Truncated incorrect tidb_mlog_purge_batch_size value: '-1'"))
+	tk.MustQuery("select @@tidb_mlog_purge_batch_size;").Check(testkit.Rows(strconv.Itoa(variable.DefTiDBMLogPurgeBatchMinSize)))
+	tk.MustExec(fmt.Sprintf("set @@session.tidb_mlog_purge_batch_size = %d", variable.DefTiDBMLogPurgeBatchMaxSize+1))
+	tk.MustQuery(`show warnings`).Check(testkit.Rows(fmt.Sprintf("Warning 1292 Truncated incorrect tidb_mlog_purge_batch_size value: '%d'", variable.DefTiDBMLogPurgeBatchMaxSize+1)))
+	tk.MustQuery("select @@tidb_mlog_purge_batch_size;").Check(testkit.Rows(strconv.Itoa(variable.DefTiDBMLogPurgeBatchMaxSize)))
+	tk.MustExec("set @@global.tidb_mlog_purge_batch_size = 300000")
+	tk.MustQuery("select @@global.tidb_mlog_purge_batch_size").Check(testkit.Rows("300000"))
+
 	tk.MustExec("set global tidb_gogc_tuner_min_value=300")
 	tk.MustQuery("show warnings").Check(testkit.Rows())
 	tk.MustExec("set global tidb_gogc_tuner_max_value=600")
