@@ -375,16 +375,20 @@ go test ./pkg/executor/... -run PurgeMaterializedViewLog -tags=intest,deadlock
 - 并发 purge 冲突时的错误行为稳定（NOWAIT 冲突直接报错）；
 - `mysql.tidb_mlog_purge` 锁行缺失时直接报错（系统表与元数据不一致）。
 
-### Milestone 3：状态落表与审计（`tidb_mlog_purge` / `tidb_mlog_purge_hist`）
+### Milestone 3：状态落表（先落 `tidb_mlog_purge`，审计表后续补齐）
 
 目标：补齐 purge 的可观测性与审计面，便于排障与运维，同时为后续性能优化（分批/限速/后台化）预留扩展点。
 
 建议交付内容：
 
 - 接入系统表：
-  - 在 purge 成功/失败后，更新 `mysql.tidb_mlog_purge` 的最新状态。
-  - 向 `mysql.tidb_mlog_purge_hist` 插入一条历史记录，并维护 `IS_NEWEST_PURGE` 标记（对齐 refresh hist 的表设计习惯）。
+  - 在 purge 成功/失败后，更新 `mysql.tidb_mlog_purge` 的最新状态（时间/行数/耗时）。
 - 预留 failpoint（用于后续测试错误分支、重试语义等）。
+
+TODO（后续补齐审计能力）：
+
+- 接入 `mysql.tidb_mlog_purge_hist`：
+  - 插入历史记录并维护 `IS_NEWEST_PURGE` 标记（对齐 refresh hist 的表设计习惯）。
 
 验证建议：
 
@@ -417,6 +421,6 @@ v1 采用同步 `DELETE` 实现后，建议再按实际压测与反馈迭代以�
 
 - M1：parser/restore + unit test 通过；语法不会影响现有 `PURGE BACKUP LOGS ...`。
 - M2：走通 DDL 链路、权限校验覆盖、错误信息稳定；且执行不依赖 DDL owner（不提交 DDL job）；新增/修改单测通过。
-- M3：系统表落表与审计可用；失败分支可测；基础可观测性具备。
+- M3：`mysql.tidb_mlog_purge` 状态落表可用（成功/失败均更新）；失败分支可测；基础可观测性具备；`mysql.tidb_mlog_purge_hist` 作为 TODO。
 - M4：性能与可运维性有明确迭代路径（分批/限速/可重试），并有对应测试与压测结论支撑。
 - M5：文档补齐、典型运维路径清晰（查看状态/历史、失败排查）。

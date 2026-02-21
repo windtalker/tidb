@@ -293,8 +293,47 @@ func TestPurgeMaterializedViewLogMissingPublicMViewRefreshRow(t *testing.T) {
 	mvTable, err := is.TableByName(context.Background(), pmodel.NewCIStr("test"), pmodel.NewCIStr("mv_purge_missing_public_refresh"))
 	require.NoError(t, err)
 	mvID := mvTable.Meta().ID
+	mlogTable, err := is.TableByName(context.Background(), pmodel.NewCIStr("test"), pmodel.NewCIStr("$mlog$t_purge_missing_public_refresh"))
+	require.NoError(t, err)
+	mlogID := mlogTable.Meta().ID
 
 	tk.MustExec(fmt.Sprintf("delete from mysql.tidb_mview_refresh where mview_id = %d", mvID))
 	err = tk.ExecToErr("purge materialized view log on t_purge_missing_public_refresh")
 	require.ErrorContains(t, err, "materialized view refresh info is missing")
+
+	// Purge failure should still be recorded in the state table.
+	tk.MustQuery(fmt.Sprintf("select LAST_PURGE_TIME is not null, LAST_PURGE_ROWS, LAST_PURGE_DURATION >= 0 from mysql.tidb_mlog_purge where MLOG_ID = %d", mlogID)).
+		Check(testkit.Rows("1 0 1"))
+	// This version does not write mysql.tidb_mlog_purge_hist yet.
+	tk.MustQuery(fmt.Sprintf("select count(*) from mysql.tidb_mlog_purge_hist where MLOG_ID = %d", mlogID)).
+		Check(testkit.Rows("0"))
+}
+
+func TestPurgeMaterializedViewLogWritesState(t *testing.T) {
+	store, dom := testkit.CreateMockStoreAndDomain(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+
+	tk.MustExec("create table t_purge_state (id int primary key, v int)")
+	tk.MustExec("create materialized view log on t_purge_state (id, v) purge immediate")
+
+	is := dom.InfoSchema()
+	mlogTable, err := is.TableByName(context.Background(), pmodel.NewCIStr("test"), pmodel.NewCIStr("$mlog$t_purge_state"))
+	require.NoError(t, err)
+	mlogID := mlogTable.Meta().ID
+
+	tk.MustExec("purge materialized view log on t_purge_state")
+
+	tk.MustQuery(fmt.Sprintf("select LAST_PURGE_TIME is not null, LAST_PURGE_ROWS, LAST_PURGE_DURATION >= 0 from mysql.tidb_mlog_purge where MLOG_ID = %d", mlogID)).
+		Check(testkit.Rows("1 0 1"))
+	// This version does not write mysql.tidb_mlog_purge_hist yet.
+	tk.MustQuery(fmt.Sprintf("select count(*) from mysql.tidb_mlog_purge_hist where MLOG_ID = %d", mlogID)).
+		Check(testkit.Rows("0"))
+
+	tk.MustExec("purge materialized view log on t_purge_state")
+	tk.MustQuery(fmt.Sprintf("select LAST_PURGE_ROWS from mysql.tidb_mlog_purge where MLOG_ID = %d", mlogID)).
+		Check(testkit.Rows("0"))
+	// Still no history records.
+	tk.MustQuery(fmt.Sprintf("select count(*) from mysql.tidb_mlog_purge_hist where MLOG_ID = %d", mlogID)).
+		Check(testkit.Rows("0"))
 }
