@@ -295,14 +295,11 @@ func TestPurgeMaterializedViewLogBatchDelete(t *testing.T) {
 	require.NoError(t, err)
 	mlogID := mlogTable.Meta().ID
 
-	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/pkg/ddl/mockPurgeMaterializedViewLogDeleteRows", "2*return(2)->return(1)"))
-	defer func() {
-		require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/pkg/ddl/mockPurgeMaterializedViewLogDeleteRows"))
-	}()
-
+	tk.MustQuery("select count(*) from `$mlog$t_purge_batch_delete`").Check(testkit.Rows("5"))
 	tk.MustExec("set @@session.tidb_mlog_purge_batch_size = 2")
 	tk.MustExec("purge materialized view log on t_purge_batch_delete")
 
+	tk.MustQuery("select count(*) from `$mlog$t_purge_batch_delete`").Check(testkit.Rows("0"))
 	tk.MustQuery(fmt.Sprintf("select LAST_PURGE_ROWS from mysql.tidb_mlog_purge where MLOG_ID = %d", mlogID)).
 		Check(testkit.Rows("5"))
 }
@@ -349,10 +346,6 @@ func TestPurgeMaterializedViewLogLockConflictAfterPartialSuccess(t *testing.T) {
 	mlogID := mlogTable.Meta().ID
 
 	tk.MustExec("set @@session.tidb_mlog_purge_batch_size = 1")
-	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/pkg/ddl/mockPurgeMaterializedViewLogDeleteRows", "1*return(1)"))
-	defer func() {
-		require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/pkg/ddl/mockPurgeMaterializedViewLogDeleteRows"))
-	}()
 	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/pkg/ddl/mockPurgeMaterializedViewLogLockConflict", "1*return(false)->return(true)"))
 	defer func() {
 		require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/pkg/ddl/mockPurgeMaterializedViewLogLockConflict"))
@@ -361,7 +354,7 @@ func TestPurgeMaterializedViewLogLockConflictAfterPartialSuccess(t *testing.T) {
 	tk.MustExec("purge materialized view log on t_purge_partial_conflict")
 	tk.MustQuery("show warnings").CheckContain("lock conflict after deleting 1 rows")
 
-	tk.MustQuery("select count(*) from `$mlog$t_purge_partial_conflict`").Check(testkit.Rows("3"))
+	tk.MustQuery("select count(*) from `$mlog$t_purge_partial_conflict`").Check(testkit.Rows("2"))
 	tk.MustQuery(fmt.Sprintf("select LAST_PURGE_ROWS from mysql.tidb_mlog_purge where MLOG_ID = %d", mlogID)).
 		Check(testkit.Rows("1"))
 }
