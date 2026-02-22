@@ -128,6 +128,22 @@ func TestRefreshMaterializedViewDisallowExplicitTransaction(t *testing.T) {
 	tk.MustExec("rollback")
 }
 
+func TestPurgeMaterializedViewLogDisallowExplicitTransaction(t *testing.T) {
+	store := testkit.CreateMockStore(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+
+	tk.MustExec("create table t_mlog_purge_txn (a int not null, b int not null)")
+	tk.MustExec("create materialized view log on t_mlog_purge_txn (a, b) purge immediate")
+
+	tk.MustExec("begin")
+	tk.MustGetErrMsg(
+		"purge materialized view log on t_mlog_purge_txn",
+		"cannot run PURGE MATERIALIZED VIEW LOG in explicit transaction",
+	)
+	tk.MustExec("rollback")
+}
+
 func TestIndexColumnLength(t *testing.T) {
 	store, dom := testkit.CreateMockStoreAndDomain(t)
 
