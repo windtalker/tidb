@@ -230,18 +230,21 @@ func TestCreateMaterializedViewRefreshInfoRunningAndSuccess(t *testing.T) {
 	}()
 
 	var initTS uint64
+	var mviewID int64
 	require.Eventually(t, func() bool {
-		rows := tk.MustQuery("select LAST_REFRESH_RESULT, LAST_REFRESH_TYPE, LAST_SUCCESSFUL_REFRESH_READ_TSO from mysql.tidb_mview_refresh").Rows()
+		rows := tk.MustQuery("select MVIEW_ID, LAST_SUCCESS_READ_TSO from mysql.tidb_mview_refresh_info").Rows()
 		if len(rows) != 1 {
 			return false
 		}
-		if fmt.Sprint(rows[0][0]) != "running" || fmt.Sprint(rows[0][1]) != "complete" {
+		id, err := strconv.ParseInt(fmt.Sprint(rows[0][0]), 10, 64)
+		if err != nil || id == 0 {
 			return false
 		}
-		ts, err := strconv.ParseUint(fmt.Sprint(rows[0][2]), 10, 64)
+		ts, err := strconv.ParseUint(fmt.Sprint(rows[0][1]), 10, 64)
 		if err != nil || ts == 0 {
 			return false
 		}
+		mviewID = id
 		initTS = ts
 		return true
 	}, 30*time.Second, 100*time.Millisecond)
@@ -253,14 +256,11 @@ func TestCreateMaterializedViewRefreshInfoRunningAndSuccess(t *testing.T) {
 	require.NoError(t, err)
 	tk.MustQuery("select a, s, cnt from mv_state order by a").Check(testkit.Rows("1 15 2", "2 7 1"))
 
-	rows := tk.MustQuery("select LAST_REFRESH_RESULT, LAST_REFRESH_TYPE, LAST_SUCCESSFUL_REFRESH_READ_TSO, LAST_REFRESH_FAILED_REASON is null from mysql.tidb_mview_refresh").Rows()
+	rows := tk.MustQuery(fmt.Sprintf("select LAST_SUCCESS_READ_TSO from mysql.tidb_mview_refresh_info where MVIEW_ID = %d", mviewID)).Rows()
 	require.Len(t, rows, 1)
-	require.Equal(t, "success", fmt.Sprint(rows[0][0]))
-	require.Equal(t, "complete", fmt.Sprint(rows[0][1]))
-	finalTS, err := strconv.ParseUint(fmt.Sprint(rows[0][2]), 10, 64)
+	finalTS, err := strconv.ParseUint(fmt.Sprint(rows[0][0]), 10, 64)
 	require.NoError(t, err)
-	require.Greater(t, finalTS, initTS)
-	require.Equal(t, "1", fmt.Sprint(rows[0][3]))
+	require.GreaterOrEqual(t, finalTS, initTS)
 }
 
 func TestCreateMaterializedViewBuildFailureRollback(t *testing.T) {

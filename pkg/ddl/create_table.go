@@ -261,16 +261,16 @@ func (w *worker) onCreateMaterializedViewLog(jobCtx *jobContext, job *model.Job)
 		if ctx == nil {
 			ctx = w.workCtx
 		}
-		insertSQL := sqlescape.MustEscapeSQL("INSERT IGNORE INTO mysql.tidb_mlog_purge (MLOG_ID) VALUES (%?)", mlogTblInfo.ID)
+		insertSQL := sqlescape.MustEscapeSQL("INSERT IGNORE INTO mysql.tidb_mlog_purge_info (MLOG_ID) VALUES (%?)", mlogTblInfo.ID)
 		_, err = w.sess.Execute(ctx, insertSQL, "mlog-purge-lock-row-insert")
 		failpoint.Inject("mockInsertMLogPurgeTableNotExists", func(val failpoint.Value) {
 			if val.(bool) {
-				err = infoschema.ErrTableNotExists.GenWithStackByArgs("mysql", "tidb_mlog_purge")
+				err = infoschema.ErrTableNotExists.GenWithStackByArgs("mysql", "tidb_mlog_purge_info")
 			}
 		})
 		if infoschema.ErrTableNotExists.Equal(err) {
 			job.State = model.JobStateCancelled
-			return ver, dbterror.ErrInvalidDDLJob.GenWithStackByArgs("create materialized view log: required system table mysql.tidb_mlog_purge does not exist")
+			return ver, dbterror.ErrInvalidDDLJob.GenWithStackByArgs("create materialized view log: required system table mysql.tidb_mlog_purge_info does not exist")
 		}
 		if err != nil {
 			return ver, errors.Trace(err)
@@ -446,10 +446,7 @@ func (w *worker) onCreateMaterializedView(jobCtx *jobContext, job *model.Job) (v
 		if err = w.upsertCreateMaterializedViewRefreshInfo(
 			jobCtx,
 			mvTblInfo.ID,
-			mviewRefreshResultSuccess,
-			mviewRefreshTypeComplete,
 			job.SnapshotVer,
-			"",
 		); err != nil {
 			job.State = model.JobStateRollingback
 			return ver, errors.Trace(err)
@@ -711,12 +708,6 @@ func (w *worker) buildCreateMaterializedViewData(ctx context.Context, storeName 
 	return w.buildCreateMaterializedViewDataByImport(ctx, job, mvTblInfo)
 }
 
-const (
-	mviewRefreshResultRunning = "running"
-	mviewRefreshResultSuccess = "success"
-	mviewRefreshTypeComplete  = "complete"
-)
-
 func (w *worker) prewriteCreateMaterializedViewRefreshInfo(jobCtx *jobContext, mviewID int64) error {
 	ctx := jobCtx.stepCtx
 	if ctx == nil {
@@ -747,10 +738,7 @@ func (w *worker) prewriteCreateMaterializedViewRefreshInfo(jobCtx *jobContext, m
 		ctx,
 		ddlSess,
 		mviewID,
-		mviewRefreshResultRunning,
-		mviewRefreshTypeComplete,
 		startTS,
-		"",
 	); err != nil {
 		return errors.Trace(err)
 	}
@@ -764,10 +752,7 @@ func (w *worker) prewriteCreateMaterializedViewRefreshInfo(jobCtx *jobContext, m
 func (w *worker) upsertCreateMaterializedViewRefreshInfo(
 	jobCtx *jobContext,
 	mviewID int64,
-	refreshResult string,
-	refreshType string,
 	readTS uint64,
-	failedReason string,
 ) error {
 	ctx := jobCtx.stepCtx
 	if ctx == nil {
@@ -784,10 +769,7 @@ func (w *worker) upsertCreateMaterializedViewRefreshInfo(
 		ctx,
 		ddlSess,
 		mviewID,
-		refreshResult,
-		refreshType,
 		readTS,
-		failedReason,
 	))
 }
 
@@ -795,20 +777,21 @@ func execCreateMaterializedViewRefreshInfoUpsert(
 	ctx context.Context,
 	ddlSess *sess.Session,
 	mviewID int64,
-	refreshResult string,
-	refreshType string,
 	readTS uint64,
-	failedReason string,
 ) error {
-	upsertSQL := buildCreateMaterializedViewRefreshInfoUpsertSQL(mviewID, refreshResult, refreshType, readTS, failedReason)
+	if readTS == 0 {
+		// Keep existing LAST_SUCCESS_READ_TSO unchanged when there is no successful read tso.
+		return nil
+	}
+	upsertSQL := buildCreateMaterializedViewRefreshInfoUpsertSQL(mviewID, readTS)
 	_, err := ddlSess.Execute(ctx, upsertSQL, "mview-refresh-info-upsert")
 	failpoint.Inject("mockUpsertCreateMaterializedViewRefreshInfoTableNotExists", func(val failpoint.Value) {
 		if val.(bool) {
-			err = infoschema.ErrTableNotExists.GenWithStackByArgs("mysql", "tidb_mview_refresh")
+			err = infoschema.ErrTableNotExists.GenWithStackByArgs("mysql", "tidb_mview_refresh_info")
 		}
 	})
 	if infoschema.ErrTableNotExists.Equal(err) {
-		err = dbterror.ErrInvalidDDLJob.GenWithStackByArgs("create materialized view: required system table mysql.tidb_mview_refresh does not exist")
+		err = dbterror.ErrInvalidDDLJob.GenWithStackByArgs("create materialized view: required system table mysql.tidb_mview_refresh_info does not exist")
 	}
 	return errors.Trace(err)
 }
@@ -818,11 +801,11 @@ func (w *worker) deleteCreateMaterializedViewRefreshInfo(jobCtx *jobContext, mvi
 	if ctx == nil {
 		ctx = w.workCtx
 	}
-	deleteSQL := sqlescape.MustEscapeSQL("DELETE FROM mysql.tidb_mview_refresh WHERE MVIEW_ID = %?", mviewID)
+	deleteSQL := sqlescape.MustEscapeSQL("DELETE FROM mysql.tidb_mview_refresh_info WHERE MVIEW_ID = %?", mviewID)
 	_, err := w.sess.Execute(ctx, deleteSQL, "mview-refresh-info-delete")
 	failpoint.Inject("mockDeleteCreateMaterializedViewRefreshInfoTableNotExists", func(val failpoint.Value) {
 		if val.(bool) {
-			err = infoschema.ErrTableNotExists.GenWithStackByArgs("mysql", "tidb_mview_refresh")
+			err = infoschema.ErrTableNotExists.GenWithStackByArgs("mysql", "tidb_mview_refresh_info")
 		}
 	})
 	if infoschema.ErrTableNotExists.Equal(err) {
@@ -836,11 +819,11 @@ func (w *worker) deleteMaterializedViewLogPurgeInfo(jobCtx *jobContext, mlogID i
 	if ctx == nil {
 		ctx = w.workCtx
 	}
-	deleteSQL := sqlescape.MustEscapeSQL("DELETE FROM mysql.tidb_mlog_purge WHERE MLOG_ID = %?", mlogID)
+	deleteSQL := sqlescape.MustEscapeSQL("DELETE FROM mysql.tidb_mlog_purge_info WHERE MLOG_ID = %?", mlogID)
 	_, err := w.sess.Execute(ctx, deleteSQL, "mlog-purge-info-delete")
 	failpoint.Inject("mockDeleteMaterializedViewLogPurgeInfoTableNotExists", func(val failpoint.Value) {
 		if val.(bool) {
-			err = infoschema.ErrTableNotExists.GenWithStackByArgs("mysql", "tidb_mlog_purge")
+			err = infoschema.ErrTableNotExists.GenWithStackByArgs("mysql", "tidb_mlog_purge_info")
 		}
 	})
 	if infoschema.ErrTableNotExists.Equal(err) {
@@ -851,38 +834,16 @@ func (w *worker) deleteMaterializedViewLogPurgeInfo(jobCtx *jobContext, mlogID i
 
 func buildCreateMaterializedViewRefreshInfoUpsertSQL(
 	mviewID int64,
-	refreshResult string,
-	refreshType string,
 	readTS uint64,
-	failedReason string,
 ) string {
-	var successfulReadTS any = readTS
-	if readTS == 0 {
-		successfulReadTS = nil
-	}
-	var refreshFailedReason any
-	if failedReason != "" {
-		refreshFailedReason = failedReason
-	}
-	upsertSQL := sqlescape.MustEscapeSQL(`INSERT INTO mysql.tidb_mview_refresh (
+	upsertSQL := sqlescape.MustEscapeSQL(`INSERT INTO mysql.tidb_mview_refresh_info (
 		MVIEW_ID,
-		LAST_REFRESH_RESULT,
-		LAST_REFRESH_TYPE,
-		LAST_REFRESH_TIME,
-		LAST_SUCCESSFUL_REFRESH_READ_TSO,
-		LAST_REFRESH_FAILED_REASON
-	) VALUES (%?, %?, %?, NOW(6), %?, %?)
+		LAST_SUCCESS_READ_TSO
+	) VALUES (%?, %?)
 	ON DUPLICATE KEY UPDATE
-		LAST_REFRESH_RESULT = VALUES(LAST_REFRESH_RESULT),
-		LAST_REFRESH_TYPE = VALUES(LAST_REFRESH_TYPE),
-		LAST_REFRESH_TIME = VALUES(LAST_REFRESH_TIME),
-		LAST_SUCCESSFUL_REFRESH_READ_TSO = VALUES(LAST_SUCCESSFUL_REFRESH_READ_TSO),
-		LAST_REFRESH_FAILED_REASON = VALUES(LAST_REFRESH_FAILED_REASON)`,
+		LAST_SUCCESS_READ_TSO = VALUES(LAST_SUCCESS_READ_TSO)`,
 		mviewID,
-		refreshResult,
-		refreshType,
-		successfulReadTS,
-		refreshFailedReason,
+		readTS,
 	)
 	return upsertSQL
 }
