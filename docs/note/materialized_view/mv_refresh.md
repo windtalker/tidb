@@ -278,19 +278,69 @@ Core execution semantics:
 
 ### Support out-of-place COMPLETE refresh (decouple build and cutover)
 
-For out-of-place COMPLETE refresh, the recommended model is "utility main flow + DDL sub-steps":
+Motivation: in-place `DELETE FROM mv + INSERT INTO mv SELECT ...` can produce very large transactions on big MVs.
+Out-of-place COMPLETE is the fallback path for this scenario.
 
-1. Utility stage: build shadow data (new table or temporary physical object).
-2. Cutover stage: run dedicated DDL sub-step for atomic switch (metadata/schema-level operation).
-3. Utility stage: clean old objects and update refresh metadata.
+Recommended model:
 
-Considerations:
+1. Utility build stage:
+   - create a shadow table from MV physical schema (`CREATE TABLE ... LIKE <mv>` semantics);
+   - keep it as a normal table during build (no MV metadata on shadow table);
+   - load data to shadow table with `IMPORT INTO ... FROM (<mv_select_sql>)` (or fallback path on non-TiKV);
+   - capture build read tso.
+2. DDL cutover stage (single dedicated DDL action):
+   - atomically move MV identity from old table to shadow table;
+   - update base-table reverse references and MV metadata bindings;
+   - drop old physical table after identity handover.
+3. Post-cutover stage:
+   - finalize refresh history;
+   - release lock and cleanup temporary artifacts on failure paths.
 
-- Reusing generic `RENAME TABLE` for MV swap is not recommended.
-  TiDB already has MV-specific restrictions (for example rename on MV tables is blocked;
-  rename on base tables with MV dependencies is also blocked), so cutover semantics should be designed explicitly.
-- MV metadata is table-ID bound (for example `mysql.tidb_mview_refresh_info.MVIEW_ID` and `mysql.tidb_mview_refresh_hist.MVIEW_ID`,
-  `MaterializedViewBase.MViewIDs` on base table), so cutover must define ID-binding preservation/migration explicitly.
+Locking model for out-of-place COMPLETE:
+
+1. Use advisory lock as the cross-transaction refresh mutex for one MV:
+   - lock name is stable by identity (for example `mv_refresh_<schemaID>_<mviewID>`);
+   - acquire before utility build starts;
+   - release in deferred cleanup after success/failure.
+2. Keep existing `SELECT ... FOR UPDATE NOWAIT` on `mysql.tidb_mview_refresh_info` and CAS update logic:
+   - advisory lock prevents duplicated work across long build/cutover flow;
+   - row lock + CAS still protects success metadata update consistency.
+
+Cutover metadata requirements:
+
+1. Base table reverse reference update:
+   - replace old MV ID with new shadow table ID in `MaterializedViewBase.MViewIDs`.
+2. MV metadata handover:
+   - shadow table inherits old table's `MaterializedView` definition metadata.
+3. Old table conversion and drop:
+   - old MV table is converted to normal table metadata before drop in cutover flow.
+4. Refresh info migration:
+   - move `mysql.tidb_mview_refresh_info` row from old `MVIEW_ID` to new `MVIEW_ID`;
+   - set `LAST_SUCCESS_READ_TSO` to build read tso;
+   - keep schedule metadata (`NEXT_TIME`) semantics unchanged.
+5. TiFlash behavior:
+   - follow existing `CREATE TABLE ... LIKE` behavior as baseline (inherit replica config, clear availability state).
+
+Development steps:
+
+1. Add executor path for out-of-place COMPLETE build:
+   - build shadow table;
+   - load shadow data;
+   - capture build read tso;
+   - wire failure cleanup for partially-built shadow table.
+2. Add advisory-lock integration in refresh service:
+   - acquire lock at refresh entry for out-of-place path;
+   - map lock-conflict to user-visible "another refresh is running" error;
+   - ensure release on all exit paths.
+3. Add dedicated DDL cutover action:
+   - new job args include old MV ID, shadow table ID, build read tso;
+   - worker performs metadata handover and old-table drop atomically.
+4. Integrate refresh metadata/hist finalization:
+   - preserve current history lifecycle (`running -> success/failed`);
+   - update `mysql.tidb_mview_refresh_info` with new MV ID and build read tso on success only.
+5. Add retry/rollback handling:
+   - cutover failure leaves old MV serving path unchanged;
+   - shadow cleanup is best-effort and observable.
 
 ## Test suggestions (for future implementation)
 
@@ -313,6 +363,16 @@ Add executor UT coverage in `pkg/executor/test/executor/` (refresh-focused) and 
    - force COMPLETE refresh failure (for example injected `INSERT ... SELECT` error)
    - verify `mysql.tidb_mview_refresh_info.LAST_SUCCESS_READ_TSO` is unchanged
    - verify corresponding `mysql.tidb_mview_refresh_hist` row is finalized to `REFRESH_STATUS='failed'` with error reason
+5. **Out-of-place COMPLETE metadata cutover**:
+   - build shadow table and run cutover
+   - verify base table `MaterializedViewBase.MViewIDs` old ID -> new ID replacement
+   - verify new table has inherited `MaterializedView` metadata
+   - verify old physical table is dropped after cutover
+   - verify `mysql.tidb_mview_refresh_info` row is migrated to new `MVIEW_ID` with refreshed `LAST_SUCCESS_READ_TSO`
+6. **Advisory-lock concurrency**:
+   - session A holds out-of-place refresh lock during build
+   - session B runs refresh on same MV and gets lock-conflict error before entering heavy build work
+   - after session A finishes, session B can refresh normally
 
 ## Known limitations and future direction
 
