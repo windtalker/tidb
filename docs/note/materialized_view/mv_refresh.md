@@ -219,6 +219,49 @@ For `SELECT ... FOR UPDATE NOWAIT` on `mysql.tidb_mview_refresh_info`, there are
 3. **No error, 0 rows**: missing `MVIEW_ID` row in system table.
    - This is metadata inconsistency and should fail the refresh.
 
+### Advisory lock design refinement (planned, applies to all refresh types)
+
+To avoid path inconsistency between refresh modes, advisory lock should be used as an
+outer mutex for **all** `REFRESH MATERIALIZED VIEW` execution paths (`FAST` and `COMPLETE`,
+including out-of-place COMPLETE build/cutover flow).
+
+Recommended placement and ownership:
+
+1. Acquire advisory lock in `executeRefreshMaterializedView` after target MV metadata is resolved
+   (MV ID + schema ID available), and before entering heavy work.
+2. Hold lock on the refresh internal session (`refreshSctx`) used by the refresh framework.
+   - Do not hold it on caller/user session.
+   - Do not rely on outer mv-service scheduling session to own this lock.
+3. Keep lock name stable by identity (for example `mv_refresh_<schemaID>_<mviewID>`).
+4. Preserve existing row-lock + CAS checks on `mysql.tidb_mview_refresh_info`.
+   - advisory lock is outer mutual exclusion;
+   - row-lock + CAS remains metadata consistency guard.
+
+Release and cleanup rules:
+
+1. Always release by deferred cleanup in function scope, and ensure release runs before
+   putting the internal session back to session pool.
+2. For pooled internal sessions, release by lock name with a helper that drains reference count:
+   - repeat `ReleaseAdvisoryLock(lockName)` until it returns `false`;
+   - this guarantees the session does not retain that lock name when returning to pool.
+3. Do **not** silently pre-clean this lock name before acquire.
+   - by design, borrowed internal session should not already hold the same refresh lock;
+   - silent pre-clean may hide lock-leak/session-reuse bugs.
+4. Enforce a strict invariant for observability:
+   - expected drained release count is exactly `1` for one refresh execution;
+   - if drained release count is not `1` (for example `0` or `>1`), treat as internal
+     invariant violation and report/log explicitly.
+
+Error mapping and operational notes:
+
+1. Advisory-lock conflict should be mapped to user-visible "another refresh is running"
+   style error, instead of exposing low-level lock-wait details.
+2. `defer` protects normal returns and panic-unwind paths, but cannot guarantee cleanup for
+   process-abort/fatal-exit scenarios.
+3. If process exits unexpectedly, lock owner session is gone and lock should be released by
+   transactional lock lifecycle eventually; however, history reconciliation for stale `running`
+   rows is still needed as a separate concern.
+
 ### Why pessimistic transaction
 
 `FOR UPDATE NOWAIT` is meaningful only inside a transaction and should fail immediately on conflict.
@@ -298,8 +341,8 @@ Recommended model:
 
 Locking model for out-of-place COMPLETE:
 
-1. Use advisory lock as the cross-transaction refresh mutex for one MV:
-   - lock name is stable by identity (for example `mv_refresh_<schemaID>_<mviewID>`);
+1. Reuse the same advisory-lock model defined above (all refresh paths use one outer lock per MV):
+   - lock name remains stable by identity (for example `mv_refresh_<schemaID>_<mviewID>`);
    - acquire before utility build starts;
    - release in deferred cleanup after success/failure.
 2. Keep existing `SELECT ... FOR UPDATE NOWAIT` on `mysql.tidb_mview_refresh_info` and CAS update logic:
@@ -373,6 +416,14 @@ Add executor UT coverage in `pkg/executor/test/executor/` (refresh-focused) and 
    - session A holds out-of-place refresh lock during build
    - session B runs refresh on same MV and gets lock-conflict error before entering heavy build work
    - after session A finishes, session B can refresh normally
+7. **Cross-type mutex with unified advisory lock**:
+   - session A runs `REFRESH MATERIALIZED VIEW ... FAST` and holds advisory lock
+   - session B runs `REFRESH MATERIALIZED VIEW ... COMPLETE` on the same MV and gets lock-conflict error
+   - after session A finishes, session B can execute normally
+8. **Leak prevention on pooled internal session**:
+   - inject refresh failure/panic after advisory lock acquired
+   - ensure deferred unlock runs before returning system session to pool
+   - verify next refresh on same MV can acquire lock immediately (no stale lock retained)
 
 ## Known limitations and future direction
 
