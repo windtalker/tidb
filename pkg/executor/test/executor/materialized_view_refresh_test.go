@@ -734,6 +734,7 @@ func TestMaterializedViewRefreshCompleteOutOfPlaceNotImplemented(t *testing.T) {
 	err := tk.ExecToErr("refresh materialized view mv complete out of place")
 	require.Error(t, err)
 	require.ErrorContains(t, err, "complete OUT OF PLACE is not implemented yet")
+	tk.MustQuery("show tables like '\\_\\_mv\\_shadow\\_%'").Check(testkit.Rows())
 }
 
 func TestMaterializedViewRefreshCompleteFailureKeepsRefreshInfoReadTSO(t *testing.T) {

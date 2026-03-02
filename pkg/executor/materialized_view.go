@@ -66,6 +66,7 @@ const (
 	purgeHistStatusSuccess          = "success"
 	purgeHistStatusFailed           = "failed"
 	mvRefreshAdvisoryLockTimeoutSec = int64(1)
+	mvRefreshShadowTablePrefix      = "__mv_shadow_"
 )
 
 // PurgeMaterializedViewLogExec executes "PURGE MATERIALIZED VIEW LOG" as a utility-style statement.
@@ -1439,14 +1440,46 @@ func executeRefreshMaterializedViewCompleteInPlace(
 }
 
 func executeRefreshMaterializedViewCompleteOutOfPlace(
-	_ context.Context,
-	_ sqlexec.SQLExecutor,
+	kctx context.Context,
+	sqlExec sqlexec.SQLExecutor,
 	_ *variable.SessionVars,
-	_ *ast.RefreshMaterializedViewStmt,
-	_ pmodel.CIStr,
-	_ *model.TableInfo,
-) error {
+	s *ast.RefreshMaterializedViewStmt,
+	schemaName pmodel.CIStr,
+	tblInfo *model.TableInfo,
+) (err error) {
+	shadowTableName := buildMVRefreshShadowTableName(tblInfo.ID)
+	createShadowSQL := sqlescape.MustEscapeSQL(
+		"CREATE TABLE %n.%n LIKE %n.%n",
+		schemaName.O,
+		shadowTableName,
+		schemaName.O,
+		s.ViewName.Name.O,
+	)
+	if _, err = sqlExec.ExecuteInternal(kctx, createShadowSQL); err != nil {
+		return err
+	}
+	defer func() {
+		if err == nil {
+			return
+		}
+		dropShadowSQL := sqlescape.MustEscapeSQL("DROP TABLE IF EXISTS %n.%n", schemaName.O, shadowTableName)
+		if _, dropErr := sqlExec.ExecuteInternal(context.WithoutCancel(kctx), dropShadowSQL); dropErr != nil {
+			logutil.BgLogger().Warn(
+				"failed to cleanup shadow table after out-of-place complete refresh error",
+				zap.String("schema", schemaName.O),
+				zap.String("mview", s.ViewName.Name.O),
+				zap.String("shadowTable", shadowTableName),
+				zap.Error(dropErr),
+			)
+			err = errors.Annotatef(err, "cleanup shadow table %s.%s failed: %v", schemaName.O, shadowTableName, dropErr)
+		}
+	}()
+
 	return errMVRefreshCompleteOutOfPlaceNotImplemented
+}
+
+func buildMVRefreshShadowTableName(mviewID int64) string {
+	return fmt.Sprintf("%s%d_%d", mvRefreshShadowTablePrefix, mviewID, time.Now().UnixNano())
 }
 
 func executeRefreshMaterializedViewFast(
