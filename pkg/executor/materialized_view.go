@@ -64,7 +64,6 @@ const (
 	purgeHistStatusSuccess          = "success"
 	purgeHistStatusFailed           = "failed"
 	mvRefreshAdvisoryLockTimeoutSec = int64(1)
-	mvRefreshShadowTablePrefix      = "__mv_shadow_"
 )
 
 // PurgeMaterializedViewLogExec executes "PURGE MATERIALIZED VIEW LOG" as a utility-style statement.
@@ -803,6 +802,16 @@ func (e *RefreshMaterializedViewExec) executeRefreshMaterializedView(kctx contex
 	}()
 	failpoint.InjectCall("refreshMaterializedViewAfterAcquireAdvisoryLock")
 
+	if s.Type == ast.RefreshMaterializedViewTypeComplete && s.OutOfPlace {
+		return e.executeRefreshMaterializedViewCompleteOutOfPlace(
+			kctx,
+			s,
+			schemaName,
+			tblInfo,
+			refreshMethod,
+		)
+	}
+
 	var scheduleEvalSctx sessionctx.Context
 	if isInternalSQL {
 		scheduleEvalSctx, err = e.GetSysSession()
@@ -985,6 +994,19 @@ func (e *RefreshMaterializedViewExec) executeRefreshMaterializedView(kctx contex
 		)
 	}
 	return nil
+}
+
+func (e *RefreshMaterializedViewExec) executeRefreshMaterializedViewCompleteOutOfPlace(
+	_ context.Context,
+	_ *ast.RefreshMaterializedViewStmt,
+	_ pmodel.CIStr,
+	_ *model.TableInfo,
+	_ string,
+) error {
+	_ = e
+	// OUT OF PLACE refresh needs a dedicated flow:
+	// build runs outside the refresh transaction and cutover is finalized by DDL.
+	return errMVRefreshCompleteOutOfPlaceNotImplemented
 }
 
 func initRefreshMaterializedViewSession(
@@ -1232,14 +1254,7 @@ func executeRefreshMaterializedViewDataChanges(
 	switch s.Type {
 	case ast.RefreshMaterializedViewTypeComplete:
 		if s.OutOfPlace {
-			return executeRefreshMaterializedViewCompleteOutOfPlace(
-				kctx,
-				sqlExec,
-				sessVars,
-				s,
-				schemaName,
-				tblInfo,
-			)
+			return errors.New("refresh materialized view: complete OUT OF PLACE should use dedicated execution path")
 		}
 		return executeRefreshMaterializedViewCompleteInPlace(
 			kctx,
@@ -1279,49 +1294,6 @@ func executeRefreshMaterializedViewCompleteInPlace(
 		return err
 	}
 	return nil
-}
-
-func executeRefreshMaterializedViewCompleteOutOfPlace(
-	kctx context.Context,
-	sqlExec sqlexec.SQLExecutor,
-	_ *variable.SessionVars,
-	s *ast.RefreshMaterializedViewStmt,
-	schemaName pmodel.CIStr,
-	tblInfo *model.TableInfo,
-) (err error) {
-	shadowTableName := buildMVRefreshShadowTableName(tblInfo.ID)
-	createShadowSQL := sqlescape.MustEscapeSQL(
-		"CREATE TABLE %n.%n LIKE %n.%n",
-		schemaName.O,
-		shadowTableName,
-		schemaName.O,
-		s.ViewName.Name.O,
-	)
-	if _, err = sqlExec.ExecuteInternal(kctx, createShadowSQL); err != nil {
-		return err
-	}
-	defer func() {
-		if err == nil {
-			return
-		}
-		dropShadowSQL := sqlescape.MustEscapeSQL("DROP TABLE IF EXISTS %n.%n", schemaName.O, shadowTableName)
-		if _, dropErr := sqlExec.ExecuteInternal(context.WithoutCancel(kctx), dropShadowSQL); dropErr != nil {
-			logutil.BgLogger().Warn(
-				"failed to cleanup shadow table after out-of-place complete refresh error",
-				zap.String("schema", schemaName.O),
-				zap.String("mview", s.ViewName.Name.O),
-				zap.String("shadowTable", shadowTableName),
-				zap.Error(dropErr),
-			)
-			err = errors.Annotatef(err, "cleanup shadow table %s.%s failed: %v", schemaName.O, shadowTableName, dropErr)
-		}
-	}()
-
-	return errMVRefreshCompleteOutOfPlaceNotImplemented
-}
-
-func buildMVRefreshShadowTableName(mviewID int64) string {
-	return fmt.Sprintf("%s%d_%d", mvRefreshShadowTablePrefix, mviewID, time.Now().UnixNano())
 }
 
 func executeRefreshMaterializedViewFast(
