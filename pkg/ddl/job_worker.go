@@ -1008,6 +1008,8 @@ func (w *worker) runOneJobStep(
 		ver, err = onAlterMaterializedViewRefresh(jobCtx, job)
 	case model.ActionAlterMaterializedViewLogPurge:
 		ver, err = onAlterMaterializedViewLogPurge(jobCtx, job)
+	case model.ActionMViewRefreshOutOfPlaceCutover:
+		ver, err = onRefreshMaterializedViewCompleteOutOfPlaceCutover(jobCtx, job)
 	case model.ActionModifyTableAutoIDCache:
 		ver, err = onModifyTableAutoIDCache(jobCtx, job)
 	case model.ActionAddTablePartition:

@@ -116,6 +116,15 @@ type Executor interface {
 	DropMaterializedViewLog(ctx sessionctx.Context, stmt *ast.DropMaterializedViewLogStmt) error
 	AlterMaterializedView(ctx sessionctx.Context, stmt *ast.AlterMaterializedViewStmt) error
 	AlterMaterializedViewLog(ctx sessionctx.Context, stmt *ast.AlterMaterializedViewLogStmt) error
+	RefreshMaterializedViewCompleteOutOfPlaceCutover(
+		ctx sessionctx.Context,
+		schemaID int64,
+		schemaName pmodel.CIStr,
+		viewName pmodel.CIStr,
+		oldMViewID int64,
+		shadowTableID int64,
+		buildReadTSO uint64,
+	) error
 	RecoverTable(ctx sessionctx.Context, recoverTableInfo *model.RecoverTableInfo) (err error)
 	RecoverSchema(ctx sessionctx.Context, recoverSchemaInfo *model.RecoverSchemaInfo) error
 	DropView(ctx sessionctx.Context, stmt *ast.DropTableStmt) (err error)

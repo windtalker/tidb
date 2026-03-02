@@ -48,6 +48,10 @@ import (
 
 const tiflashCheckTiDBHTTPAPIHalfInterval = 2500 * time.Millisecond
 
+var errRefreshMaterializedViewCompleteOutOfPlaceCutoverNotImplemented = errors.NewNoStackError(
+	"refresh materialized view complete OUT OF PLACE is not implemented yet",
+)
+
 func repairTableOrViewWithCheck(t *meta.Mutator, job *model.Job, schemaID int64, tbInfo *model.TableInfo) error {
 	err := checkTableInfoValid(tbInfo)
 	if err != nil {
@@ -1112,6 +1116,15 @@ func onAlterMaterializedViewLogPurge(jobCtx *jobContext, job *model.Job) (ver in
 	}
 	job.FinishTableJob(model.JobStateDone, model.StatePublic, ver, tblInfo)
 	return ver, nil
+}
+
+func onRefreshMaterializedViewCompleteOutOfPlaceCutover(_ *jobContext, job *model.Job) (ver int64, _ error) {
+	if _, err := model.GetRefreshMaterializedViewCompleteOutOfPlaceCutoverArgs(job); err != nil {
+		job.State = model.JobStateCancelled
+		return ver, errors.Trace(err)
+	}
+	job.State = model.JobStateCancelled
+	return ver, errRefreshMaterializedViewCompleteOutOfPlaceCutoverNotImplemented
 }
 
 func onModifyTableCharsetAndCollate(jobCtx *jobContext, job *model.Job) (ver int64, _ error) {

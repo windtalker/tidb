@@ -256,6 +256,9 @@ func checkHistoryJobStmtType(jobType model.ActionType, st ast.StmtNode) bool {
 	case model.ActionCreateMaterializedViewLog:
 		_, ok := st.(*ast.CreateMaterializedViewLogStmt)
 		return ok
+	case model.ActionMViewRefreshOutOfPlaceCutover:
+		_, ok := st.(*ast.RefreshMaterializedViewStmt)
+		return ok
 	case model.ActionCreateSchema:
 		_, ok := st.(*ast.CreateDatabaseStmt)
 		return ok

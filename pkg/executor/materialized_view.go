@@ -23,6 +23,7 @@ import (
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/failpoint"
+	"github.com/pingcap/tidb/pkg/domain"
 	"github.com/pingcap/tidb/pkg/errctx"
 	"github.com/pingcap/tidb/pkg/executor/internal/exec"
 	"github.com/pingcap/tidb/pkg/expression"
@@ -59,7 +60,6 @@ type RefreshMaterializedViewExec struct {
 
 var errMLogPurgeLockConflict = errors.NewNoStackError("mlog purge lock conflict")
 var errMVRefreshAdvisoryLockConflict = errors.NewNoStackError("materialized view refresh advisory lock conflict")
-var errMVRefreshCompleteOutOfPlaceNotImplemented = errors.NewNoStackError("refresh materialized view complete OUT OF PLACE is not implemented yet")
 
 const (
 	purgeHistStatusRunning          = "running"
@@ -1168,12 +1168,21 @@ func (e *RefreshMaterializedViewExec) executeRefreshMaterializedViewCompleteOutO
 	}
 	failpoint.InjectCall("refreshMaterializedViewOutOfPlaceAfterBuildDataLoad", buildReadTSO)
 	failpoint.Inject("pauseRefreshMaterializedViewOutOfPlaceAfterBuildDataLoad", func() {})
-	// buildReadTSO will be passed to out-of-place cutover DDL job in the next step.
-	_ = buildReadTSO
 
-	// OUT OF PLACE refresh needs a dedicated flow:
-	// build runs outside the refresh transaction and cutover is finalized by DDL.
-	return errMVRefreshCompleteOutOfPlaceNotImplemented
+	shadowTableID, err := getMVRefreshOutOfPlaceShadowTableID(kctx, buildSctx, schemaName, shadowTableName)
+	if err != nil {
+		return err
+	}
+
+	return domain.GetDomain(e.Ctx()).DDLExecutor().RefreshMaterializedViewCompleteOutOfPlaceCutover(
+		e.Ctx(),
+		tblInfo.DBID,
+		schemaName,
+		s.ViewName.Name,
+		tblInfo.ID,
+		shadowTableID,
+		buildReadTSO,
+	)
 }
 
 func applyMVMaintenanceMemQuota(sessVars *variable.SessionVars, targetMemQuota int64) (func(), error) {
@@ -1291,6 +1300,27 @@ func getMVRefreshOutOfPlaceBuildReadTSO(
 		return 0, errors.New("refresh materialized view complete OUT OF PLACE: invalid build read tso")
 	}
 	return buildReadTSO, nil
+}
+
+func getMVRefreshOutOfPlaceShadowTableID(
+	kctx context.Context,
+	sctx sessionctx.Context,
+	schemaName pmodel.CIStr,
+	shadowTableName string,
+) (int64, error) {
+	is := sctx.GetDomainInfoSchema().(infoschema.InfoSchema)
+	shadowTbl, err := is.TableByName(kctx, schemaName, pmodel.NewCIStr(shadowTableName))
+	if err != nil {
+		if infoschema.ErrTableNotExists.Equal(err) {
+			return 0, errors.New("refresh materialized view complete OUT OF PLACE: cannot resolve shadow table id")
+		}
+		return 0, errors.Trace(err)
+	}
+	shadowTableID := shadowTbl.Meta().ID
+	if shadowTableID == 0 {
+		return 0, errors.New("refresh materialized view complete OUT OF PLACE: invalid shadow table id")
+	}
+	return shadowTableID, nil
 }
 
 func initRefreshMaterializedViewSession(
