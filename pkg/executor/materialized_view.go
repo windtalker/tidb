@@ -1010,7 +1010,20 @@ func (e *RefreshMaterializedViewExec) executeRefreshMaterializedViewCompleteOutO
 	}
 	defer e.ReleaseSysSession(kctx, buildSctx)
 
-	if buildSctx.GetSessionVars().InTxn() {
+	buildSessVars := buildSctx.GetSessionVars()
+	restoreBuildSessVars, err := initRefreshMaterializedViewSession(buildSessVars, tblInfo.MaterializedView)
+	if err != nil {
+		return err
+	}
+	defer restoreBuildSessVars()
+
+	origInMaterializedViewMaintenance := buildSessVars.InMaterializedViewMaintenance
+	buildSessVars.InMaterializedViewMaintenance = true
+	defer func() {
+		buildSessVars.InMaterializedViewMaintenance = origInMaterializedViewMaintenance
+	}()
+
+	if buildSessVars.InTxn() {
 		return errors.New("refresh materialized view complete OUT OF PLACE: build session unexpectedly in transaction")
 	}
 
@@ -1022,7 +1035,7 @@ func (e *RefreshMaterializedViewExec) executeRefreshMaterializedViewCompleteOutO
 			return
 		}
 		dropShadowSQL := sqlescape.MustEscapeSQL("DROP TABLE IF EXISTS %n.%n", schemaName.O, shadowTableName)
-		if _, dropErr := buildSQLExec.ExecuteInternal(context.WithoutCancel(kctx), dropShadowSQL); dropErr != nil {
+		if dropErr := executeRefreshMaterializedViewInternalSQL(context.WithoutCancel(kctx), buildSQLExec, dropShadowSQL); dropErr != nil {
 			logutil.BgLogger().Warn(
 				"failed to cleanup shadow table after out-of-place complete refresh error",
 				zap.String("schema", schemaName.O),
@@ -1041,13 +1054,28 @@ func (e *RefreshMaterializedViewExec) executeRefreshMaterializedViewCompleteOutO
 		schemaName.O,
 		s.ViewName.Name.O,
 	)
-	if _, err = buildSQLExec.ExecuteInternal(kctx, createShadowSQL); err != nil {
+	if err = executeRefreshMaterializedViewInternalSQL(kctx, buildSQLExec, createShadowSQL); err != nil {
 		return err
 	}
 	shadowCreated = true
 
 	failpoint.InjectCall("refreshMaterializedViewOutOfPlaceAfterCreateShadow")
 	failpoint.Inject("pauseRefreshMaterializedViewOutOfPlaceAfterCreateShadow", func() {})
+	buildReadTSO, err := executeMVRefreshOutOfPlaceBuildDataAndGetReadTSO(
+		kctx,
+		buildSQLExec,
+		schemaName,
+		shadowTableName,
+		tblInfo,
+		e.Ctx().GetStore().Name(),
+	)
+	if err != nil {
+		return err
+	}
+	failpoint.InjectCall("refreshMaterializedViewOutOfPlaceAfterBuildDataLoad", buildReadTSO)
+	failpoint.Inject("pauseRefreshMaterializedViewOutOfPlaceAfterBuildDataLoad", func() {})
+	// buildReadTSO will be passed to out-of-place cutover DDL job in the next step.
+	_ = buildReadTSO
 
 	// OUT OF PLACE refresh needs a dedicated flow:
 	// build runs outside the refresh transaction and cutover is finalized by DDL.
@@ -1056,6 +1084,78 @@ func (e *RefreshMaterializedViewExec) executeRefreshMaterializedViewCompleteOutO
 
 func buildMVRefreshShadowTableName(mviewID int64) string {
 	return fmt.Sprintf("%s%d_%d", mvRefreshShadowTablePrefix, mviewID, time.Now().UnixNano())
+}
+
+func executeMVRefreshOutOfPlaceBuildDataAndGetReadTSO(
+	kctx context.Context,
+	sqlExec sqlexec.SQLExecutor,
+	schemaName pmodel.CIStr,
+	shadowTableName string,
+	tblInfo *model.TableInfo,
+	storeName string,
+) (uint64, error) {
+	buildSQL, err := buildMVRefreshOutOfPlaceBuildSQL(schemaName.O, shadowTableName, tblInfo, storeName)
+	if err != nil {
+		return 0, err
+	}
+	if err = executeRefreshMaterializedViewInternalSQL(kctx, sqlExec, buildSQL); err != nil {
+		return 0, err
+	}
+	return getMVRefreshOutOfPlaceBuildReadTSO(kctx, sqlExec)
+}
+
+func buildMVRefreshOutOfPlaceBuildSQL(
+	schemaName string,
+	shadowTableName string,
+	tblInfo *model.TableInfo,
+	storeName string,
+) (string, error) {
+	if tblInfo.MaterializedView == nil || len(tblInfo.MaterializedView.SQLContent) == 0 {
+		return "", errors.New("refresh materialized view: invalid select sql")
+	}
+	selectSQL := tblInfo.MaterializedView.SQLContent
+	if shouldUseImportIntoForMVRefreshOutOfPlace(storeName) {
+		prefix := sqlescape.MustEscapeSQL("IMPORT INTO %n.%n FROM ", schemaName, shadowTableName)
+		return prefix + "(" + selectSQL + ") WITH disable_precheck", nil
+	}
+	prefix := sqlescape.MustEscapeSQL("INSERT INTO %n.%n ", schemaName, shadowTableName)
+	return prefix + selectSQL, nil
+}
+
+func shouldUseImportIntoForMVRefreshOutOfPlace(storeName string) bool {
+	return storeName == kv.TiKV.Name()
+}
+
+func getMVRefreshOutOfPlaceBuildReadTSO(
+	kctx context.Context,
+	sqlExec sqlexec.SQLExecutor,
+) (uint64, error) {
+	rs, err := sqlExec.ExecuteInternal(
+		kctx,
+		"SELECT COALESCE(CAST(JSON_UNQUOTE(JSON_EXTRACT(@@tidb_last_query_info, '$.start_ts')) AS UNSIGNED), CAST(0 AS UNSIGNED))",
+	)
+	if err != nil {
+		return 0, errors.Trace(err)
+	}
+	if rs == nil {
+		return 0, errors.New("refresh materialized view complete OUT OF PLACE: cannot fetch build read tso")
+	}
+	rows, drainErr := sqlexec.DrainRecordSet(kctx, rs, 1)
+	closeErr := rs.Close()
+	if drainErr != nil {
+		return 0, errors.Trace(drainErr)
+	}
+	if closeErr != nil {
+		return 0, errors.Trace(closeErr)
+	}
+	if len(rows) == 0 {
+		return 0, errors.New("refresh materialized view complete OUT OF PLACE: cannot fetch build read tso")
+	}
+	buildReadTSO := rows[0].GetUint64(0)
+	if buildReadTSO == 0 {
+		return 0, errors.New("refresh materialized view complete OUT OF PLACE: invalid build read tso")
+	}
+	return buildReadTSO, nil
 }
 
 func initRefreshMaterializedViewSession(
@@ -1392,6 +1492,16 @@ func drainAndCloseRefreshRecordSet(
 		return errors.Trace(closeErr)
 	}
 	return execErr
+}
+
+func executeRefreshMaterializedViewInternalSQL(
+	kctx context.Context,
+	sqlExec sqlexec.SQLExecutor,
+	sql string,
+	args ...any,
+) error {
+	rs, err := sqlExec.ExecuteInternal(kctx, sql, args...)
+	return drainAndCloseRefreshRecordSet(kctx, rs, err)
 }
 
 func drainRefreshRecordSet(kctx context.Context, rs sqlexec.RecordSet) error {

@@ -639,6 +639,25 @@ func TestMaterializedViewRefreshCompleteOutOfPlaceNotImplemented(t *testing.T) {
 	tk.MustQuery("show tables like '\\_\\_mv\\_shadow\\_%'").Check(testkit.Rows())
 }
 
+func TestMaterializedViewRefreshCompleteOutOfPlaceBuildFailureCleansShadow(t *testing.T) {
+	store, _ := testkit.CreateMockStoreAndDomain(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("create table t (a int not null, b int not null)")
+	tk.MustExec("insert into t values (1, 10), (1, 5), (2, 7)")
+	tk.MustExec("create materialized view log on t (a, b) purge next date_add(now(), interval 1 hour)")
+	tk.MustExec("create materialized view mv (a, s, cnt) refresh fast next now() as select a, sum(b), count(1) from t group by a")
+	tk.MustExec("create unique index idx_unique_s on mv (s)")
+	tk.MustExec("insert into t values (2, 8)")
+
+	err := tk.ExecToErr("refresh materialized view mv complete out of place")
+	require.Error(t, err)
+	require.ErrorContains(t, err, "Duplicate")
+	tk.MustQuery("show tables like '\\_\\_mv\\_shadow\\_%'").Check(testkit.Rows())
+	// Out-of-place build failure should not modify old MV serving table.
+	tk.MustQuery("select a, s, cnt from mv order by a").Check(testkit.Rows("1 15 2", "2 7 1"))
+}
+
 func TestMaterializedViewRefreshCompleteFailureKeepsRefreshInfoReadTSO(t *testing.T) {
 	store, dom := testkit.CreateMockStoreAndDomain(t)
 	tk := testkit.NewTestKit(t, store)
