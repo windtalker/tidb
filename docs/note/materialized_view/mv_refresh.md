@@ -298,7 +298,7 @@ which also misleads later incremental-refresh/check logic.
 
 The same success-path read-tso persistence rule is used for both `COMPLETE` and `FAST`.
 
-Current code path always reads refresh success tso from transaction context:
+Current code path (in-place COMPLETE / FAST) reads refresh success tso from transaction context:
 
 1. after refresh data changes, call `sctx.GetSessionVars().TxnCtx.GetForUpdateTS()`
 2. if the value is `0`, fail refresh
@@ -322,11 +322,14 @@ Core execution semantics:
 
 - Refresh uses internal session, not caller session transaction/variables.
 - Refresh path uses dedicated internal source type (`kv.InternalTxnMVMaintenance`).
-- Uses `BEGIN PESSIMISTIC` + `SELECT ... FOR UPDATE NOWAIT` on `mysql.tidb_mview_refresh_info` for mutex.
-- On success path, updates `LAST_SUCCESS_READ_TSO` with CAS condition (`LAST_SUCCESS_READ_TSO <=> <locked_tso>`) and verifies readback equals `TxnCtx.GetForUpdateTS()`.
-- On refresh execution failure, rolls back the whole refresh transaction to guarantee all-or-nothing MV data replacement.
+- For in-place COMPLETE / FAST, uses `BEGIN PESSIMISTIC` + `SELECT ... FOR UPDATE NOWAIT` on `mysql.tidb_mview_refresh_info` for mutex.
+- For in-place COMPLETE / FAST success path, updates `LAST_SUCCESS_READ_TSO` with CAS condition (`LAST_SUCCESS_READ_TSO <=> <locked_tso>`) and verifies readback equals `TxnCtx.GetForUpdateTS()`.
+- For in-place COMPLETE / FAST execution failure, rolls back the whole refresh transaction to guarantee all-or-nothing MV data replacement.
 - `COMPLETE` rebuilds data with `DELETE FROM mv` + `INSERT INTO mv SELECT ...`.
 - `FAST` uses internal-only statement `RefreshMaterializedViewImplementStmt` and a dedicated incremental merge plan.
+- `COMPLETE OUT OF PLACE` uses a dedicated execution path (not the above refresh transaction):
+  - build stage runs in independent internal session(s) outside explicit refresh transaction;
+  - cutover and `mysql.tidb_mview_refresh_info` migration/update are done atomically in DDL worker transaction.
 - For `FAST`, executor constructs `RefreshMaterializedViewImplementStmt` with:
   - original `RefreshMaterializedViewStmt` (must be `Type=FAST`)
   - `LAST_SUCCESS_READ_TSO` value (must be non-`NULL` int64)
@@ -352,15 +355,19 @@ Detailed planned execution steps:
    - keep existing `COMPLETE` (without `OUT OF PLACE`) and `FAST` paths unchanged.
 2. Entry lock and history initialization:
    - reuse unified advisory lock in `executeRefreshMaterializedView` as outer mutex for the whole out-of-place flow;
-   - keep existing `mysql.tidb_mview_refresh_info` row lock / CAS consistency checks;
    - insert `running` row into `mysql.tidb_mview_refresh_hist` before heavy work.
+   - do not reuse the current in-place refresh transaction (`BEGIN PESSIMISTIC` + row-lock + CAS) for build stage.
 3. Build shadow table from current MV physical table:
+   - out-of-place build runs in dedicated internal session with autocommit semantics;
    - create shadow by `CREATE TABLE <shadow> LIKE <mv>`;
    - shadow table must remain a normal table during build (`MaterializedView == nil`);
    - rely on existing `CREATE TABLE ... LIKE` behavior (copy physical schema/index/table options; follow TiFlash replica-state handling of LIKE path).
+   - do not run this step inside refresh transaction:
+     - DDL (`CREATE TABLE`) has implicit transaction-commit semantics;
+     - `IMPORT INTO` is rejected in explicit transaction.
 4. Populate shadow table and capture build tso:
-   - load data into shadow (`IMPORT INTO ... FROM (<mv_select_sql>)` or equivalent fallback path);
-   - capture the build read tso that represents the successful build snapshot.
+   - load data into shadow (prefer `IMPORT INTO ... FROM (<mv_select_sql>)`, fallback path only when required by environment limits);
+   - capture the build read tso from build session `@@tidb_last_query_info.start_ts`.
 5. Submit dedicated cutover DDL job/action:
    - add a new DDL action dedicated to out-of-place COMPLETE cutover;
    - job args should include at least `old_mv_id`, `shadow_table_id`, `build_read_tso` (and required schema/name context).
@@ -369,8 +376,10 @@ Detailed planned execution steps:
      (shadow takes original MV name; old physical table is renamed/drop-handled internally);
    - move MV definition metadata to shadow target;
    - update base-table reverse references (`MaterializedViewBase.MViewIDs`) from old ID to shadow ID;
-   - migrate `mysql.tidb_mview_refresh_info` ownership from old `MVIEW_ID` to shadow ID and set `LAST_SUCCESS_READ_TSO = build_read_tso`;
-   - preserve schedule semantics (`NEXT_TIME`) during migration;
+   - lock and update `mysql.tidb_mview_refresh_info` in the same DDL transaction:
+     - migrate ownership from old `MVIEW_ID` to shadow ID;
+     - set `LAST_SUCCESS_READ_TSO = build_read_tso`;
+     - preserve `NEXT_TIME` semantics;
    - convert old MV table metadata to normal table form before final drop if required by current metadata constraints.
 7. Finalization and cleanup:
    - on successful cutover, finalize history row to `success`;
@@ -392,14 +401,16 @@ Detailed development plan (recommended implementation order):
    - keep privilege and transaction-boundary checks unchanged.
 4. Introduce out-of-place COMPLETE executor path:
    - branch from existing refresh execution flow using `(Type == COMPLETE && OutOfPlace)`;
-   - reuse existing outer advisory-lock lifecycle and refresh-history lifecycle.
+   - reuse existing outer advisory-lock lifecycle and refresh-history lifecycle;
+   - bypass current in-place/fast refresh transaction flow (`BEGIN PESSIMISTIC` + row-lock + CAS).
 5. Implement shadow-table build stage:
+   - use dedicated internal build session with autocommit semantics;
    - create shadow table via `CREATE TABLE <shadow> LIKE <mv>`;
    - ensure shadow remains a normal table during build (`MaterializedView == nil`);
    - use deterministic unique shadow naming and keep cleanup hooks for failures.
 6. Implement shadow data load and build tso capture:
-   - load `mv_select_sql` results into shadow (`IMPORT INTO ... FROM (<mv_select_sql>)` or fallback path);
-   - capture `build_read_tso` after successful build for cutover metadata update.
+   - load `mv_select_sql` results into shadow (prefer `IMPORT INTO ... FROM (<mv_select_sql>)`);
+   - capture `build_read_tso` from build session `@@tidb_last_query_info.start_ts` for cutover metadata update.
 7. Add dedicated DDL action/job for cutover:
    - create new DDL action type and job args (at least `old_mv_id`, `shadow_table_id`, `build_read_tso`);
    - add DDL API submission/wait helper used by refresh executor.
@@ -407,8 +418,7 @@ Detailed development plan (recommended implementation order):
    - keep MV logical name unchanged for users (shadow table takes original MV name);
    - move MV definition metadata to shadow target;
    - rewrite base-table reverse references (`MaterializedViewBase.MViewIDs`) from old ID to shadow ID;
-   - migrate `mysql.tidb_mview_refresh_info` row ownership (`MVIEW_ID` old to new) and set `LAST_SUCCESS_READ_TSO = build_read_tso`;
-   - preserve `NEXT_TIME` semantics during migration;
+   - lock/migrate `mysql.tidb_mview_refresh_info` row ownership (`MVIEW_ID` old to new), set `LAST_SUCCESS_READ_TSO = build_read_tso`, and preserve `NEXT_TIME` in the same DDL transaction;
    - drop/cleanup old physical table after metadata handover.
 9. Integrate finalization and failure semantics:
    - finalize refresh history as `success` only after cutover success;
