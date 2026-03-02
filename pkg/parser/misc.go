@@ -609,6 +609,7 @@ var tokenMap = map[string]int{
 	"OUT":                      out,
 	"OUTER":                    outer,
 	"OUTFILE":                  outfile,
+	"PLACE":                    place,
 	"PACK_KEYS":                packKeys,
 	"PAGE":                     pageSym,
 	"PARSER":                   parser,

@@ -762,6 +762,7 @@ import (
 	next_row_id           "NEXT_ROW_ID"
 	now                   "NOW"
 	optRuleBlacklist      "OPT_RULE_BLACKLIST"
+	place                 "PLACE"
 	placement             "PLACEMENT"
 	planCache             "PLAN_CACHE"
 	plan                  "PLAN"
@@ -1445,6 +1446,7 @@ import (
 	AlterMaterializedViewLogActionList     "ALTER MATERIALIZED VIEW LOG action list"
 	RefreshMaterializedViewType            "REFRESH MATERIALIZED VIEW type"
 	RefreshWithSyncModeOpt                 "REFRESH MATERIALIZED VIEW WITH SYNC MODE option"
+	RefreshOutOfPlaceOpt                   "REFRESH MATERIALIZED VIEW OUT OF PLACE option"
 	ViewSQLSecurity                        "view sql security"
 	WhereClause                            "WHERE clause"
 	WhereClauseOptional                    "Optional WHERE clause"
@@ -5612,9 +5614,14 @@ PurgeMaterializedViewLogStmt:
 	}
 
 RefreshMaterializedViewStmt:
-	"REFRESH" "MATERIALIZED" "VIEW" TableName RefreshWithSyncModeOpt RefreshMaterializedViewType
+	"REFRESH" "MATERIALIZED" "VIEW" TableName RefreshWithSyncModeOpt RefreshMaterializedViewType RefreshOutOfPlaceOpt
 	{
-		$$ = &ast.RefreshMaterializedViewStmt{ViewName: $4.(*ast.TableName), WithSyncMode: $5.(bool), Type: $6.(ast.RefreshMaterializedViewType)}
+		$$ = &ast.RefreshMaterializedViewStmt{
+			ViewName:     $4.(*ast.TableName),
+			WithSyncMode: $5.(bool),
+			Type:         $6.(ast.RefreshMaterializedViewType),
+			OutOfPlace:   $7.(bool),
+		}
 	}
 
 RefreshMaterializedViewType:
@@ -5633,6 +5640,16 @@ RefreshWithSyncModeOpt:
 		$$ = false
 	}
 |	"WITH" "SYNC" "MODE"
+	{
+		$$ = true
+	}
+
+RefreshOutOfPlaceOpt:
+	/* EMPTY */
+	{
+		$$ = false
+	}
+|	"OUT" "OF" "PLACE"
 	{
 		$$ = true
 	}
@@ -7673,6 +7690,7 @@ NotKeywordToken:
 |	"RECENT"
 |	"REPLAYER"
 |	"RUNNING"
+|	"PLACE"
 |	"PLACEMENT"
 |	"PLAN"
 |	"PLAN_CACHE"

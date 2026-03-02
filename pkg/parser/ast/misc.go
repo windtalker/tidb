@@ -516,6 +516,7 @@ type RefreshMaterializedViewStmt struct {
 	ViewName     *TableName
 	WithSyncMode bool
 	Type         RefreshMaterializedViewType
+	OutOfPlace   bool
 }
 
 // RefreshMaterializedViewImplementStmt is an internal-only statement that is constructed directly by the executor
@@ -593,6 +594,9 @@ func (n *RefreshMaterializedViewStmt) Restore(ctx *format.RestoreCtx) error {
 	}
 	ctx.WritePlain(" ")
 	ctx.WriteKeyWord(n.Type.String())
+	if n.OutOfPlace {
+		ctx.WriteKeyWord(" OUT OF PLACE")
+	}
 	return nil
 }
 
