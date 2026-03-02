@@ -583,6 +583,66 @@ func TestMaterializedViewRefreshCompleteRefreshInfoCASUpdateAfterConcurrentPreUp
 		Check(testkit.Rows("success complete manually 1 1 1"))
 }
 
+func TestMaterializedViewRefreshCrossTypeAdvisoryLockConflict(t *testing.T) {
+	store, _ := testkit.CreateMockStoreAndDomain(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("create table t (a int not null, b int not null)")
+	tk.MustExec("insert into t values (1, 10), (1, 5), (2, 7)")
+	tk.MustExec("create materialized view log on t (a, b) purge next date_add(now(), interval 1 hour)")
+	tk.MustExec("create materialized view mv (a, s, cnt) refresh fast next now() as select a, sum(b), count(1) from t group by a")
+	tk.MustExec("insert into t values (2, 3), (3, 4)")
+
+	const afterAcquireAdvisoryLockFailpoint = "github.com/pingcap/tidb/pkg/executor/refreshMaterializedViewAfterAcquireAdvisoryLock"
+	pauseCh := make(chan struct{})
+	hitCh := make(chan struct{})
+	require.NoError(t, failpoint.EnableCall(afterAcquireAdvisoryLockFailpoint, func() {
+		select {
+		case <-hitCh:
+		default:
+			close(hitCh)
+		}
+		<-pauseCh
+	}))
+	defer func() {
+		select {
+		case <-pauseCh:
+		default:
+			close(pauseCh)
+		}
+		require.NoError(t, failpoint.Disable(afterAcquireAdvisoryLockFailpoint))
+	}()
+
+	refreshDone := make(chan error, 1)
+	go func() {
+		tkFast := testkit.NewTestKit(t, store)
+		tkFast.MustExec("use test")
+		refreshDone <- tkFast.ExecToErr("refresh materialized view mv fast")
+	}()
+
+	select {
+	case <-hitCh:
+	case <-time.After(10 * time.Second):
+		t.Fatal("timeout waiting for refresh to acquire advisory lock")
+	}
+
+	tkComplete := testkit.NewTestKit(t, store)
+	tkComplete.MustExec("use test")
+	err := tkComplete.ExecToErr("refresh materialized view mv complete")
+	require.Error(t, err)
+	require.ErrorContains(t, err, "another refresh is running for materialized view")
+
+	close(pauseCh)
+	select {
+	case err := <-refreshDone:
+		require.NoError(t, err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("timeout waiting for fast refresh to finish")
+	}
+
+	tkComplete.MustExec("refresh materialized view mv complete")
+}
+
 func TestMaterializedViewRefreshCompleteConcurrentNowait(t *testing.T) {
 	store, dom := testkit.CreateMockStoreAndDomain(t)
 	tk := testkit.NewTestKit(t, store)
@@ -697,6 +757,11 @@ func TestMaterializedViewRefreshCompleteFailureKeepsRefreshInfoReadTSO(t *testin
 	reasonRow := tk.MustQuery(fmt.Sprintf("select REFRESH_FAILED_REASON from mysql.tidb_mview_refresh_hist where MVIEW_ID = %d order by REFRESH_JOB_ID desc limit 1", mviewID)).Rows()
 	require.Len(t, reasonRow, 1)
 	require.Contains(t, fmt.Sprintf("%v", reasonRow[0][0]), "Duplicate")
+
+	// Ensure refresh can continue after failure and does not keep stale advisory lock.
+	tk.MustExec("drop index idx_unique_s on mv")
+	tk.MustExec("refresh materialized view mv complete")
+	tk.MustQuery("select a, s, cnt from mv order by a").Check(testkit.Rows("1 15 2", "2 15 2"))
 }
 
 func TestMaterializedViewRefreshCompleteWithConstraintCheckInPlacePessimisticOff(t *testing.T) {

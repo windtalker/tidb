@@ -58,11 +58,13 @@ type RefreshMaterializedViewExec struct {
 }
 
 var errMLogPurgeLockConflict = errors.NewNoStackError("mlog purge lock conflict")
+var errMVRefreshAdvisoryLockConflict = errors.NewNoStackError("materialized view refresh advisory lock conflict")
 
 const (
-	purgeHistStatusRunning = "running"
-	purgeHistStatusSuccess = "success"
-	purgeHistStatusFailed  = "failed"
+	purgeHistStatusRunning          = "running"
+	purgeHistStatusSuccess          = "success"
+	purgeHistStatusFailed           = "failed"
+	mvRefreshAdvisoryLockTimeoutSec = int64(1)
 )
 
 // PurgeMaterializedViewLogExec executes "PURGE MATERIALIZED VIEW LOG" as a utility-style statement.
@@ -837,6 +839,38 @@ func (e *RefreshMaterializedViewExec) executeRefreshMaterializedView(kctx contex
 	defer restoreSessVars()
 	failpoint.InjectCall("refreshMaterializedViewAfterInitSession", sessVars.SQLMode, sessVars.Location().String())
 
+	mviewID = tblInfo.ID
+	advisoryLockName, err := acquireMVRefreshAdvisoryLock(refreshSctx, schemaName, tblInfo)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		releasedCnt := releaseMVRefreshAdvisoryLockFully(refreshSctx, advisoryLockName)
+		if releasedCnt == 1 {
+			return
+		}
+		invariantErr := errors.Errorf(
+			"refresh materialized view: advisory lock cleanup invariant violated (lock=%s released=%d)",
+			advisoryLockName,
+			releasedCnt,
+		)
+		logutil.BgLogger().Error(
+			"refresh materialized view advisory lock cleanup invariant violated",
+			zap.String("schema", schemaName.O),
+			zap.String("mview", tblInfo.Name.O),
+			zap.Int64("schemaID", tblInfo.DBID),
+			zap.Int64("mviewID", mviewID),
+			zap.String("lockName", advisoryLockName),
+			zap.Int("releasedCount", releasedCnt),
+		)
+		if err == nil {
+			err = invariantErr
+			return
+		}
+		err = errors.Annotate(err, invariantErr.Error())
+	}()
+	failpoint.InjectCall("refreshMaterializedViewAfterAcquireAdvisoryLock")
+
 	var scheduleEvalSctx sessionctx.Context
 	if isInternalSQL {
 		scheduleEvalSctx, err = e.GetSysSession()
@@ -877,7 +911,6 @@ func (e *RefreshMaterializedViewExec) executeRefreshMaterializedView(kctx contex
 	failpoint.InjectCall("refreshMaterializedViewAfterBegin")
 	failpoint.Inject("pauseRefreshMaterializedViewAfterBegin", func() {})
 
-	mviewID = tblInfo.ID
 	var lockedReadTSO uint64
 	var lockedReadTSONull bool
 	if err := observeMVRefreshStep(e.stepObserver, stepSet.lockRefreshInfo, func() error {
@@ -1233,6 +1266,42 @@ func lockRefreshInfoRow(
 		lockedReadTSO = lockedRow.GetUint64(1)
 	}
 	return lockedReadTSO, lockedReadTSONull, nil
+}
+
+func buildMVRefreshAdvisoryLockName(schemaID int64, mviewID int64) string {
+	return fmt.Sprintf("mv_refresh_%d_%d", schemaID, mviewID)
+}
+
+func acquireMVRefreshAdvisoryLock(
+	refreshSctx sessionctx.Context,
+	schemaName pmodel.CIStr,
+	tblInfo *model.TableInfo,
+) (string, error) {
+	lockName := buildMVRefreshAdvisoryLockName(tblInfo.DBID, tblInfo.ID)
+	if err := refreshSctx.GetAdvisoryLock(lockName, mvRefreshAdvisoryLockTimeoutSec); err != nil {
+		if isMVRefreshAdvisoryLockConflict(err) {
+			return lockName, errors.Annotatef(
+				errMVRefreshAdvisoryLockConflict,
+				"another refresh is running for materialized view %s.%s, please retry later",
+				schemaName.O,
+				tblInfo.Name.O,
+			)
+		}
+		return lockName, errors.Trace(err)
+	}
+	return lockName, nil
+}
+
+func isMVRefreshAdvisoryLockConflict(err error) bool {
+	return err != nil && storeerr.ErrLockWaitTimeout.Equal(err)
+}
+
+func releaseMVRefreshAdvisoryLockFully(refreshSctx sessionctx.Context, lockName string) int {
+	releasedCnt := 0
+	for refreshSctx.ReleaseAdvisoryLock(lockName) {
+		releasedCnt++
+	}
+	return releasedCnt
 }
 
 func readRefreshInfoReadTSO(
