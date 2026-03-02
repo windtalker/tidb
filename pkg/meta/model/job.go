@@ -115,6 +115,7 @@ const (
 	ActionCreateMaterializedView        ActionType = 75
 	ActionAlterMaterializedViewRefresh  ActionType = 76
 	ActionAlterMaterializedViewLogPurge ActionType = 77
+	ActionMViewRefreshOutOfPlaceCutover ActionType = 78
 )
 
 // ActionMap is the map of DDL ActionType to string.
@@ -126,6 +127,7 @@ var ActionMap = map[ActionType]string{
 	ActionCreateMaterializedView:        "create materialized view",
 	ActionAlterMaterializedViewRefresh:  "alter materialized view refresh",
 	ActionAlterMaterializedViewLogPurge: "alter materialized view log purge",
+	ActionMViewRefreshOutOfPlaceCutover: "refresh materialized view complete out-of-place cutover",
 	ActionCreateTables:                  "create tables",
 	ActionDropTable:                     "drop table",
 	ActionAddColumn:                     "add column",
@@ -873,7 +875,7 @@ func (job *Job) IsRollbackable() bool {
 		return job.SchemaState == StatePublic || job.SchemaState == StateWriteOnly
 	case ActionRebaseAutoID, ActionShardRowID,
 		ActionTruncateTable, ActionAddForeignKey, ActionRenameTable, ActionRenameTables,
-		ActionModifyTableCharsetAndCollate,
+		ActionModifyTableCharsetAndCollate, ActionMViewRefreshOutOfPlaceCutover,
 		ActionModifySchemaCharsetAndCollate, ActionRepairTable,
 		ActionModifyTableAutoIDCache, ActionModifySchemaDefaultPlacement, ActionDropCheckConstraint:
 		return job.SchemaState == StateNone

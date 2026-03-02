@@ -531,6 +531,34 @@ func (e *executor) alterMaterializedViewRefresh(
 	return errors.Trace(e.updateMaterializedViewRefreshInfoNextTime(ctx, mviewID, nextTime))
 }
 
+func (e *executor) RefreshMaterializedViewCompleteOutOfPlaceCutover(
+	ctx sessionctx.Context,
+	schemaID int64,
+	schemaName pmodel.CIStr,
+	viewName pmodel.CIStr,
+	oldMViewID int64,
+	shadowTableID int64,
+	buildReadTSO uint64,
+) error {
+	job := &model.Job{
+		Version:        model.GetJobVerInUse(),
+		SchemaID:       schemaID,
+		TableID:        oldMViewID,
+		SchemaName:     schemaName.L,
+		TableName:      viewName.L,
+		Type:           model.ActionMViewRefreshOutOfPlaceCutover,
+		BinlogInfo:     &model.HistoryInfo{},
+		CDCWriteSource: ctx.GetSessionVars().CDCWriteSource,
+		SQLMode:        ctx.GetSessionVars().SQLMode,
+	}
+	args := &model.RefreshMaterializedViewCompleteOutOfPlaceCutoverArgs{
+		OldMViewID:    oldMViewID,
+		ShadowTableID: shadowTableID,
+		BuildReadTSO:  buildReadTSO,
+	}
+	return errors.Trace(e.doDDLJob2(ctx, job, args))
+}
+
 func (e *executor) updateMaterializedViewRefreshInfoNextTime(
 	ctx sessionctx.Context,
 	mviewID int64,
