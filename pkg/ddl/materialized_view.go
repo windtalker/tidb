@@ -539,6 +539,8 @@ func (e *executor) RefreshMaterializedViewCompleteOutOfPlaceCutover(
 	oldMViewID int64,
 	shadowTableID int64,
 	buildReadTSO uint64,
+	expectedLastSuccessReadTSO int64,
+	expectedLastSuccessReadTSONull bool,
 ) error {
 	job := &model.Job{
 		Version:        model.GetJobVerInUse(),
@@ -552,9 +554,11 @@ func (e *executor) RefreshMaterializedViewCompleteOutOfPlaceCutover(
 		SQLMode:        ctx.GetSessionVars().SQLMode,
 	}
 	args := &model.RefreshMaterializedViewCompleteOutOfPlaceCutoverArgs{
-		OldMViewID:    oldMViewID,
-		ShadowTableID: shadowTableID,
-		BuildReadTSO:  buildReadTSO,
+		OldMViewID:                     oldMViewID,
+		ShadowTableID:                  shadowTableID,
+		BuildReadTSO:                   buildReadTSO,
+		ExpectedLastSuccessReadTSO:     expectedLastSuccessReadTSO,
+		ExpectedLastSuccessReadTSONull: expectedLastSuccessReadTSONull,
 	}
 	return errors.Trace(e.doDDLJob2(ctx, job, args))
 }
