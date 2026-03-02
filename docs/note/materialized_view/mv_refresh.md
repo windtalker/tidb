@@ -82,7 +82,7 @@ This create-time rule set is intentionally different from runtime internal-refre
 
 ## SQL behavior (user view)
 
-Supported syntax (all use one common transactional framework today):
+Current implemented syntax (all use one common transactional framework today):
 
 ```sql
 REFRESH MATERIALIZED VIEW db.mv COMPLETE;
@@ -94,6 +94,26 @@ REFRESH MATERIALIZED VIEW mv WITH SYNC MODE FAST; -- same behavior today (refres
 ```
 
 Current note: `FAST` requires `mysql.tidb_mview_refresh_info.LAST_SUCCESS_READ_TSO` to be non-`NULL`; otherwise refresh fails.
+
+Planned syntax extension for out-of-place COMPLETE (Oracle-aligned semantics):
+
+```sql
+REFRESH MATERIALIZED VIEW mv COMPLETE OUT OF PLACE;
+REFRESH MATERIALIZED VIEW mv WITH SYNC MODE COMPLETE OUT OF PLACE;
+```
+
+Planned syntax/semantic rules:
+
+1. `OUT OF PLACE` is allowed only with `COMPLETE`.
+2. `REFRESH ... COMPLETE` without `OUT OF PLACE` keeps current in-place behavior.
+3. `REFRESH ... FAST` keeps current behavior; `FAST OUT OF PLACE` should fail with a clear syntax/semantic error.
+4. `WITH SYNC MODE` remains syntax-compatible and has the same runtime behavior as today (refresh is already synchronous).
+
+Oracle mapping note:
+
+- Oracle exposes out-of-place refresh through `DBMS_MVIEW.REFRESH(..., method => 'C', atomic_refresh => FALSE, out_of_place => TRUE)`.
+- TiDB can provide equivalent semantics through SQL surface `REFRESH MATERIALIZED VIEW ... COMPLETE OUT OF PLACE`.
+- Oracle's `out_of_place` is API parameter-based, while TiDB chooses SQL clause-based exposure.
 
 Current privilege semantics (MVP):
 
@@ -324,66 +344,89 @@ Core execution semantics:
 Motivation: in-place `DELETE FROM mv + INSERT INTO mv SELECT ...` can produce very large transactions on big MVs.
 Out-of-place COMPLETE is the fallback path for this scenario.
 
-Recommended model:
+Detailed planned execution steps:
 
-1. Utility build stage:
-   - create a shadow table from MV physical schema (`CREATE TABLE ... LIKE <mv>` semantics);
-   - keep it as a normal table during build (no MV metadata on shadow table);
-   - load data to shadow table with `IMPORT INTO ... FROM (<mv_select_sql>)` (or fallback path on non-TiKV);
-   - capture build read tso.
-2. DDL cutover stage (single dedicated DDL action):
-   - atomically move MV identity from old table to shadow table;
-   - update base-table reverse references and MV metadata bindings;
-   - drop old physical table after identity handover.
-3. Post-cutover stage:
-   - finalize refresh history;
-   - release lock and cleanup temporary artifacts on failure paths.
+1. Parse and validate refresh mode:
+   - accept `REFRESH MATERIALIZED VIEW ... COMPLETE OUT OF PLACE`;
+   - reject `FAST OUT OF PLACE`;
+   - keep existing `COMPLETE` (without `OUT OF PLACE`) and `FAST` paths unchanged.
+2. Entry lock and history initialization:
+   - reuse unified advisory lock in `executeRefreshMaterializedView` as outer mutex for the whole out-of-place flow;
+   - keep existing `mysql.tidb_mview_refresh_info` row lock / CAS consistency checks;
+   - insert `running` row into `mysql.tidb_mview_refresh_hist` before heavy work.
+3. Build shadow table from current MV physical table:
+   - create shadow by `CREATE TABLE <shadow> LIKE <mv>`;
+   - shadow table must remain a normal table during build (`MaterializedView == nil`);
+   - rely on existing `CREATE TABLE ... LIKE` behavior (copy physical schema/index/table options; follow TiFlash replica-state handling of LIKE path).
+4. Populate shadow table and capture build tso:
+   - load data into shadow (`IMPORT INTO ... FROM (<mv_select_sql>)` or equivalent fallback path);
+   - capture the build read tso that represents the successful build snapshot.
+5. Submit dedicated cutover DDL job/action:
+   - add a new DDL action dedicated to out-of-place COMPLETE cutover;
+   - job args should include at least `old_mv_id`, `shadow_table_id`, `build_read_tso` (and required schema/name context).
+6. Execute cutover atomically in DDL worker:
+   - keep MV logical name unchanged for users: cutover action is responsible for table-name handover
+     (shadow takes original MV name; old physical table is renamed/drop-handled internally);
+   - move MV definition metadata to shadow target;
+   - update base-table reverse references (`MaterializedViewBase.MViewIDs`) from old ID to shadow ID;
+   - migrate `mysql.tidb_mview_refresh_info` ownership from old `MVIEW_ID` to shadow ID and set `LAST_SUCCESS_READ_TSO = build_read_tso`;
+   - preserve schedule semantics (`NEXT_TIME`) during migration;
+   - convert old MV table metadata to normal table form before final drop if required by current metadata constraints.
+7. Finalization and cleanup:
+   - on successful cutover, finalize history row to `success`;
+   - on failure, finalize history row to `failed`, keep old MV serving path unchanged, and do best-effort shadow cleanup;
+   - release advisory lock in deferred cleanup before returning pooled internal session.
 
-Locking model for out-of-place COMPLETE:
+Detailed development plan (recommended implementation order):
 
-1. Reuse the same advisory-lock model defined above (all refresh paths use one outer lock per MV):
-   - lock name remains stable by identity (for example `mv_refresh_<schemaID>_<mviewID>`);
-   - acquire before utility build starts;
-   - release in deferred cleanup after success/failure.
-2. Keep existing `SELECT ... FOR UPDATE NOWAIT` on `mysql.tidb_mview_refresh_info` and CAS update logic:
-   - advisory lock prevents duplicated work across long build/cutover flow;
-   - row lock + CAS still protects success metadata update consistency.
-
-Cutover metadata requirements:
-
-1. Base table reverse reference update:
-   - replace old MV ID with new shadow table ID in `MaterializedViewBase.MViewIDs`.
-2. MV metadata handover:
-   - shadow table inherits old table's `MaterializedView` definition metadata.
-3. Old table conversion and drop:
-   - old MV table is converted to normal table metadata before drop in cutover flow.
-4. Refresh info migration:
-   - move `mysql.tidb_mview_refresh_info` row from old `MVIEW_ID` to new `MVIEW_ID`;
-   - set `LAST_SUCCESS_READ_TSO` to build read tso;
-   - keep schedule metadata (`NEXT_TIME`) semantics unchanged.
-5. TiFlash behavior:
-   - follow existing `CREATE TABLE ... LIKE` behavior as baseline (inherit replica config, clear availability state).
-
-Development steps:
-
-1. Add executor path for out-of-place COMPLETE build:
-   - build shadow table;
-   - load shadow data;
-   - capture build read tso;
-   - wire failure cleanup for partially-built shadow table.
-2. Add advisory-lock integration in refresh service:
-   - acquire lock at refresh entry for out-of-place path;
-   - map lock-conflict to user-visible "another refresh is running" error;
-   - ensure release on all exit paths.
-3. Add dedicated DDL cutover action:
-   - new job args include old MV ID, shadow table ID, build read tso;
-   - worker performs metadata handover and old-table drop atomically.
-4. Integrate refresh metadata/hist finalization:
-   - preserve current history lifecycle (`running -> success/failed`);
-   - update `mysql.tidb_mview_refresh_info` with new MV ID and build read tso on success only.
-5. Add retry/rollback handling:
-   - cutover failure leaves old MV serving path unchanged;
-   - shadow cleanup is best-effort and observable.
+1. Freeze behavior contract before code changes:
+   - keep semantic matrix stable: `COMPLETE` (in-place), `COMPLETE OUT OF PLACE`, `FAST` (existing), and reject `FAST OUT OF PLACE`;
+   - align user-visible error messages for unsupported mode combinations and cutover failures.
+2. Extend parser and AST for mode expression:
+   - add optional `OUT OF PLACE` clause to `REFRESH MATERIALIZED VIEW`;
+   - carry mode in `RefreshMaterializedViewStmt` (for example `OutOfPlace` flag);
+   - update parser tokens/keywords (`PLACE` token is required);
+   - update parser/AST restore tests.
+3. Add early mode validation in executor entry:
+   - in `validateRefreshMaterializedViewStmt`, reject invalid combinations (for example `FAST + OUT OF PLACE`);
+   - keep privilege and transaction-boundary checks unchanged.
+4. Introduce out-of-place COMPLETE executor path:
+   - branch from existing refresh execution flow using `(Type == COMPLETE && OutOfPlace)`;
+   - reuse existing outer advisory-lock lifecycle and refresh-history lifecycle.
+5. Implement shadow-table build stage:
+   - create shadow table via `CREATE TABLE <shadow> LIKE <mv>`;
+   - ensure shadow remains a normal table during build (`MaterializedView == nil`);
+   - use deterministic unique shadow naming and keep cleanup hooks for failures.
+6. Implement shadow data load and build tso capture:
+   - load `mv_select_sql` results into shadow (`IMPORT INTO ... FROM (<mv_select_sql>)` or fallback path);
+   - capture `build_read_tso` after successful build for cutover metadata update.
+7. Add dedicated DDL action/job for cutover:
+   - create new DDL action type and job args (at least `old_mv_id`, `shadow_table_id`, `build_read_tso`);
+   - add DDL API submission/wait helper used by refresh executor.
+8. Implement DDL worker cutover logic (single atomic action):
+   - keep MV logical name unchanged for users (shadow table takes original MV name);
+   - move MV definition metadata to shadow target;
+   - rewrite base-table reverse references (`MaterializedViewBase.MViewIDs`) from old ID to shadow ID;
+   - migrate `mysql.tidb_mview_refresh_info` row ownership (`MVIEW_ID` old to new) and set `LAST_SUCCESS_READ_TSO = build_read_tso`;
+   - preserve `NEXT_TIME` semantics during migration;
+   - drop/cleanup old physical table after metadata handover.
+9. Integrate finalization and failure semantics:
+   - finalize refresh history as `success` only after cutover success;
+   - on build/cutover failure, finalize as `failed`, keep old MV serving path unchanged, and do best-effort shadow cleanup;
+   - ensure advisory lock is released before internal session returns to pool.
+10. Add targeted tests for each layer:
+   - parser tests for `COMPLETE OUT OF PLACE` and reject cases;
+   - executor tests for success/failure/concurrency behavior;
+   - DDL tests for cutover metadata correctness, logical name continuity, old-table cleanup, and refresh-info migration.
+11. Run required validation and repo checks:
+   - run failpoint-aware targeted tests in affected packages;
+   - if Go files are added/moved/renamed, run `make bazel_prepare`;
+   - run `make bazel_lint_changed` before final submission.
+12. Submit in small reviewable commits:
+   - parser/AST and tests;
+   - executor build path and tests;
+   - DDL cutover action and tests;
+   - final doc adjustment if behavior changed during implementation.
 
 ## Test suggestions (for future implementation)
 
