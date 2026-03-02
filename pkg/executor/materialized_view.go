@@ -66,6 +66,7 @@ const (
 	purgeHistStatusSuccess          = "success"
 	purgeHistStatusFailed           = "failed"
 	mvRefreshAdvisoryLockTimeoutSec = int64(1)
+	mvRefreshShadowTablePrefix      = "__mv_shadow_"
 )
 
 // PurgeMaterializedViewLogExec executes "PURGE MATERIALIZED VIEW LOG" as a utility-style statement.
@@ -1091,13 +1092,57 @@ func (e *RefreshMaterializedViewExec) executeRefreshMaterializedView(kctx contex
 }
 
 func (e *RefreshMaterializedViewExec) executeRefreshMaterializedViewCompleteOutOfPlace(
-	_ context.Context,
-	_ *ast.RefreshMaterializedViewStmt,
-	_ pmodel.CIStr,
-	_ *model.TableInfo,
+	kctx context.Context,
+	s *ast.RefreshMaterializedViewStmt,
+	schemaName pmodel.CIStr,
+	tblInfo *model.TableInfo,
 	_ string,
-) error {
-	_ = e
+) (err error) {
+	buildSctx, err := e.GetSysSession()
+	if err != nil {
+		return err
+	}
+	defer e.ReleaseSysSession(kctx, buildSctx)
+
+	if buildSctx.GetSessionVars().InTxn() {
+		return errors.New("refresh materialized view complete OUT OF PLACE: build session unexpectedly in transaction")
+	}
+
+	shadowTableName := buildMVRefreshShadowTableName(tblInfo.ID)
+	shadowCreated := false
+	buildSQLExec := buildSctx.GetSQLExecutor()
+	defer func() {
+		if err == nil || !shadowCreated {
+			return
+		}
+		dropShadowSQL := sqlescape.MustEscapeSQL("DROP TABLE IF EXISTS %n.%n", schemaName.O, shadowTableName)
+		if _, dropErr := buildSQLExec.ExecuteInternal(context.WithoutCancel(kctx), dropShadowSQL); dropErr != nil {
+			logutil.BgLogger().Warn(
+				"failed to cleanup shadow table after out-of-place complete refresh error",
+				zap.String("schema", schemaName.O),
+				zap.String("mview", s.ViewName.Name.O),
+				zap.String("shadowTable", shadowTableName),
+				zap.Error(dropErr),
+			)
+			err = errors.Annotatef(err, "cleanup shadow table %s.%s failed: %v", schemaName.O, shadowTableName, dropErr)
+		}
+	}()
+
+	createShadowSQL := sqlescape.MustEscapeSQL(
+		"CREATE TABLE %n.%n LIKE %n.%n",
+		schemaName.O,
+		shadowTableName,
+		schemaName.O,
+		s.ViewName.Name.O,
+	)
+	if _, err = buildSQLExec.ExecuteInternal(kctx, createShadowSQL); err != nil {
+		return err
+	}
+	shadowCreated = true
+
+	failpoint.InjectCall("refreshMaterializedViewOutOfPlaceAfterCreateShadow")
+	failpoint.Inject("pauseRefreshMaterializedViewOutOfPlaceAfterCreateShadow", func() {})
+
 	// OUT OF PLACE refresh needs a dedicated flow:
 	// build runs outside the refresh transaction and cutover is finalized by DDL.
 	return errMVRefreshCompleteOutOfPlaceNotImplemented
@@ -1142,6 +1187,10 @@ func resolveMVMaintenanceMemQuota(kctx context.Context, sessVars *variable.Sessi
 		return 0, errors.Annotate(err, "mv maintenance: invalid global tidb_mv_maintain_mem_quota")
 	}
 	return globalQuota, nil
+}
+
+func buildMVRefreshShadowTableName(mviewID int64) string {
+	return fmt.Sprintf("%s%d_%d", mvRefreshShadowTablePrefix, mviewID, time.Now().UnixNano())
 }
 
 func initRefreshMaterializedViewSession(
