@@ -1045,6 +1045,9 @@ func validateRefreshMaterializedViewStmt(s *ast.RefreshMaterializedViewStmt, isI
 	if s == nil || s.ViewName == nil {
 		return "", errors.New("refresh materialized view: missing view name")
 	}
+	if s.OutOfPlace && s.Type != ast.RefreshMaterializedViewTypeComplete {
+		return "", errors.New("refresh materialized view: OUT OF PLACE is only supported for COMPLETE")
+	}
 	methodType := ""
 	switch s.Type {
 	case ast.RefreshMaterializedViewTypeComplete:
