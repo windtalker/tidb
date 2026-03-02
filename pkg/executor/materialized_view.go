@@ -57,6 +57,7 @@ type RefreshMaterializedViewExec struct {
 
 var errMLogPurgeLockConflict = errors.NewNoStackError("mlog purge lock conflict")
 var errMVRefreshAdvisoryLockConflict = errors.NewNoStackError("materialized view refresh advisory lock conflict")
+var errMVRefreshCompleteOutOfPlaceNotImplemented = errors.NewNoStackError("refresh materialized view complete OUT OF PLACE is not implemented yet")
 
 const (
 	purgeHistStatusRunning          = "running"
@@ -1229,34 +1230,79 @@ func executeRefreshMaterializedViewDataChanges(
 
 	switch s.Type {
 	case ast.RefreshMaterializedViewTypeComplete:
-		deleteSQL := sqlescape.MustEscapeSQL("DELETE FROM %n.%n", schemaName.O, s.ViewName.Name.O)
-		insertPrefix := sqlescape.MustEscapeSQL("INSERT INTO %n.%n ", schemaName.O, s.ViewName.Name.O)
-		/* #nosec G202: SQLContent is restored from AST (single SELECT statement, no user-provided placeholders). */
-		insertSQL := insertPrefix + tblInfo.MaterializedView.SQLContent
-		if _, err := sqlExec.ExecuteInternal(kctx, deleteSQL); err != nil {
-			return err
+		if s.OutOfPlace {
+			return executeRefreshMaterializedViewCompleteOutOfPlace(
+				kctx,
+				sqlExec,
+				sessVars,
+				s,
+				schemaName,
+				tblInfo,
+			)
 		}
-		if _, err := sqlExec.ExecuteInternal(kctx, insertSQL); err != nil {
-			return err
-		}
-		return nil
+		return executeRefreshMaterializedViewCompleteInPlace(
+			kctx,
+			sqlExec,
+			s,
+			schemaName,
+			tblInfo,
+		)
 	case ast.RefreshMaterializedViewTypeFast:
-		implementStmt := &ast.RefreshMaterializedViewImplementStmt{
-			RefreshStmt:                  s,
-			LastSuccessfulRefreshReadTSO: lastSuccessfulRefreshReadTSO,
-		}
-		return executeFastRefreshImplementStmt(kctx, sqlExec, sessVars, implementStmt)
+		return executeRefreshMaterializedViewFast(
+			kctx,
+			sqlExec,
+			sessVars,
+			s,
+			lastSuccessfulRefreshReadTSO,
+		)
 	default:
 		return errors.New("unknown REFRESH MATERIALIZED VIEW type")
 	}
 }
 
-func executeFastRefreshImplementStmt(
+func executeRefreshMaterializedViewCompleteInPlace(
+	kctx context.Context,
+	sqlExec sqlexec.SQLExecutor,
+	s *ast.RefreshMaterializedViewStmt,
+	schemaName pmodel.CIStr,
+	tblInfo *model.TableInfo,
+) error {
+	deleteSQL := sqlescape.MustEscapeSQL("DELETE FROM %n.%n", schemaName.O, s.ViewName.Name.O)
+	insertPrefix := sqlescape.MustEscapeSQL("INSERT INTO %n.%n ", schemaName.O, s.ViewName.Name.O)
+	/* #nosec G202: SQLContent is restored from AST (single SELECT statement, no user-provided placeholders). */
+	insertSQL := insertPrefix + tblInfo.MaterializedView.SQLContent
+	if _, err := sqlExec.ExecuteInternal(kctx, deleteSQL); err != nil {
+		return err
+	}
+	if _, err := sqlExec.ExecuteInternal(kctx, insertSQL); err != nil {
+		return err
+	}
+	return nil
+}
+
+func executeRefreshMaterializedViewCompleteOutOfPlace(
+	_ context.Context,
+	_ sqlexec.SQLExecutor,
+	_ *variable.SessionVars,
+	_ *ast.RefreshMaterializedViewStmt,
+	_ pmodel.CIStr,
+	_ *model.TableInfo,
+) error {
+	return errMVRefreshCompleteOutOfPlaceNotImplemented
+}
+
+func executeRefreshMaterializedViewFast(
 	kctx context.Context,
 	sqlExec sqlexec.SQLExecutor,
 	sessVars *variable.SessionVars,
-	implementStmt *ast.RefreshMaterializedViewImplementStmt,
+	s *ast.RefreshMaterializedViewStmt,
+	lastSuccessfulRefreshReadTSO int64,
 ) error {
+	implementStmt := &ast.RefreshMaterializedViewImplementStmt{
+		RefreshStmt:                  s,
+		LastSuccessfulRefreshReadTSO: lastSuccessfulRefreshReadTSO,
+	}
+
 	if internalExec, ok := sqlExec.(interface {
 		ExecuteInternalStmt(context.Context, ast.StmtNode) (sqlexec.RecordSet, error)
 	}); ok {

@@ -624,6 +624,20 @@ func TestMaterializedViewRefreshFastOutOfPlaceRejected(t *testing.T) {
 	require.ErrorContains(t, err, "OUT OF PLACE is only supported for COMPLETE")
 }
 
+func TestMaterializedViewRefreshCompleteOutOfPlaceNotImplemented(t *testing.T) {
+	store, _ := testkit.CreateMockStoreAndDomain(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("create table t (a int not null, b int not null)")
+	tk.MustExec("insert into t values (1, 10), (1, 5), (2, 7)")
+	tk.MustExec("create materialized view log on t (a, b) purge next date_add(now(), interval 1 hour)")
+	tk.MustExec("create materialized view mv (a, s, cnt) refresh fast next now() as select a, sum(b), count(1) from t group by a")
+
+	err := tk.ExecToErr("refresh materialized view mv complete out of place")
+	require.Error(t, err)
+	require.ErrorContains(t, err, "complete OUT OF PLACE is not implemented yet")
+}
+
 func TestMaterializedViewRefreshCompleteFailureKeepsRefreshInfoReadTSO(t *testing.T) {
 	store, dom := testkit.CreateMockStoreAndDomain(t)
 	tk := testkit.NewTestKit(t, store)
