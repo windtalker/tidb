@@ -804,12 +804,18 @@ func (e *RefreshMaterializedViewExec) executeRefreshMaterializedView(kctx contex
 	failpoint.InjectCall("refreshMaterializedViewAfterAcquireAdvisoryLock")
 
 	if s.Type == ast.RefreshMaterializedViewTypeComplete && s.OutOfPlace {
+		expectedLastSuccessReadTSO, expectedLastSuccessReadTSONull, err := readRefreshInfoReadTSO(kctx, sqlExec, mviewID)
+		if err != nil {
+			return err
+		}
 		return e.executeRefreshMaterializedViewCompleteOutOfPlace(
 			kctx,
 			s,
 			schemaName,
 			tblInfo,
 			refreshMethod,
+			expectedLastSuccessReadTSO,
+			expectedLastSuccessReadTSONull,
 		)
 	}
 
@@ -1003,6 +1009,8 @@ func (e *RefreshMaterializedViewExec) executeRefreshMaterializedViewCompleteOutO
 	schemaName pmodel.CIStr,
 	tblInfo *model.TableInfo,
 	_ string,
+	expectedLastSuccessReadTSO int64,
+	expectedLastSuccessReadTSONull bool,
 ) (err error) {
 	buildSctx, err := e.GetSysSession()
 	if err != nil {
@@ -1088,6 +1096,8 @@ func (e *RefreshMaterializedViewExec) executeRefreshMaterializedViewCompleteOutO
 		tblInfo.ID,
 		shadowTableID,
 		buildReadTSO,
+		expectedLastSuccessReadTSO,
+		expectedLastSuccessReadTSONull,
 	)
 }
 

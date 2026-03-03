@@ -1537,6 +1537,42 @@ func TestGCPlacementRulesForCreateMaterializedViewRollback(t *testing.T) {
 	require.True(t, got.IsEmpty())
 }
 
+func TestGCPlacementRulesForRefreshMaterializedViewOutOfPlaceCutover(t *testing.T) {
+	s := createGCWorkerSuite(t)
+
+	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/pkg/store/gcworker/mockHistoryJobForGC", `return("mv-cutover:30")`))
+	defer func() {
+		require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/pkg/store/gcworker/mockHistoryJobForGC"))
+	}()
+
+	var gcPlacementRuleCache sync.Map
+	bundleID := "TiDB_DDL_30"
+	bundle, err := placement.NewBundleFromOptions(&model.PlacementSettings{
+		PrimaryRegion: "r1",
+		Regions:       "r1, r2",
+	})
+	require.NoError(t, err)
+	bundle.ID = bundleID
+
+	require.NoError(t, infosync.PutRuleBundles(context.Background(), []*placement.Bundle{bundle}))
+	got, err := infosync.GetRuleBundle(context.Background(), bundleID)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	require.False(t, got.IsEmpty())
+
+	dr := util.DelRangeTask{JobID: 1, ElementID: 30}
+	err = doGCPlacementRules(createSession(s.store), 1, dr, &gcPlacementRuleCache)
+	require.NoError(t, err)
+	v, ok := gcPlacementRuleCache.Load(int64(30))
+	require.True(t, ok)
+	require.Equal(t, struct{}{}, v)
+
+	got, err = infosync.GetRuleBundle(context.Background(), bundleID)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	require.True(t, got.IsEmpty())
+}
+
 func TestGCLabelRules(t *testing.T) {
 	s := createGCWorkerSuite(t)
 

@@ -100,6 +100,8 @@ func expectedDeleteRangeCnt(ctx delRangeCntCtx, job *model.Job) (int, error) {
 			return 1, nil
 		}
 		return 0, nil
+	case model.ActionMViewRefreshOutOfPlaceCutover:
+		return 1, nil
 	case model.ActionTruncateTable, model.ActionTruncateTablePartition:
 		args, err := model.GetFinishedTruncateTableArgs(job)
 		if err != nil {
