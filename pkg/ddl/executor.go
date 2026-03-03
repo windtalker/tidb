@@ -121,11 +121,7 @@ type Executor interface {
 		schemaID int64,
 		schemaName pmodel.CIStr,
 		viewName pmodel.CIStr,
-		oldMViewID int64,
-		shadowTableID int64,
-		buildReadTSO uint64,
-		expectedLastSuccessReadTSO int64,
-		expectedLastSuccessReadTSONull bool,
+		args *model.RefreshMaterializedViewCompleteOutOfPlaceCutoverArgs,
 	) error
 	RecoverTable(ctx sessionctx.Context, recoverTableInfo *model.RecoverTableInfo) (err error)
 	RecoverSchema(ctx sessionctx.Context, recoverSchemaInfo *model.RecoverSchemaInfo) error

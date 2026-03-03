@@ -536,29 +536,21 @@ func (e *executor) RefreshMaterializedViewCompleteOutOfPlaceCutover(
 	schemaID int64,
 	schemaName pmodel.CIStr,
 	viewName pmodel.CIStr,
-	oldMViewID int64,
-	shadowTableID int64,
-	buildReadTSO uint64,
-	expectedLastSuccessReadTSO int64,
-	expectedLastSuccessReadTSONull bool,
+	args *model.RefreshMaterializedViewCompleteOutOfPlaceCutoverArgs,
 ) error {
+	if args == nil {
+		return errors.New("refresh materialized view complete OUT OF PLACE cutover: args should not be nil")
+	}
 	job := &model.Job{
 		Version:        model.GetJobVerInUse(),
 		SchemaID:       schemaID,
-		TableID:        oldMViewID,
+		TableID:        args.OldMViewID,
 		SchemaName:     schemaName.L,
 		TableName:      viewName.L,
 		Type:           model.ActionMViewRefreshOutOfPlaceCutover,
 		BinlogInfo:     &model.HistoryInfo{},
 		CDCWriteSource: ctx.GetSessionVars().CDCWriteSource,
 		SQLMode:        ctx.GetSessionVars().SQLMode,
-	}
-	args := &model.RefreshMaterializedViewCompleteOutOfPlaceCutoverArgs{
-		OldMViewID:                     oldMViewID,
-		ShadowTableID:                  shadowTableID,
-		BuildReadTSO:                   buildReadTSO,
-		ExpectedLastSuccessReadTSO:     expectedLastSuccessReadTSO,
-		ExpectedLastSuccessReadTSONull: expectedLastSuccessReadTSONull,
 	}
 	return errors.Trace(e.doDDLJob2(ctx, job, args))
 }

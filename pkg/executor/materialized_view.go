@@ -811,6 +811,15 @@ func (e *RefreshMaterializedViewExec) executeRefreshMaterializedView(kctx contex
 	}()
 	failpoint.InjectCall("refreshMaterializedViewAfterAcquireAdvisoryLock")
 
+	var scheduleEvalSctx sessionctx.Context
+	if isInternalSQL {
+		scheduleEvalSctx, err = e.GetSysSession()
+		if err != nil {
+			return err
+		}
+		defer e.ReleaseSysSession(kctx, scheduleEvalSctx)
+	}
+
 	if s.Type == ast.RefreshMaterializedViewTypeComplete && s.OutOfPlace {
 		expectedLastSuccessReadTSO, expectedLastSuccessReadTSONull, refreshJobID, err := readRefreshInfoReadTSO(
 			kctx,
@@ -848,10 +857,12 @@ func (e *RefreshMaterializedViewExec) executeRefreshMaterializedView(kctx contex
 
 		buildReadTSO, err := e.executeRefreshMaterializedViewCompleteOutOfPlace(
 			kctx,
+			refreshSctx,
+			scheduleEvalSctx,
+			isInternalSQL,
 			s,
 			schemaName,
 			tblInfo,
-			refreshMethod,
 			expectedLastSuccessReadTSO,
 			expectedLastSuccessReadTSONull,
 		)
@@ -873,15 +884,6 @@ func (e *RefreshMaterializedViewExec) executeRefreshMaterializedView(kctx contex
 			)
 		}
 		return nil
-	}
-
-	var scheduleEvalSctx sessionctx.Context
-	if isInternalSQL {
-		scheduleEvalSctx, err = e.GetSysSession()
-		if err != nil {
-			return err
-		}
-		defer e.ReleaseSysSession(kctx, scheduleEvalSctx)
 	}
 
 	txnStarted := false
@@ -1054,10 +1056,12 @@ func (e *RefreshMaterializedViewExec) executeRefreshMaterializedView(kctx contex
 
 func (e *RefreshMaterializedViewExec) executeRefreshMaterializedViewCompleteOutOfPlace(
 	kctx context.Context,
+	refreshSctx sessionctx.Context,
+	scheduleEvalSctx sessionctx.Context,
+	isInternalSQL bool,
 	s *ast.RefreshMaterializedViewStmt,
 	schemaName pmodel.CIStr,
 	tblInfo *model.TableInfo,
-	_ string,
 	expectedLastSuccessReadTSO int64,
 	expectedLastSuccessReadTSONull bool,
 ) (buildReadTSO uint64, err error) {
@@ -1137,16 +1141,33 @@ func (e *RefreshMaterializedViewExec) executeRefreshMaterializedViewCompleteOutO
 		return 0, err
 	}
 
+	nextTime, shouldUpdateNextTime, err := deriveRuntimeMaterializedScheduleNextTime(
+		kctx,
+		scheduleEvalSctx,
+		refreshSctx,
+		tblInfo.MaterializedView.RefreshStartWith,
+		tblInfo.MaterializedView.RefreshNext,
+		isInternalSQL,
+	)
+	if err != nil {
+		return 0, err
+	}
+
+	cutoverArgs := &model.RefreshMaterializedViewCompleteOutOfPlaceCutoverArgs{
+		OldMViewID:                     tblInfo.ID,
+		ShadowTableID:                  shadowTableID,
+		BuildReadTSO:                   buildReadTSO,
+		ExpectedLastSuccessReadTSO:     expectedLastSuccessReadTSO,
+		ExpectedLastSuccessReadTSONull: expectedLastSuccessReadTSONull,
+		NextTime:                       nextTime,
+		ShouldUpdateNextTime:           shouldUpdateNextTime,
+	}
 	if err := domain.GetDomain(e.Ctx()).DDLExecutor().RefreshMaterializedViewCompleteOutOfPlaceCutover(
 		e.Ctx(),
 		tblInfo.DBID,
 		schemaName,
 		s.ViewName.Name,
-		tblInfo.ID,
-		shadowTableID,
-		buildReadTSO,
-		expectedLastSuccessReadTSO,
-		expectedLastSuccessReadTSONull,
+		cutoverArgs,
 	); err != nil {
 		return 0, err
 	}

@@ -119,6 +119,40 @@ func TestMaterializedViewRefreshNextTimeOnlyUpdatesForInternalSQL(t *testing.T) 
 	)).Check(testkit.Rows("complete automatically"))
 }
 
+func TestMaterializedViewRefreshOutOfPlaceNextTimeOnlyUpdatesForInternalSQL(t *testing.T) {
+	store, dom := testkit.CreateMockStoreAndDomain(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("create table t_oop_next (a int not null, b int not null)")
+	tk.MustExec("insert into t_oop_next values (1, 10), (2, 20)")
+	tk.MustExec("create materialized view log on t_oop_next (a, b) purge next date_add(now(), interval 1 hour)")
+	tk.MustExec("create materialized view mv_oop_next (a, s, cnt) refresh fast start with date_add(now(), interval 2 hour) next date_add(now(), interval 40 minute) as select a, sum(b), count(1) from t_oop_next group by a")
+
+	currentMViewID := func() int64 {
+		is := dom.InfoSchema()
+		mvTable, err := is.TableByName(context.Background(), pmodel.NewCIStr("test"), pmodel.NewCIStr("mv_oop_next"))
+		require.NoError(t, err)
+		return mvTable.Meta().ID
+	}
+
+	mviewID := currentMViewID()
+	tk.MustExec(fmt.Sprintf("update mysql.tidb_mview_refresh_info set NEXT_TIME = null where MVIEW_ID = %d", mviewID))
+
+	// User SQL out-of-place refresh should not update NEXT_TIME.
+	tk.MustExec("refresh materialized view mv_oop_next complete out of place")
+	mviewID = currentMViewID()
+	tk.MustQuery(fmt.Sprintf("select NEXT_TIME is null from mysql.tidb_mview_refresh_info where MVIEW_ID = %d", mviewID)).
+		Check(testkit.Rows("1"))
+
+	// Internal SQL out-of-place refresh should update NEXT_TIME by evaluating RefreshNext.
+	mustExecInternal(t, tk, "refresh materialized view mv_oop_next complete out of place")
+	mviewID = currentMViewID()
+	tk.MustQuery(fmt.Sprintf(
+		"select NEXT_TIME is not null, NEXT_TIME > UTC_TIMESTAMP() + interval 20 minute, NEXT_TIME < UTC_TIMESTAMP() + interval 2 hour from mysql.tidb_mview_refresh_info where MVIEW_ID = %d",
+		mviewID,
+	)).Check(testkit.Rows("1 1 1"))
+}
+
 func TestMaterializedViewRefreshInternalSQLStartWithNoNextSetsNextTimeNull(t *testing.T) {
 	store, dom := testkit.CreateMockStoreAndDomain(t)
 	tk := testkit.NewTestKit(t, store)
@@ -752,6 +786,66 @@ func TestMaterializedViewRefreshCompleteOutOfPlaceCutoverCASMismatch(t *testing.
 	require.Contains(t, fmt.Sprintf("%v", reasonRow[0][0]), "stale LAST_SUCCESS_READ_TSO")
 	// Cutover CAS mismatch should keep old MV serving table unchanged.
 	tk.MustQuery("select a, s, cnt from mv order by a").Check(testkit.Rows("1 15 2", "2 7 1"))
+}
+
+func TestMaterializedViewRefreshCompleteOutOfPlaceAdvisoryLockConflict(t *testing.T) {
+	store, _ := testkit.CreateMockStoreAndDomain(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("create table t (a int not null, b int not null)")
+	tk.MustExec("insert into t values (1, 10), (1, 5), (2, 7)")
+	tk.MustExec("create materialized view log on t (a, b) purge next date_add(now(), interval 1 hour)")
+	tk.MustExec("create materialized view mv (a, s, cnt) refresh fast next now() as select a, sum(b), count(1) from t group by a")
+	tk.MustExec("insert into t values (2, 3), (3, 4)")
+
+	const pauseOutOfPlaceBuildFailpoint = "github.com/pingcap/tidb/pkg/executor/refreshMaterializedViewOutOfPlaceAfterCreateShadow"
+	pauseCh := make(chan struct{})
+	hitCh := make(chan struct{})
+	require.NoError(t, failpoint.EnableCall(pauseOutOfPlaceBuildFailpoint, func() {
+		select {
+		case <-hitCh:
+		default:
+			close(hitCh)
+		}
+		<-pauseCh
+	}))
+	defer func() {
+		select {
+		case <-pauseCh:
+		default:
+			close(pauseCh)
+		}
+		require.NoError(t, failpoint.Disable(pauseOutOfPlaceBuildFailpoint))
+	}()
+
+	refreshDone := make(chan error, 1)
+	go func() {
+		tkBlocked := testkit.NewTestKit(t, store)
+		tkBlocked.MustExec("use test")
+		refreshDone <- tkBlocked.ExecToErr("refresh materialized view mv complete out of place")
+	}()
+
+	select {
+	case <-hitCh:
+	case <-time.After(10 * time.Second):
+		t.Fatal("timeout waiting for out-of-place refresh to enter build stage")
+	}
+
+	tkConcurrent := testkit.NewTestKit(t, store)
+	tkConcurrent.MustExec("use test")
+	err := tkConcurrent.ExecToErr("refresh materialized view mv complete out of place")
+	require.Error(t, err)
+	require.ErrorContains(t, err, "another refresh is running for materialized view")
+
+	close(pauseCh)
+	select {
+	case err := <-refreshDone:
+		require.NoError(t, err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("timeout waiting for out-of-place refresh to finish")
+	}
+
+	tkConcurrent.MustExec("refresh materialized view mv complete out of place")
 }
 
 func TestMaterializedViewRefreshCompleteFailureKeepsRefreshInfoReadTSO(t *testing.T) {

@@ -328,22 +328,14 @@ func (d *Checker) RefreshMaterializedViewCompleteOutOfPlaceCutover(
 	schemaID int64,
 	schemaName pmodel.CIStr,
 	viewName pmodel.CIStr,
-	oldMViewID int64,
-	shadowTableID int64,
-	buildReadTSO uint64,
-	expectedLastSuccessReadTSO int64,
-	expectedLastSuccessReadTSONull bool,
+	args *model.RefreshMaterializedViewCompleteOutOfPlaceCutoverArgs,
 ) error {
 	return d.realExecutor.RefreshMaterializedViewCompleteOutOfPlaceCutover(
 		ctx,
 		schemaID,
 		schemaName,
 		viewName,
-		oldMViewID,
-		shadowTableID,
-		buildReadTSO,
-		expectedLastSuccessReadTSO,
-		expectedLastSuccessReadTSONull,
+		args,
 	)
 }
 

@@ -399,11 +399,7 @@ func (*SchemaTracker) RefreshMaterializedViewCompleteOutOfPlaceCutover(
 	int64,
 	pmodel.CIStr,
 	pmodel.CIStr,
-	int64,
-	int64,
-	uint64,
-	int64,
-	bool,
+	*model.RefreshMaterializedViewCompleteOutOfPlaceCutoverArgs,
 ) error {
 	return dbterror.ErrGeneralUnsupportedDDL.GenWithStack("REFRESH MATERIALIZED VIEW COMPLETE OUT OF PLACE cutover is not supported in schema tracker")
 }

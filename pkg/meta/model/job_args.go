@@ -762,11 +762,13 @@ func GetAlterMaterializedViewLogPurgeArgs(job *Job) (*AlterMaterializedViewLogPu
 // RefreshMaterializedViewCompleteOutOfPlaceCutoverArgs is the arguments for
 // ActionMViewRefreshOutOfPlaceCutover ddl.
 type RefreshMaterializedViewCompleteOutOfPlaceCutoverArgs struct {
-	OldMViewID                     int64  `json:"old_mview_id,omitempty"`
-	ShadowTableID                  int64  `json:"shadow_table_id,omitempty"`
-	BuildReadTSO                   uint64 `json:"build_read_tso,omitempty"`
-	ExpectedLastSuccessReadTSO     int64  `json:"expected_last_success_read_tso,omitempty"`
-	ExpectedLastSuccessReadTSONull bool   `json:"expected_last_success_read_tso_null,omitempty"`
+	OldMViewID                     int64   `json:"old_mview_id,omitempty"`
+	ShadowTableID                  int64   `json:"shadow_table_id,omitempty"`
+	BuildReadTSO                   uint64  `json:"build_read_tso,omitempty"`
+	ExpectedLastSuccessReadTSO     int64   `json:"expected_last_success_read_tso,omitempty"`
+	ExpectedLastSuccessReadTSONull bool    `json:"expected_last_success_read_tso_null,omitempty"`
+	NextTime                       *string `json:"next_time,omitempty"`
+	ShouldUpdateNextTime           bool    `json:"should_update_next_time,omitempty"`
 }
 
 func (a *RefreshMaterializedViewCompleteOutOfPlaceCutoverArgs) getArgsV1(*Job) []any {
@@ -776,6 +778,8 @@ func (a *RefreshMaterializedViewCompleteOutOfPlaceCutoverArgs) getArgsV1(*Job) [
 		a.BuildReadTSO,
 		a.ExpectedLastSuccessReadTSO,
 		a.ExpectedLastSuccessReadTSONull,
+		a.NextTime,
+		a.ShouldUpdateNextTime,
 	}
 }
 
@@ -786,6 +790,8 @@ func (a *RefreshMaterializedViewCompleteOutOfPlaceCutoverArgs) decodeV1(job *Job
 		&a.BuildReadTSO,
 		&a.ExpectedLastSuccessReadTSO,
 		&a.ExpectedLastSuccessReadTSONull,
+		&a.NextTime,
+		&a.ShouldUpdateNextTime,
 	))
 }
 

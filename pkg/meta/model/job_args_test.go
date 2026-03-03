@@ -594,12 +594,15 @@ func TestGetAlterMaterializedViewLogPurgeArgs(t *testing.T) {
 }
 
 func TestGetRefreshMaterializedViewCompleteOutOfPlaceCutoverArgs(t *testing.T) {
+	nextTime := "2030-01-01 00:00:00"
 	inArgs := &RefreshMaterializedViewCompleteOutOfPlaceCutoverArgs{
 		OldMViewID:                     101,
 		ShadowTableID:                  202,
 		BuildReadTSO:                   303,
 		ExpectedLastSuccessReadTSO:     404,
 		ExpectedLastSuccessReadTSONull: false,
+		NextTime:                       &nextTime,
+		ShouldUpdateNextTime:           true,
 	}
 
 	for _, v := range []JobVersion{JobVersion1, JobVersion2} {
@@ -612,6 +615,8 @@ func TestGetRefreshMaterializedViewCompleteOutOfPlaceCutoverArgs(t *testing.T) {
 
 	inArgs.ExpectedLastSuccessReadTSO = 0
 	inArgs.ExpectedLastSuccessReadTSONull = true
+	inArgs.NextTime = nil
+	inArgs.ShouldUpdateNextTime = false
 	for _, v := range []JobVersion{JobVersion1, JobVersion2} {
 		j2 := &Job{}
 		require.NoError(t, j2.Decode(getJobBytes(t, inArgs, v, ActionMViewRefreshOutOfPlaceCutover)))

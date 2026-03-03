@@ -1279,16 +1279,27 @@ func (w *worker) migrateMViewRefreshInfoForOutOfPlaceCutover(
 	if args.ExpectedLastSuccessReadTSONull {
 		expectedReadTSOArg = nil
 	}
-	_, err := w.sess.Execute(
-		ctx,
-		`UPDATE mysql.tidb_mview_refresh_info
-SET MVIEW_ID = %?, LAST_SUCCESS_READ_TSO = %?
-WHERE MVIEW_ID = %? AND LAST_SUCCESS_READ_TSO <=> %?`,
-		"mview-refresh-cutover-migrate-refresh-info",
+	updateSQL := "UPDATE mysql.tidb_mview_refresh_info SET MVIEW_ID = %?, LAST_SUCCESS_READ_TSO = %?"
+	updateArgs := []any{
 		args.ShadowTableID,
 		args.BuildReadTSO,
-		args.OldMViewID,
-		expectedReadTSOArg,
+	}
+	if args.ShouldUpdateNextTime {
+		updateSQL += ", NEXT_TIME = %?"
+		var nextTimeArg any
+		if args.NextTime != nil {
+			nextTimeArg = *args.NextTime
+		}
+		updateArgs = append(updateArgs, nextTimeArg)
+	}
+	updateSQL += " WHERE MVIEW_ID = %? AND LAST_SUCCESS_READ_TSO <=> %?"
+	updateArgs = append(updateArgs, args.OldMViewID, expectedReadTSOArg)
+
+	_, err := w.sess.Execute(
+		ctx,
+		updateSQL,
+		"mview-refresh-cutover-migrate-refresh-info",
+		updateArgs...,
 	)
 	if err != nil {
 		return errors.Trace(convertMViewRefreshInfoTableNotExistsErrOnOutOfPlaceCutover(err))
