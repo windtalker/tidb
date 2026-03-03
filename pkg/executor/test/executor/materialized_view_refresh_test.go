@@ -16,7 +16,6 @@ package executor
 
 import (
 	"context"
-	"encoding/hex"
 	"fmt"
 	"strconv"
 	"testing"
@@ -27,7 +26,6 @@ import (
 	"github.com/pingcap/tidb/pkg/parser/auth"
 	pmodel "github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
-	"github.com/pingcap/tidb/pkg/tablecodec"
 	"github.com/pingcap/tidb/pkg/testkit"
 	"github.com/pingcap/tidb/pkg/testkit/testfailpoint"
 	"github.com/stretchr/testify/require"
@@ -662,33 +660,49 @@ func TestMaterializedViewRefreshCompleteOutOfPlaceCutoverBasic(t *testing.T) {
 	tk.MustQuery(fmt.Sprintf("select LAST_SUCCESS_READ_TSO > 0 from mysql.tidb_mview_refresh_info where MVIEW_ID = %d", newMViewID)).
 		Check(testkit.Rows("1"))
 	tk.MustQuery("show tables like '\\_\\_mv\\_shadow\\_%'").Check(testkit.Rows())
+	tk.MustQuery(fmt.Sprintf("select REFRESH_STATUS, REFRESH_METHOD, REFRESH_ENDTIME is not null, REFRESH_READ_TSO > 0, REFRESH_FAILED_REASON is null from mysql.tidb_mview_refresh_hist where MVIEW_ID = %d order by REFRESH_JOB_ID desc limit 1", oldMViewID)).
+		Check(testkit.Rows("success complete manually 1 1 1"))
+	tk.MustQuery(fmt.Sprintf("select count(*) from mysql.tidb_mview_refresh_hist where MVIEW_ID = %d and REFRESH_STATUS = 'running'", oldMViewID)).
+		Check(testkit.Rows("0"))
 
-	startKey := hex.EncodeToString(tablecodec.EncodeTablePrefix(oldMViewID))
-	endKey := hex.EncodeToString(tablecodec.EncodeTablePrefix(oldMViewID + 1))
-	tk.MustQuery(`
-select sum(cnt) from (
-	select count(*) as cnt from mysql.gc_delete_range where start_key = ? and end_key = ?
-	union all
-	select count(*) as cnt from mysql.gc_delete_range_done where start_key = ? and end_key = ?
-) as t`,
-		startKey, endKey, startKey, endKey).Check(testkit.Rows("1"))
+	rows := tk.MustQuery("admin show ddl jobs where JOB_TYPE='refresh materialized view complete out-of-place cutover'").Rows()
+	require.NotEmpty(t, rows)
+	cutoverJobID := fmt.Sprint(rows[0][0])
+	tk.MustQuery(fmt.Sprintf(
+		"select ((select count(*) from mysql.gc_delete_range where job_id=%s) + (select count(*) from mysql.gc_delete_range_done where job_id=%s)) > 0",
+		cutoverJobID,
+		cutoverJobID,
+	)).Check(testkit.Rows("1"))
 }
 
 func TestMaterializedViewRefreshCompleteOutOfPlaceBuildFailureCleansShadow(t *testing.T) {
-	store, _ := testkit.CreateMockStoreAndDomain(t)
+	store, dom := testkit.CreateMockStoreAndDomain(t)
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
 	tk.MustExec("create table t (a int not null, b int not null)")
 	tk.MustExec("insert into t values (1, 10), (1, 5), (2, 7)")
 	tk.MustExec("create materialized view log on t (a, b) purge next date_add(now(), interval 1 hour)")
 	tk.MustExec("create materialized view mv (a, s, cnt) refresh fast next now() as select a, sum(b), count(1) from t group by a")
+
+	is := dom.InfoSchema()
+	mvTable, err := is.TableByName(context.Background(), pmodel.NewCIStr("test"), pmodel.NewCIStr("mv"))
+	require.NoError(t, err)
+	mviewID := mvTable.Meta().ID
+
 	tk.MustExec("create unique index idx_unique_s on mv (s)")
 	tk.MustExec("insert into t values (2, 8)")
 
-	err := tk.ExecToErr("refresh materialized view mv complete out of place")
+	err = tk.ExecToErr("refresh materialized view mv complete out of place")
 	require.Error(t, err)
 	require.ErrorContains(t, err, "Duplicate")
 	tk.MustQuery("show tables like '\\_\\_mv\\_shadow\\_%'").Check(testkit.Rows())
+	tk.MustQuery(fmt.Sprintf("select REFRESH_STATUS, REFRESH_METHOD, REFRESH_ENDTIME is not null, REFRESH_READ_TSO is null, REFRESH_FAILED_REASON is not null from mysql.tidb_mview_refresh_hist where MVIEW_ID = %d order by REFRESH_JOB_ID desc limit 1", mviewID)).
+		Check(testkit.Rows("failed complete manually 1 1 1"))
+	tk.MustQuery(fmt.Sprintf("select count(*) from mysql.tidb_mview_refresh_hist where MVIEW_ID = %d and REFRESH_STATUS = 'running'", mviewID)).
+		Check(testkit.Rows("0"))
+	reasonRow := tk.MustQuery(fmt.Sprintf("select REFRESH_FAILED_REASON from mysql.tidb_mview_refresh_hist where MVIEW_ID = %d order by REFRESH_JOB_ID desc limit 1", mviewID)).Rows()
+	require.Len(t, reasonRow, 1)
+	require.Contains(t, fmt.Sprintf("%v", reasonRow[0][0]), "Duplicate")
 	// Out-of-place build failure should not modify old MV serving table.
 	tk.MustQuery("select a, s, cnt from mv order by a").Check(testkit.Rows("1 15 2", "2 7 1"))
 }
@@ -729,6 +743,13 @@ func TestMaterializedViewRefreshCompleteOutOfPlaceCutoverCASMismatch(t *testing.
 	tk.MustQuery(fmt.Sprintf("select count(*) from mysql.tidb_mview_refresh_info where MVIEW_ID = %d", mviewID)).
 		Check(testkit.Rows("1"))
 	tk.MustQuery("show tables like '\\_\\_mv\\_shadow\\_%'").Check(testkit.Rows())
+	tk.MustQuery(fmt.Sprintf("select REFRESH_STATUS, REFRESH_METHOD, REFRESH_ENDTIME is not null, REFRESH_READ_TSO is null, REFRESH_FAILED_REASON is not null from mysql.tidb_mview_refresh_hist where MVIEW_ID = %d order by REFRESH_JOB_ID desc limit 1", mviewID)).
+		Check(testkit.Rows("failed complete manually 1 1 1"))
+	tk.MustQuery(fmt.Sprintf("select count(*) from mysql.tidb_mview_refresh_hist where MVIEW_ID = %d and REFRESH_STATUS = 'running'", mviewID)).
+		Check(testkit.Rows("0"))
+	reasonRow := tk.MustQuery(fmt.Sprintf("select REFRESH_FAILED_REASON from mysql.tidb_mview_refresh_hist where MVIEW_ID = %d order by REFRESH_JOB_ID desc limit 1", mviewID)).Rows()
+	require.Len(t, reasonRow, 1)
+	require.Contains(t, fmt.Sprintf("%v", reasonRow[0][0]), "stale LAST_SUCCESS_READ_TSO")
 	// Cutover CAS mismatch should keep old MV serving table unchanged.
 	tk.MustQuery("select a, s, cnt from mv order by a").Check(testkit.Rows("1 15 2", "2 7 1"))
 }

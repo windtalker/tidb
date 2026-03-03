@@ -16,6 +16,7 @@ package sqlexec
 
 import (
 	"context"
+	stderrors "errors"
 
 	"github.com/pingcap/tidb/pkg/parser"
 	"github.com/pingcap/tidb/pkg/parser/ast"
@@ -24,6 +25,11 @@ import (
 	"github.com/pingcap/tidb/pkg/sessionctx/sysproctrack"
 	"github.com/pingcap/tidb/pkg/sessionctx/variable"
 	"github.com/pingcap/tidb/pkg/util/chunk"
+)
+
+const (
+	// LastQueryStartTSSQL fetches the last executed statement start_ts from session state.
+	LastQueryStartTSSQL = "SELECT COALESCE(CAST(JSON_UNQUOTE(JSON_EXTRACT(@@tidb_last_query_info, '$.start_ts')) AS UNSIGNED), CAST(0 AS UNSIGNED))"
 )
 
 // RestrictedSQLExecutor is an interface provides executing restricted sql statement.
@@ -265,4 +271,21 @@ func ExecSQL(ctx context.Context, exec SQLExecutor, sql string, args ...any) ([]
 		return DrainRecordSet(ctx, rs, 1024)
 	}
 	return nil, nil
+}
+
+// GetLastQueryStartTS returns start_ts from @@tidb_last_query_info in current session.
+func GetLastQueryStartTS(ctx context.Context, exec SQLExecutor) (uint64, error) {
+	rows, err := ExecSQL(ctx, exec, LastQueryStartTSSQL)
+	if err != nil {
+		return 0, err
+	}
+	return ParseLastQueryStartTS(rows)
+}
+
+// ParseLastQueryStartTS parses start_ts row returned by LastQueryStartTSSQL.
+func ParseLastQueryStartTS(rows []chunk.Row) (uint64, error) {
+	if len(rows) == 0 {
+		return 0, stderrors.New("cannot fetch query start tso")
+	}
+	return rows[0].GetUint64(0), nil
 }

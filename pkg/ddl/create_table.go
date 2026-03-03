@@ -57,6 +57,7 @@ import (
 	"github.com/pingcap/tidb/pkg/util/intest"
 	"github.com/pingcap/tidb/pkg/util/set"
 	"github.com/pingcap/tidb/pkg/util/sqlescape"
+	"github.com/pingcap/tidb/pkg/util/sqlexec"
 	"go.uber.org/zap"
 )
 
@@ -537,17 +538,18 @@ func buildCreateMaterializedViewImportSQL(schemaName string, mvTblInfo *model.Ta
 }
 
 func getCreateMaterializedViewBuildReadTS(ctx context.Context, ddlSess *sess.Session) (uint64, error) {
-	rows, err := ddlSess.Execute(ctx,
-		"SELECT COALESCE(CAST(JSON_UNQUOTE(JSON_EXTRACT(@@tidb_last_query_info, '$.start_ts')) AS UNSIGNED), CAST(0 AS UNSIGNED))",
+	rows, err := ddlSess.Execute(
+		ctx,
+		sqlexec.LastQueryStartTSSQL,
 		"create-materialized-view-build-read-ts",
 	)
 	if err != nil {
 		return 0, errors.Trace(err)
 	}
-	if len(rows) == 0 {
+	readTS, err := sqlexec.ParseLastQueryStartTS(rows)
+	if err != nil {
 		return 0, dbterror.ErrInvalidDDLJob.GenWithStackByArgs("create materialized view: cannot fetch build read tso")
 	}
-	readTS := rows[0].GetUint64(0)
 	if readTS == 0 {
 		return 0, dbterror.ErrInvalidDDLJob.GenWithStackByArgs("create materialized view: invalid build read tso")
 	}
