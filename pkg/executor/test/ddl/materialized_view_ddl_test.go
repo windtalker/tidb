@@ -1017,3 +1017,71 @@ func TestCreateTableLikeShouldNotCarryMaterializedViewMetadata(t *testing.T) {
 	require.Equal(t, mlogSrc.Meta().ID, baseTable.Meta().MaterializedViewBase.MLogID)
 	require.Equal(t, []int64{mvSrc.Meta().ID}, baseTable.Meta().MaterializedViewBase.MViewIDs)
 }
+
+func TestRefreshMaterializedViewCompleteOutOfPlaceDDLCutoverMetadata(t *testing.T) {
+	store, dom := testkit.CreateMockStoreAndDomain(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("create table t (a int not null, b int not null)")
+	tk.MustExec("insert into t values (1, 10), (1, 5), (2, 7)")
+	tk.MustExec("create materialized view log on t (a, b) purge next date_add(now(), interval 1 hour)")
+	tk.MustExec("create materialized view mv (a, s, cnt) refresh fast next now() as select a, sum(b), count(1) from t group by a")
+
+	is := dom.InfoSchema()
+	oldMView, err := is.TableByName(context.Background(), pmodel.NewCIStr("test"), pmodel.NewCIStr("mv"))
+	require.NoError(t, err)
+	oldMViewID := oldMView.Meta().ID
+	oldBaseTableIDs := append([]int64(nil), oldMView.Meta().MaterializedView.BaseTableIDs...)
+
+	const pinnedNextTime = "2036-01-02 03:04:05"
+	tk.MustExec(fmt.Sprintf(
+		"update mysql.tidb_mview_refresh_info set NEXT_TIME = '%s' where MVIEW_ID = %d",
+		pinnedNextTime,
+		oldMViewID,
+	))
+	tk.MustQuery(fmt.Sprintf(
+		"select NEXT_TIME from mysql.tidb_mview_refresh_info where MVIEW_ID = %d",
+		oldMViewID,
+	)).Check(testkit.Rows(pinnedNextTime))
+
+	tk.MustExec("insert into t values (2, 3), (3, 4)")
+	tk.MustExec("refresh materialized view mv complete out of place")
+	tk.MustQuery("select a, s, cnt from mv order by a").Check(testkit.Rows("1 15 2", "2 10 2", "3 4 1"))
+
+	is = dom.InfoSchema()
+	newMView, err := is.TableByName(context.Background(), pmodel.NewCIStr("test"), pmodel.NewCIStr("mv"))
+	require.NoError(t, err)
+	newMViewID := newMView.Meta().ID
+	require.NotEqual(t, oldMViewID, newMViewID)
+	require.NotNil(t, newMView.Meta().MaterializedView)
+	require.Equal(t, oldBaseTableIDs, newMView.Meta().MaterializedView.BaseTableIDs)
+
+	_, oldTableExists := is.TableByID(context.Background(), oldMViewID)
+	require.False(t, oldTableExists)
+
+	baseTable, err := is.TableByName(context.Background(), pmodel.NewCIStr("test"), pmodel.NewCIStr("t"))
+	require.NoError(t, err)
+	require.NotNil(t, baseTable.Meta().MaterializedViewBase)
+	require.Contains(t, baseTable.Meta().MaterializedViewBase.MViewIDs, newMViewID)
+	require.NotContains(t, baseTable.Meta().MaterializedViewBase.MViewIDs, oldMViewID)
+
+	tk.MustQuery(fmt.Sprintf(
+		"select count(*) from mysql.tidb_mview_refresh_info where MVIEW_ID = %d",
+		oldMViewID,
+	)).Check(testkit.Rows("0"))
+	tk.MustQuery(fmt.Sprintf(
+		"select LAST_SUCCESS_READ_TSO > 0, NEXT_TIME from mysql.tidb_mview_refresh_info where MVIEW_ID = %d",
+		newMViewID,
+	)).Check(testkit.Rows("1 " + pinnedNextTime))
+
+	tk.MustQuery("show tables like '\\_\\_mv\\_shadow\\_%'").Check(testkit.Rows())
+
+	rows := tk.MustQuery("admin show ddl jobs where JOB_TYPE='refresh materialized view complete out-of-place cutover'").Rows()
+	require.NotEmpty(t, rows)
+	cutoverJobID := fmt.Sprint(rows[0][0])
+	tk.MustQuery(fmt.Sprintf(
+		"select ((select count(*) from mysql.gc_delete_range where job_id=%s) + (select count(*) from mysql.gc_delete_range_done where job_id=%s)) > 0",
+		cutoverJobID,
+		cutoverJobID,
+	)).Check(testkit.Rows("1"))
+}
