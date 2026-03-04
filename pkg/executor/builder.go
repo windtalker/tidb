@@ -1525,7 +1525,6 @@ func (b *executorBuilder) buildMVDeltaMergeMinMaxRecompute(
 		return nil, err
 	}
 
-	recomputeMappings := make([]*MinMaxRecomputeMapping, len(aggMappings))
 	hasMinMaxMapping := false
 	for mappingIdx := range aggMappings {
 		mapping := aggMappings[mappingIdx]
@@ -1562,10 +1561,11 @@ func (b *executorBuilder) buildMVDeltaMergeMinMaxRecompute(
 				mvOffset,
 			)
 		}
-		recomputeMappings[mappingIdx] = &MinMaxRecomputeMapping{
+		mapping.MinMaxRecompute = &MinMaxRecomputeSpec{
 			Strategy:            MinMaxRecomputeBatch,
 			BatchResultColIdxes: []int{batchResultColIdx},
 		}
+		aggMappings[mappingIdx] = mapping
 	}
 	if !hasMinMaxMapping {
 		return nil, nil
@@ -1593,7 +1593,6 @@ func (b *executorBuilder) buildMVDeltaMergeMinMaxRecompute(
 	return &MinMaxRecomputeExec{
 		KeyInputColIDs:    keyInputColIDs,
 		KeyResultColIdxes: keyResultColIdxes,
-		Mappings:          recomputeMappings,
 		BatchBuilder:      batchBuilder,
 	}, nil
 }

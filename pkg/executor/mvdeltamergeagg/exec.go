@@ -49,6 +49,9 @@ type Mapping struct {
 	// A dependency is either a delta-agg column (< DeltaAggColCount) or a
 	// previously computed output column.
 	DependencyColID []int
+	// MinMaxRecompute is per-mapping MIN/MAX recompute metadata.
+	// It must be nil for non-MIN/MAX mappings.
+	MinMaxRecompute *MinMaxRecomputeSpec
 }
 
 // MinMaxRecomputeStrategy is the recompute mode for MIN/MAX fallback.
@@ -94,8 +97,8 @@ type MinMaxRecomputeSingleRowExec struct {
 	Workers []MinMaxRecomputeSingleRowWorker
 }
 
-// MinMaxRecomputeMapping is recompute metadata for one MIN/MAX mapping.
-type MinMaxRecomputeMapping struct {
+// MinMaxRecomputeSpec is recompute metadata for one MIN/MAX mapping.
+type MinMaxRecomputeSpec struct {
 	// Strategy is the recompute mode.
 	Strategy MinMaxRecomputeStrategy
 	// SingleRow is set when Strategy is MinMaxRecomputeSingleRow.
@@ -105,16 +108,13 @@ type MinMaxRecomputeMapping struct {
 	BatchResultColIdxes []int
 }
 
-// MinMaxRecomputeExec stores all MIN/MAX recompute metadata.
+// MinMaxRecomputeExec stores shared MIN/MAX recompute metadata.
 type MinMaxRecomputeExec struct {
 	// KeyInputColIDs are group-key columns in child schema.
 	KeyInputColIDs []int
 	// KeyResultColIdxes are group-key columns in batch recompute result schema, in the same order as KeyInputColIDs.
 	// When empty, [0..len(KeyInputColIDs)) is used.
 	KeyResultColIdxes []int
-	// Mappings is aligned with Exec.AggMappings by mapping index.
-	// Non MIN/MAX positions should be nil.
-	Mappings []*MinMaxRecomputeMapping
 	// BatchBuilder creates one batch recompute executor.
 	// Build must be safe for concurrent calls across MV merge workers.
 	BatchBuilder MinMaxBatchExecBuilder
@@ -653,14 +653,16 @@ func resolveMinMaxKeyResultColIdxes(meta *MinMaxRecomputeExec) []int {
 
 func (e *Exec) validateMinMaxRecompute(childTypes []*types.FieldType) error {
 	if e.MinMaxRecompute == nil {
+		for mappingIdx, agg := range e.AggMappings {
+			if agg.MinMaxRecompute != nil {
+				return errors.Errorf("AggMappings[%d].MinMaxRecompute is set but MinMaxRecompute is nil", mappingIdx)
+			}
+		}
 		return nil
 	}
 	meta := e.MinMaxRecompute
 	if len(meta.KeyInputColIDs) == 0 {
 		return errors.New("MinMaxRecompute requires non-empty KeyInputColIDs")
-	}
-	if len(meta.Mappings) != len(e.AggMappings) {
-		return errors.Errorf("MinMaxRecompute.Mappings length mismatch: expect %d, got %d", len(e.AggMappings), len(meta.Mappings))
 	}
 	seenKey := make(map[int]struct{}, len(meta.KeyInputColIDs))
 	for _, keyColID := range meta.KeyInputColIDs {
@@ -697,29 +699,29 @@ func (e *Exec) validateMinMaxRecompute(childTypes []*types.FieldType) error {
 			return errors.Errorf("MinMaxRecompute validation requires AggMappings[%d].AggFunc", mappingIdx)
 		}
 		aggName := agg.AggFunc.Name
-		recompute := meta.Mappings[mappingIdx]
+		minMaxRecompute := agg.MinMaxRecompute
 		if !isMinMaxAgg(aggName) {
-			if recompute != nil {
-				return errors.Errorf("MinMaxRecompute mapping %d is set for non-MIN/MAX agg=%s", mappingIdx, aggName)
+			if minMaxRecompute != nil {
+				return errors.Errorf("AggMappings[%d].MinMaxRecompute is set for non-MIN/MAX agg=%s", mappingIdx, aggName)
 			}
 			continue
 		}
-		if recompute == nil {
-			return errors.Errorf("missing MinMaxRecompute mapping for agg index %d (%s)", mappingIdx, aggName)
+		if minMaxRecompute == nil {
+			return errors.Errorf("missing AggMappings[%d].MinMaxRecompute for agg=%s", mappingIdx, aggName)
 		}
-		switch recompute.Strategy {
+		switch minMaxRecompute.Strategy {
 		case MinMaxRecomputeSingleRow:
-			if recompute.SingleRow == nil {
+			if minMaxRecompute.SingleRow == nil {
 				return errors.Errorf("MinMaxRecompute mapping %d requires SingleRow execution metadata", mappingIdx)
 			}
-			if len(recompute.BatchResultColIdxes) > 0 {
+			if len(minMaxRecompute.BatchResultColIdxes) > 0 {
 				return errors.Errorf("MinMaxRecompute mapping %d single-row strategy should not set BatchResultColIdxes", mappingIdx)
 			}
-			if e.WorkerCnt > 0 && len(recompute.SingleRow.Workers) != e.WorkerCnt {
-				return errors.Errorf("MinMaxRecompute mapping %d single-row worker slots mismatch: expect %d, got %d", mappingIdx, e.WorkerCnt, len(recompute.SingleRow.Workers))
+			if e.WorkerCnt > 0 && len(minMaxRecompute.SingleRow.Workers) != e.WorkerCnt {
+				return errors.Errorf("MinMaxRecompute mapping %d single-row worker slots mismatch: expect %d, got %d", mappingIdx, e.WorkerCnt, len(minMaxRecompute.SingleRow.Workers))
 			}
-			for workerIdx := range recompute.SingleRow.Workers {
-				worker := recompute.SingleRow.Workers[workerIdx]
+			for workerIdx := range minMaxRecompute.SingleRow.Workers {
+				worker := minMaxRecompute.SingleRow.Workers[workerIdx]
 				if worker.Exec == nil {
 					return errors.Errorf("MinMaxRecompute mapping %d single-row worker %d requires executor", mappingIdx, workerIdx)
 				}
@@ -734,19 +736,26 @@ func (e *Exec) validateMinMaxRecompute(childTypes []*types.FieldType) error {
 			}
 		case MinMaxRecomputeBatch:
 			hasBatch = true
-			if recompute.SingleRow != nil {
+			if minMaxRecompute.SingleRow != nil {
 				return errors.Errorf("MinMaxRecompute mapping %d batch strategy should not set SingleRow metadata", mappingIdx)
 			}
-			if len(recompute.BatchResultColIdxes) == 0 {
+			if len(minMaxRecompute.BatchResultColIdxes) == 0 {
 				return errors.Errorf("MinMaxRecompute mapping %d batch strategy requires BatchResultColIdxes", mappingIdx)
 			}
-			if len(recompute.BatchResultColIdxes) != len(agg.ColID) {
-				return errors.Errorf("MinMaxRecompute mapping %d batch result column mismatch: Mapping.ColID=%d BatchResultColIdxes=%d", mappingIdx, len(agg.ColID), len(recompute.BatchResultColIdxes))
+			if len(minMaxRecompute.BatchResultColIdxes) != len(agg.ColID) {
+				return errors.Errorf("MinMaxRecompute mapping %d batch result column mismatch: Mapping.ColID=%d BatchResultColIdxes=%d", mappingIdx, len(agg.ColID), len(minMaxRecompute.BatchResultColIdxes))
 			}
-			seenBatchResult := make(map[int]struct{}, len(recompute.BatchResultColIdxes))
-			for _, resultColIdx := range recompute.BatchResultColIdxes {
+			seenBatchResult := make(map[int]struct{}, len(minMaxRecompute.BatchResultColIdxes))
+			for _, resultColIdx := range minMaxRecompute.BatchResultColIdxes {
 				if resultColIdx < 0 {
 					return errors.Errorf("MinMaxRecompute mapping %d batch result col idx %d must be non-negative", mappingIdx, resultColIdx)
+				}
+				if _, conflictsWithKey := seenKeyResult[resultColIdx]; conflictsWithKey {
+					return errors.Errorf(
+						"MinMaxRecompute mapping %d batch result col idx %d conflicts with key prefix/result columns",
+						mappingIdx,
+						resultColIdx,
+					)
 				}
 				if _, dup := seenBatchResult[resultColIdx]; dup {
 					return errors.Errorf("duplicate batch result col idx %d in MinMaxRecompute mapping %d", resultColIdx, mappingIdx)
@@ -754,7 +763,7 @@ func (e *Exec) validateMinMaxRecompute(childTypes []*types.FieldType) error {
 				seenBatchResult[resultColIdx] = struct{}{}
 			}
 		default:
-			return errors.Errorf("MinMaxRecompute mapping %d has unknown strategy %d", mappingIdx, recompute.Strategy)
+			return errors.Errorf("MinMaxRecompute mapping %d has unknown strategy %d", mappingIdx, minMaxRecompute.Strategy)
 		}
 	}
 	if hasBatch && meta.BatchBuilder == nil {
@@ -987,9 +996,9 @@ func (e *Exec) recomputeMinMaxRows(
 		if mappingIdx < 0 || mappingIdx >= len(e.AggMappings) {
 			return errors.Errorf("min/max recompute mapping idx %d out of range [0,%d)", mappingIdx, len(e.AggMappings))
 		}
-		recomputeMeta := e.MinMaxRecompute.Mappings[mappingIdx]
+		recomputeMeta := e.AggMappings[mappingIdx].MinMaxRecompute
 		if recomputeMeta == nil {
-			return errors.Errorf("missing MinMaxRecompute mapping for agg index %d", mappingIdx)
+			return errors.Errorf("missing AggMappings[%d].MinMaxRecompute", mappingIdx)
 		}
 		switch recomputeMeta.Strategy {
 		case MinMaxRecomputeSingleRow:
@@ -1038,7 +1047,10 @@ func (e *Exec) recomputeMinMaxSingleRow(
 	recomputeRows []int,
 	overrides []*mappingRecomputeOverride,
 ) error {
-	recomputeMeta := e.MinMaxRecompute.Mappings[mappingIdx]
+	if mappingIdx < 0 || mappingIdx >= len(e.AggMappings) {
+		return errors.Errorf("single-row MinMaxRecompute mapping idx %d out of range [0,%d)", mappingIdx, len(e.AggMappings))
+	}
+	recomputeMeta := e.AggMappings[mappingIdx].MinMaxRecompute
 	if recomputeMeta == nil || recomputeMeta.SingleRow == nil {
 		return errors.Errorf("single-row MinMaxRecompute metadata is missing for mapping %d", mappingIdx)
 	}
@@ -1319,7 +1331,14 @@ func (e *Exec) recomputeMinMaxBatch(
 		}
 		resultKeyTypes[keyPos] = batchTypes[resultKeyColIdx]
 	}
-	if err := validateMinMaxBatchKeyTypes(keyTypes, resultKeyTypes); err != nil {
+	if err := e.validateMinMaxBatchSchemaTypes(
+		childTypes,
+		keyTypes,
+		resultKeyColIdxes,
+		resultKeyTypes,
+		batchMappings,
+		batchTypes,
+	); err != nil {
 		return err
 	}
 	resultChk := exec.NewFirstChunk(batchExec)
@@ -1371,7 +1390,10 @@ func (e *Exec) recomputeMinMaxBatch(
 				if bitsetGet(state.seen, ref.rowPos) {
 					return errors.Errorf("min/max batch recompute has duplicate result for mapping %d row %d", ref.mappingIdx, ref.rowIdx)
 				}
-				recomputeMeta := e.MinMaxRecompute.Mappings[ref.mappingIdx]
+				recomputeMeta := e.AggMappings[ref.mappingIdx].MinMaxRecompute
+				if recomputeMeta == nil {
+					return errors.Errorf("min/max batch recompute metadata is missing for mapping %d", ref.mappingIdx)
+				}
 				mapping := e.AggMappings[ref.mappingIdx]
 				if err := appendMappingOverrideFromResultRow(
 					overrides,
@@ -1484,21 +1506,123 @@ func encodeChunkKeyRowsColumnar(
 	return keyBuf, nullByPhysicalRow, nil
 }
 
-func validateMinMaxBatchKeyTypes(expected, result []*types.FieldType) error {
-	if len(expected) != len(result) {
-		return errors.Errorf("min/max batch key column count mismatch: expected=%d result=%d", len(expected), len(result))
+func (e *Exec) validateMinMaxBatchSchemaTypes(
+	childTypes []*types.FieldType,
+	keyTypes []*types.FieldType,
+	resultKeyColIdxes []int,
+	resultKeyTypes []*types.FieldType,
+	batchMappings []int,
+	batchTypes []*types.FieldType,
+) error {
+	if len(resultKeyColIdxes) != len(keyTypes) {
+		return errors.Errorf(
+			"min/max batch key column count mismatch: key types=%d result key indexes=%d",
+			len(keyTypes),
+			len(resultKeyColIdxes),
+		)
 	}
-	for i := range expected {
-		if expected[i] == nil || result[i] == nil {
+	if len(resultKeyTypes) != len(keyTypes) {
+		return errors.Errorf(
+			"min/max batch key column count mismatch: key types=%d result key types=%d",
+			len(keyTypes),
+			len(resultKeyTypes),
+		)
+	}
+
+	keyResultSet := make(map[int]struct{}, len(resultKeyColIdxes))
+	for i := range keyTypes {
+		keyTp := keyTypes[i]
+		resultColIdx := resultKeyColIdxes[i]
+		if resultColIdx < 0 || resultColIdx >= len(batchTypes) {
+			return errors.Errorf(
+				"min/max batch result key col idx %d out of schema range [0,%d) at key position %d",
+				resultColIdx,
+				len(batchTypes),
+				i,
+			)
+		}
+		if _, dup := keyResultSet[resultColIdx]; dup {
+			return errors.Errorf("duplicate min/max batch result key col idx %d", resultColIdx)
+		}
+		keyResultSet[resultColIdx] = struct{}{}
+
+		resultTp := resultKeyTypes[i]
+		if keyTp == nil || resultTp == nil {
 			return errors.Errorf("min/max batch key type is unavailable at position %d", i)
 		}
-		if !expected[i].Equal(result[i]) {
+		if !resultTp.Equal(batchTypes[resultColIdx]) {
+			return errors.Errorf(
+				"min/max batch key type mismatch at position %d: result key type=%s batch schema=%s",
+				i,
+				resultTp.String(),
+				batchTypes[resultColIdx].String(),
+			)
+		}
+		if !keyTp.Equal(resultTp) {
 			return errors.Errorf(
 				"min/max batch key type mismatch at position %d: expected=%s result=%s",
 				i,
-				expected[i].String(),
-				result[i].String(),
+				keyTp.String(),
+				resultTp.String(),
 			)
+		}
+	}
+
+	for _, mappingIdx := range batchMappings {
+		if mappingIdx < 0 || mappingIdx >= len(e.AggMappings) {
+			return errors.Errorf("min/max batch mapping idx %d out of range [0,%d)", mappingIdx, len(e.AggMappings))
+		}
+		mapping := e.AggMappings[mappingIdx]
+		minMaxRecompute := mapping.MinMaxRecompute
+		if minMaxRecompute == nil {
+			return errors.Errorf("min/max batch recompute metadata is missing for mapping %d", mappingIdx)
+		}
+		if len(minMaxRecompute.BatchResultColIdxes) != len(mapping.ColID) {
+			return errors.Errorf(
+				"min/max batch result column count mismatch for mapping %d: BatchResultColIdxes=%d Mapping.ColID=%d",
+				mappingIdx,
+				len(minMaxRecompute.BatchResultColIdxes),
+				len(mapping.ColID),
+			)
+		}
+		for pos, resultColIdx := range minMaxRecompute.BatchResultColIdxes {
+			if _, conflictsWithKey := keyResultSet[resultColIdx]; conflictsWithKey {
+				return errors.Errorf(
+					"min/max batch result col idx %d for mapping %d conflicts with key prefix/result columns",
+					resultColIdx,
+					mappingIdx,
+				)
+			}
+			if resultColIdx < 0 || resultColIdx >= len(batchTypes) {
+				return errors.Errorf(
+					"min/max batch result col idx %d out of schema range [0,%d) for mapping %d",
+					resultColIdx,
+					len(batchTypes),
+					mappingIdx,
+				)
+			}
+			outputColID := mapping.ColID[pos]
+			if outputColID < 0 || outputColID >= len(childTypes) {
+				return errors.Errorf("mapping %d output col id %d out of range [0,%d)", mappingIdx, outputColID, len(childTypes))
+			}
+			outputTp := childTypes[outputColID]
+			if outputTp == nil || batchTypes[resultColIdx] == nil {
+				return errors.Errorf(
+					"min/max batch result type is unavailable for mapping %d: output_col=%d result_col=%d",
+					mappingIdx,
+					outputColID,
+					resultColIdx,
+				)
+			}
+			if !outputTp.Equal(batchTypes[resultColIdx]) {
+				return errors.Errorf(
+					"min/max batch result type mismatch for mapping %d output position %d: output=%s result=%s",
+					mappingIdx,
+					pos,
+					outputTp.String(),
+					batchTypes[resultColIdx].String(),
+				)
+			}
 		}
 	}
 	return nil

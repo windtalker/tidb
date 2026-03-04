@@ -560,19 +560,20 @@ func TestRejectMinMaxDeltaDependencyFromComputed(t *testing.T) {
 			BaseExecutor: exec.NewBaseExecutor(sctx, nil, 0, src),
 			AggMappings: []Mapping{
 				{AggFunc: countStarDesc, ColID: []int{6}, DependencyColID: []int{0}},
-				{AggFunc: minDesc, ColID: []int{7}, DependencyColID: deps},
-			},
-			DeltaAggColCount: 6,
-			MinMaxRecompute: &MinMaxRecomputeExec{
-				KeyInputColIDs: []int{5},
-				Mappings: []*MinMaxRecomputeMapping{
-					nil,
-					{
+				{
+					AggFunc:         minDesc,
+					ColID:           []int{7},
+					DependencyColID: deps,
+					MinMaxRecompute: &MinMaxRecomputeSpec{
 						Strategy:            MinMaxRecomputeBatch,
 						BatchResultColIdxes: []int{1},
 					},
 				},
-				BatchBuilder: &mockBatchRecomputeBuilder{},
+			},
+			DeltaAggColCount: 6,
+			MinMaxRecompute: &MinMaxRecomputeExec{
+				KeyInputColIDs: []int{5},
+				BatchBuilder:   &mockBatchRecomputeBuilder{},
 			},
 		}
 		err = mergeExec.Open(context.Background())
@@ -811,15 +812,7 @@ func TestMaxFastPathAndSingleRowRecompute(t *testing.T) {
 				AggFunc:         maxDesc,
 				ColID:           []int{7},
 				DependencyColID: []int{1, 2, 3, 4},
-			},
-		},
-		DeltaAggColCount: 6,
-		WorkerCnt:        1,
-		MinMaxRecompute: &MinMaxRecomputeExec{
-			KeyInputColIDs: []int{5},
-			Mappings: []*MinMaxRecomputeMapping{
-				nil,
-				{
+				MinMaxRecompute: &MinMaxRecomputeSpec{
 					Strategy: MinMaxRecomputeSingleRow,
 					SingleRow: &MinMaxRecomputeSingleRowExec{
 						Workers: []MinMaxRecomputeSingleRowWorker{
@@ -831,6 +824,11 @@ func TestMaxFastPathAndSingleRowRecompute(t *testing.T) {
 					},
 				},
 			},
+		},
+		DeltaAggColCount: 6,
+		WorkerCnt:        1,
+		MinMaxRecompute: &MinMaxRecomputeExec{
+			KeyInputColIDs: []int{5},
 		},
 	}
 	writer := &collectWriter{}
@@ -912,20 +910,17 @@ func TestMaxBatchRecompute(t *testing.T) {
 				AggFunc:         maxDesc,
 				ColID:           []int{7},
 				DependencyColID: []int{1, 2, 3, 4},
+				MinMaxRecompute: &MinMaxRecomputeSpec{
+					Strategy:            MinMaxRecomputeBatch,
+					BatchResultColIdxes: []int{1},
+				},
 			},
 		},
 		DeltaAggColCount: 6,
 		WorkerCnt:        1,
 		MinMaxRecompute: &MinMaxRecomputeExec{
 			KeyInputColIDs: []int{5},
-			Mappings: []*MinMaxRecomputeMapping{
-				nil,
-				{
-					Strategy:            MinMaxRecomputeBatch,
-					BatchResultColIdxes: []int{1},
-				},
-			},
-			BatchBuilder: batchBuilder,
+			BatchBuilder:   batchBuilder,
 		},
 	}
 	writer := &collectWriter{}
@@ -996,20 +991,17 @@ func TestRejectMaxBatchRecomputeKeyTypeMismatch(t *testing.T) {
 				AggFunc:         maxDesc,
 				ColID:           []int{7},
 				DependencyColID: []int{1, 2, 3, 4},
+				MinMaxRecompute: &MinMaxRecomputeSpec{
+					Strategy:            MinMaxRecomputeBatch,
+					BatchResultColIdxes: []int{1},
+				},
 			},
 		},
 		DeltaAggColCount: 6,
 		WorkerCnt:        1,
 		MinMaxRecompute: &MinMaxRecomputeExec{
 			KeyInputColIDs: []int{5},
-			Mappings: []*MinMaxRecomputeMapping{
-				nil,
-				{
-					Strategy:            MinMaxRecomputeBatch,
-					BatchResultColIdxes: []int{1},
-				},
-			},
-			BatchBuilder: batchBuilder,
+			BatchBuilder:   batchBuilder,
 		},
 	}
 	writer := &collectWriter{}
@@ -1019,6 +1011,77 @@ func TestRejectMaxBatchRecomputeKeyTypeMismatch(t *testing.T) {
 	outChk := exec.NewFirstChunk(mergeExec)
 	err = mergeExec.Next(context.Background(), outChk)
 	require.ErrorContains(t, err, "min/max batch key type mismatch")
+	require.NoError(t, mergeExec.Close())
+}
+
+func TestRejectMaxBatchRecomputeResultTypeMismatch(t *testing.T) {
+	sctx := mock.NewContext()
+	sctx.GetSessionVars().ExecutorConcurrency = 1
+
+	// Schema:
+	// [0] delta_count(*), [1] delta_max_added(v), [2] delta_max_added_cnt(v),
+	// [3] delta_max_removed(v), [4] delta_max_removed_cnt(v), [5] group_key,
+	// [6] mv_count(*), [7] mv_max(v).
+	ftInt := types.NewFieldType(mysql.TypeLonglong)
+	ftReal := types.NewFieldType(mysql.TypeDouble)
+	fts := []*types.FieldType{ftInt, ftInt, ftInt, ftInt, ftInt, ftInt, ftInt, ftInt}
+	chk := chunk.NewChunkWithCapacity(fts, 1)
+
+	// fallback path, must trigger batch recompute.
+	chk.AppendInt64(0, 0)
+	chk.AppendNull(1)
+	chk.AppendInt64(2, 0)
+	chk.AppendInt64(3, 10)
+	chk.AppendInt64(4, 1)
+	chk.AppendInt64(5, 1)
+	chk.AppendInt64(6, 3)
+	chk.AppendInt64(7, 10)
+
+	src := newMockSource(sctx, fts, []*chunk.Chunk{chk})
+	countStarDesc, err := aggregation.NewAggFuncDesc(sctx.GetExprCtx(), ast.AggFuncCount, []expression.Expression{expression.NewOne()}, false)
+	require.NoError(t, err)
+	maxArgTp := types.NewFieldType(mysql.TypeLonglong)
+	maxArgTp.AddFlag(mysql.NotNullFlag)
+	maxArg := &expression.Column{Index: 1, RetType: maxArgTp}
+	maxDesc, err := aggregation.NewAggFuncDesc(sctx.GetExprCtx(), ast.AggFuncMax, []expression.Expression{maxArg}, false)
+	require.NoError(t, err)
+
+	// result type mismatch: output max(v) is BIGINT, but batch result col is DOUBLE.
+	batchBuilder := &mockBatchRecomputeBuilder{
+		sctx:  sctx,
+		retTp: []*types.FieldType{ftInt, ftReal},
+		values: map[int64]int64{
+			1: 8,
+		},
+	}
+	mergeExec := &Exec{
+		BaseExecutor: exec.NewBaseExecutor(sctx, nil, 0, src),
+		AggMappings: []Mapping{
+			{AggFunc: countStarDesc, ColID: []int{6}, DependencyColID: []int{0}},
+			{
+				AggFunc:         maxDesc,
+				ColID:           []int{7},
+				DependencyColID: []int{1, 2, 3, 4},
+				MinMaxRecompute: &MinMaxRecomputeSpec{
+					Strategy:            MinMaxRecomputeBatch,
+					BatchResultColIdxes: []int{1},
+				},
+			},
+		},
+		DeltaAggColCount: 6,
+		WorkerCnt:        1,
+		MinMaxRecompute: &MinMaxRecomputeExec{
+			KeyInputColIDs: []int{5},
+			BatchBuilder:   batchBuilder,
+		},
+	}
+	writer := &collectWriter{}
+	mergeExec.Writer = writer
+
+	require.NoError(t, mergeExec.Open(context.Background()))
+	outChk := exec.NewFirstChunk(mergeExec)
+	err = mergeExec.Next(context.Background(), outChk)
+	require.ErrorContains(t, err, "min/max batch result type mismatch")
 	require.NoError(t, mergeExec.Close())
 }
 
@@ -1079,15 +1142,7 @@ func TestMinMaxFallbackToCountStarWithoutFinalCountDependency(t *testing.T) {
 				AggFunc:         maxDesc,
 				ColID:           []int{7},
 				DependencyColID: []int{1, 2, 3, 4},
-			},
-		},
-		DeltaAggColCount: 6,
-		WorkerCnt:        1,
-		MinMaxRecompute: &MinMaxRecomputeExec{
-			KeyInputColIDs: []int{5},
-			Mappings: []*MinMaxRecomputeMapping{
-				nil,
-				{
+				MinMaxRecompute: &MinMaxRecomputeSpec{
 					Strategy: MinMaxRecomputeSingleRow,
 					SingleRow: &MinMaxRecomputeSingleRowExec{
 						Workers: []MinMaxRecomputeSingleRowWorker{
@@ -1099,6 +1154,11 @@ func TestMinMaxFallbackToCountStarWithoutFinalCountDependency(t *testing.T) {
 					},
 				},
 			},
+		},
+		DeltaAggColCount: 6,
+		WorkerCnt:        1,
+		MinMaxRecompute: &MinMaxRecomputeExec{
+			KeyInputColIDs: []int{5},
 		},
 	}
 	writer := &collectWriter{}
@@ -1150,20 +1210,17 @@ func TestRejectMinMaxFallbackToCountStarForNullableExpr(t *testing.T) {
 				AggFunc:         maxDesc,
 				ColID:           []int{7},
 				DependencyColID: []int{1, 2, 3, 4},
+				MinMaxRecompute: &MinMaxRecomputeSpec{
+					Strategy:            MinMaxRecomputeBatch,
+					BatchResultColIdxes: []int{1},
+				},
 			},
 		},
 		DeltaAggColCount: 6,
 		WorkerCnt:        1,
 		MinMaxRecompute: &MinMaxRecomputeExec{
 			KeyInputColIDs: []int{5},
-			Mappings: []*MinMaxRecomputeMapping{
-				nil,
-				{
-					Strategy:            MinMaxRecomputeBatch,
-					BatchResultColIdxes: []int{1},
-				},
-			},
-			BatchBuilder: &mockBatchRecomputeBuilder{},
+			BatchBuilder:   &mockBatchRecomputeBuilder{},
 		},
 	}
 	err = mergeExec.Open(context.Background())
@@ -1188,35 +1245,65 @@ func TestRejectMinMaxRecomputeValidation(t *testing.T) {
 		expectedError string
 	}{
 		{
-			name:       "mapping length mismatch",
+			name:       "non-minmax mapping with recompute metadata",
 			fieldTypes: []*types.FieldType{ftInt, ftInt},
 			aggMappings: []Mapping{
-				{AggFunc: countStarDesc, ColID: []int{1}, DependencyColID: []int{0}},
+				{
+					AggFunc:         countStarDesc,
+					ColID:           []int{1},
+					DependencyColID: []int{0},
+					MinMaxRecompute: &MinMaxRecomputeSpec{
+						Strategy:            MinMaxRecomputeBatch,
+						BatchResultColIdxes: []int{1},
+					},
+				},
 			},
 			minMax: &MinMaxRecomputeExec{
 				KeyInputColIDs: []int{0},
-				Mappings:       nil, // expect length 1
+				BatchBuilder:   &mockBatchRecomputeBuilder{},
 			},
-			expectedError: "MinMaxRecompute.Mappings length mismatch",
+			expectedError: "set for non-MIN/MAX",
 		},
 		{
 			name:       "batch strategy without builder",
 			fieldTypes: []*types.FieldType{ftInt, ftInt, ftInt},
 			aggMappings: []Mapping{
 				{AggFunc: countStarDesc, ColID: []int{1}, DependencyColID: []int{0}},
-				{AggFunc: minDesc, ColID: []int{2}, DependencyColID: []int{0}},
+				{
+					AggFunc:         minDesc,
+					ColID:           []int{2},
+					DependencyColID: []int{0},
+					MinMaxRecompute: &MinMaxRecomputeSpec{
+						Strategy:            MinMaxRecomputeBatch,
+						BatchResultColIdxes: []int{1},
+					},
+				},
 			},
 			minMax: &MinMaxRecomputeExec{
 				KeyInputColIDs: []int{0},
-				Mappings: []*MinMaxRecomputeMapping{
-					nil,
-					{
+			},
+			expectedError: "batch strategy requires BatchBuilder",
+		},
+		{
+			name:       "batch result index overlaps key prefix",
+			fieldTypes: []*types.FieldType{ftInt, ftInt, ftInt},
+			aggMappings: []Mapping{
+				{AggFunc: countStarDesc, ColID: []int{1}, DependencyColID: []int{0}},
+				{
+					AggFunc:         minDesc,
+					ColID:           []int{2},
+					DependencyColID: []int{0},
+					MinMaxRecompute: &MinMaxRecomputeSpec{
 						Strategy:            MinMaxRecomputeBatch,
 						BatchResultColIdxes: []int{0},
 					},
 				},
 			},
-			expectedError: "batch strategy requires BatchBuilder",
+			minMax: &MinMaxRecomputeExec{
+				KeyInputColIDs: []int{0},
+				BatchBuilder:   &mockBatchRecomputeBuilder{},
+			},
+			expectedError: "conflicts with key prefix",
 		},
 	}
 
