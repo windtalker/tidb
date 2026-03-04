@@ -1108,15 +1108,26 @@ func (e *Exec) recomputeMinMaxSingleRow(
 		}
 		resultChk.Reset()
 		nextErr := exec.Next(ctx, worker.Exec, resultChk)
-		closeErr := worker.Exec.Close()
 		if nextErr != nil {
+			closeErr := worker.Exec.Close()
+			if closeErr != nil {
+				return closeErr
+			}
 			return nextErr
 		}
-		if closeErr != nil {
-			return closeErr
-		}
 		if resultChk.NumRows() == 0 {
+			closeErr := worker.Exec.Close()
+			if closeErr != nil {
+				return closeErr
+			}
 			return errors.Errorf("min/max single-row recompute returns no row for mapping %d row %d", mappingIdx, rowIdx)
+		}
+		if resultChk.NumRows() > 1 {
+			closeErr := worker.Exec.Close()
+			if closeErr != nil {
+				return closeErr
+			}
+			return errors.Errorf("min/max single-row recompute returns more than one row for mapping %d row %d", mappingIdx, rowIdx)
 		}
 
 		resultRow := resultChk.GetRow(0)
@@ -1126,6 +1137,20 @@ func (e *Exec) recomputeMinMaxSingleRow(
 			}
 			rowValues[colPos] = resultRow.GetDatum(colPos, childTypes[outputColID])
 		}
+
+		resultChk.Reset()
+		nextErr = exec.Next(ctx, worker.Exec, resultChk)
+		closeErr := worker.Exec.Close()
+		if nextErr != nil {
+			return nextErr
+		}
+		if closeErr != nil {
+			return closeErr
+		}
+		if resultChk.NumRows() != 0 {
+			return errors.Errorf("min/max single-row recompute returns more than one row for mapping %d row %d", mappingIdx, rowIdx)
+		}
+
 		if err := appendMappingOverrideFromValues(overrides, mappingIdx, rowIdx, rowValues); err != nil {
 			return err
 		}
@@ -1225,8 +1250,9 @@ func (e *Exec) recomputeMinMaxBatch(
 			continue
 		}
 		seenStateByMapping[mappingIdx] = &batchMappingSeenState{
-			rows: filteredRows,
-			seen: make([]uint64, (len(filteredRows)+63)>>6),
+			rows:           filteredRows,
+			seen:           make([]uint64, (len(filteredRows)+63)>>6),
+			valuesByOutput: makeBatchMappingResultBuffer(len(mapping.ColID), len(filteredRows)),
 		}
 	}
 	workerData.batchUniqueRows = uniqueRows
@@ -1373,7 +1399,7 @@ func (e *Exec) recomputeMinMaxBatch(
 			encodedKey := encodedResultKeys[logicalPos]
 			keyIdx, exists := keyIdxByEncoded[hack.String(encodedKey)]
 			if !exists {
-				continue
+				return errors.Errorf("min/max batch recompute returns an unexpected key at result row %d", rowIdx)
 			}
 			refs := refsByLookupKey[keyIdx]
 			if len(refs) == 0 {
@@ -1395,10 +1421,9 @@ func (e *Exec) recomputeMinMaxBatch(
 					return errors.Errorf("min/max batch recompute metadata is missing for mapping %d", ref.mappingIdx)
 				}
 				mapping := e.AggMappings[ref.mappingIdx]
-				if err := appendMappingOverrideFromResultRow(
-					overrides,
-					ref.mappingIdx,
-					ref.rowIdx,
+				if err := storeBatchMappingResultAtRowPos(
+					state,
+					ref.rowPos,
 					resultRow,
 					childTypes,
 					mapping,
@@ -1422,13 +1447,18 @@ func (e *Exec) recomputeMinMaxBatch(
 				return errors.Errorf("min/max batch recompute misses row %d for mapping %d", rowIdx, mappingIdx)
 			}
 		}
+		mapping := e.AggMappings[mappingIdx]
+		if err := appendMappingOverrideFromBatchState(overrides, mappingIdx, mapping, state); err != nil {
+			return err
+		}
 	}
 	return nil
 }
 
 type batchMappingSeenState struct {
-	rows []int
-	seen []uint64
+	rows           []int
+	seen           []uint64
+	valuesByOutput [][]types.Datum
 }
 
 func bitsetGet(bits []uint64, pos int) bool {
@@ -1437,6 +1467,103 @@ func bitsetGet(bits []uint64, pos int) bool {
 
 func bitsetSet(bits []uint64, pos int) {
 	bits[pos>>6] |= uint64(1) << uint(pos&63)
+}
+
+func makeBatchMappingResultBuffer(outputCnt int, rowCnt int) [][]types.Datum {
+	valuesByOutput := make([][]types.Datum, outputCnt)
+	for idx := range valuesByOutput {
+		valuesByOutput[idx] = make([]types.Datum, rowCnt)
+	}
+	return valuesByOutput
+}
+
+func storeBatchMappingResultAtRowPos(
+	state *batchMappingSeenState,
+	rowPos int,
+	resultRow chunk.Row,
+	childTypes []*types.FieldType,
+	mapping Mapping,
+	resultColIdxes []int,
+	resultColCnt int,
+) error {
+	if state == nil {
+		return errors.New("min/max batch recompute state is nil")
+	}
+	if rowPos < 0 || rowPos >= len(state.rows) {
+		return errors.Errorf("min/max batch recompute row position %d out of range [0,%d)", rowPos, len(state.rows))
+	}
+	if len(resultColIdxes) != len(mapping.ColID) {
+		return errors.Errorf(
+			"batch result column count mismatch for mapping output columns: result=%d mapping=%d",
+			len(resultColIdxes),
+			len(mapping.ColID),
+		)
+	}
+	if len(state.valuesByOutput) != len(mapping.ColID) {
+		return errors.Errorf(
+			"batch state output column count mismatch: state=%d mapping=%d",
+			len(state.valuesByOutput),
+			len(mapping.ColID),
+		)
+	}
+	for colPos, outputColID := range mapping.ColID {
+		resultColIdx := resultColIdxes[colPos]
+		if resultColIdx < 0 || resultColIdx >= resultColCnt {
+			return errors.Errorf(
+				"min/max batch recompute result col idx %d out of range [0,%d)",
+				resultColIdx,
+				resultColCnt,
+			)
+		}
+		if outputColID < 0 || outputColID >= len(childTypes) {
+			return errors.Errorf("mapping output col id %d out of range [0,%d)", outputColID, len(childTypes))
+		}
+		if childTypes[outputColID] == nil {
+			return errors.Errorf("mapping output col id %d type is unavailable", outputColID)
+		}
+		if rowPos >= len(state.valuesByOutput[colPos]) {
+			return errors.Errorf(
+				"batch state value row position %d out of range [0,%d) for output position %d",
+				rowPos,
+				len(state.valuesByOutput[colPos]),
+				colPos,
+			)
+		}
+		d := resultRow.GetDatum(resultColIdx, childTypes[outputColID])
+		d.Copy(&state.valuesByOutput[colPos][rowPos])
+	}
+	return nil
+}
+
+func appendMappingOverrideFromBatchState(
+	overrides []*mappingRecomputeOverride,
+	mappingIdx int,
+	mapping Mapping,
+	state *batchMappingSeenState,
+) error {
+	if state == nil {
+		return errors.New("min/max batch recompute state is nil")
+	}
+	override, err := ensureMappingOverride(overrides, mappingIdx, len(mapping.ColID), len(state.rows))
+	if err != nil {
+		return err
+	}
+	for rowPos, rowIdx := range state.rows {
+		override.rowIdxes = append(override.rowIdxes, rowIdx)
+		for colPos := range mapping.ColID {
+			if rowPos >= len(state.valuesByOutput[colPos]) {
+				return errors.Errorf(
+					"batch state value row position %d out of range [0,%d) for mapping %d output position %d",
+					rowPos,
+					len(state.valuesByOutput[colPos]),
+					mappingIdx,
+					colPos,
+				)
+			}
+			override.valuesByOutput[colPos] = append(override.valuesByOutput[colPos], state.valuesByOutput[colPos][rowPos])
+		}
+	}
+	return nil
 }
 
 func buildContiguousRowIdxes(buf []int, rowCnt int) []int {
@@ -1744,50 +1871,6 @@ func appendMappingOverrideFromValues(
 		var copied types.Datum
 		values[idx].Copy(&copied)
 		override.valuesByOutput[idx] = append(override.valuesByOutput[idx], copied)
-	}
-	return nil
-}
-
-func appendMappingOverrideFromResultRow(
-	overrides []*mappingRecomputeOverride,
-	mappingIdx int,
-	rowIdx int,
-	resultRow chunk.Row,
-	childTypes []*types.FieldType,
-	mapping Mapping,
-	resultColIdxes []int,
-	resultColCnt int,
-) error {
-	override, err := ensureMappingOverride(overrides, mappingIdx, len(mapping.ColID), 0)
-	if err != nil {
-		return err
-	}
-	if len(resultColIdxes) != len(mapping.ColID) {
-		return errors.Errorf(
-			"batch result column count mismatch for mapping %d: result=%d mapping=%d",
-			mappingIdx,
-			len(resultColIdxes),
-			len(mapping.ColID),
-		)
-	}
-	override.rowIdxes = append(override.rowIdxes, rowIdx)
-	for colPos, outputColID := range mapping.ColID {
-		resultColIdx := resultColIdxes[colPos]
-		if resultColIdx < 0 || resultColIdx >= resultColCnt {
-			return errors.Errorf(
-				"min/max batch recompute result col idx %d out of range [0,%d) for mapping %d",
-				resultColIdx,
-				resultColCnt,
-				mappingIdx,
-			)
-		}
-		if outputColID < 0 || outputColID >= len(childTypes) {
-			return errors.Errorf("mapping %d output col id %d out of range [0,%d)", mappingIdx, outputColID, len(childTypes))
-		}
-		var copied types.Datum
-		d := resultRow.GetDatum(resultColIdx, childTypes[outputColID])
-		d.Copy(&copied)
-		override.valuesByOutput[colPos] = append(override.valuesByOutput[colPos], copied)
 	}
 	return nil
 }
