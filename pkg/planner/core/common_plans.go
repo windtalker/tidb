@@ -608,8 +608,6 @@ type MVDeltaMerge struct {
 	CountStarMVOffset int
 
 	AggInfos []mvmerge.AggInfo `plan-cache-clone:"shallow"`
-
-	RemovedRowCountDelta *mvmerge.DeltaColumn `plan-cache-clone:"shallow"`
 }
 
 // ExplainInfo returns aggregate dependency information for MV delta merge.
@@ -692,7 +690,7 @@ func (p *MVDeltaMerge) MemoryUsage() (sum int64) {
 		return
 	}
 
-	sum = p.baseSchemaProducer.MemoryUsage() + size.SizeOfInterface*4 + size.SizeOfInt64*3 + size.SizeOfInt*4 + size.SizeOfSlice*3 + size.SizeOfPointer
+	sum = p.baseSchemaProducer.MemoryUsage() + size.SizeOfInterface*4 + size.SizeOfInt64*3 + size.SizeOfInt*4 + size.SizeOfSlice*3
 	sum += int64(cap(p.GroupKeyMVOffsets)) * size.SizeOfInt
 	sum += int64(cap(p.AggInfos)) * size.SizeOfInterface
 	sum += int64(cap(p.SourceOutputNames)) * size.SizeOfPointer

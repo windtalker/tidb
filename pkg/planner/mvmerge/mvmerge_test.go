@@ -41,7 +41,6 @@ const (
 	mvTableAlias    = "mv"
 
 	deltaCntStarName = "__mvmerge_delta_cnt_star"
-	removedRowsName  = "__mvmerge_removed_rows"
 )
 
 func optimizeForTest(sctx sessionctx.Context, is infoschema.InfoSchema) func(ctx context.Context, sel *ast.SelectStmt) (corebase.PhysicalPlan, types.NameSlice, error) {
@@ -343,7 +342,6 @@ func TestBuildMinMaxHasRemovedGate(t *testing.T) {
 	require.NoError(t, err)
 	plan, outputNames, err := optimizeForTest(sctx, is)(context.Background(), res.MergeSourceSelect)
 	require.NoError(t, err)
-	require.NotNil(t, res.RemovedRowCountDelta)
 	require.Equal(t, 1, res.CountStarMVOffset)
 	require.NotNil(t, res.FullUpdateLookupTemplateSelect)
 	fullPlan, fullOutputNames, err := optimizeForTest(sctx, is)(context.Background(), res.FullUpdateLookupTemplateSelect)
@@ -386,12 +384,11 @@ func TestBuildMinMaxHasRemovedGate(t *testing.T) {
 		{Pos: 6, Tbl: deltaTableAlias, Col: "__mvmerge_min_cnt_in_added_3"},
 		{Pos: 7, Tbl: deltaTableAlias, Col: "__mvmerge_min_in_removed_3"},
 		{Pos: 8, Tbl: deltaTableAlias, Col: "__mvmerge_min_cnt_in_removed_3"},
-		{Pos: 9, Tbl: deltaTableAlias, Col: removedRowsName},
-		{Pos: 10, DB: mvDBName, Tbl: deltaTableAlias, Col: "x", OrigTbl: mlog.Name.O, OrigCol: "a"},
-		{Pos: 11, DB: mvDBName, Tbl: mvTableAlias, Col: "cnt", OrigTbl: mv.Name.O, OrigCol: "cnt"},
-		{Pos: 12, DB: mvDBName, Tbl: mvTableAlias, Col: "mx", OrigTbl: mv.Name.O, OrigCol: "mx"},
-		{Pos: 13, DB: mvDBName, Tbl: mvTableAlias, Col: "mn", OrigTbl: mv.Name.O, OrigCol: "mn"},
-		{Pos: 14, DB: mvDBName, Tbl: mvTableAlias, Col: "__mvmerge_mv_rowid", OrigCol: "_tidb_rowid"},
+		{Pos: 9, DB: mvDBName, Tbl: deltaTableAlias, Col: "x", OrigTbl: mlog.Name.O, OrigCol: "a"},
+		{Pos: 10, DB: mvDBName, Tbl: mvTableAlias, Col: "cnt", OrigTbl: mv.Name.O, OrigCol: "cnt"},
+		{Pos: 11, DB: mvDBName, Tbl: mvTableAlias, Col: "mx", OrigTbl: mv.Name.O, OrigCol: "mx"},
+		{Pos: 12, DB: mvDBName, Tbl: mvTableAlias, Col: "mn", OrigTbl: mv.Name.O, OrigCol: "mn"},
+		{Pos: 13, DB: mvDBName, Tbl: mvTableAlias, Col: "__mvmerge_mv_rowid", OrigCol: "_tidb_rowid"},
 	})
 }
 
@@ -455,7 +452,6 @@ func TestBuildMinMaxNullableDependencyOrder(t *testing.T) {
 		nil,
 	)
 	require.NoError(t, err)
-	require.NotNil(t, res.RemovedRowCountDelta)
 
 	for _, ai := range res.AggInfos {
 		switch ai.Kind {
@@ -465,9 +461,9 @@ func TestBuildMinMaxNullableDependencyOrder(t *testing.T) {
 			require.Equal(t, "b", ai.ArgColName)
 			requireDependencies(t, ai, []int{1})
 		case mvmerge.AggMax:
-			requireDependencies(t, ai, []int{2, 3, 4, 5, 13})
+			requireDependencies(t, ai, []int{2, 3, 4, 5, 12})
 		case mvmerge.AggMin:
-			requireDependencies(t, ai, []int{6, 7, 8, 9, 13})
+			requireDependencies(t, ai, []int{6, 7, 8, 9, 12})
 		}
 	}
 }

@@ -3999,13 +3999,6 @@ func (b *PlanBuilder) buildRefreshMaterializedViewImplement(ctx context.Context,
 		GroupKeyMVOffsets:           res.GroupKeyMVOffsets,
 		CountStarMVOffset:           res.CountStarMVOffset,
 		AggInfos:                    res.AggInfos,
-		RemovedRowCountDelta: func() *mvmerge.DeltaColumn {
-			if res.RemovedRowCountDelta == nil {
-				return nil
-			}
-			c := *res.RemovedRowCountDelta
-			return &c
-		}(),
 	}.Init(b.ctx)
 	return plan, nil
 }

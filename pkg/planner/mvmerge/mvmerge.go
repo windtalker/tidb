@@ -41,7 +41,6 @@ const (
 	fullUpdateInnerAlias = "full_inner"
 
 	deltaCntStarName = "__mvmerge_delta_cnt_star"
-	removedRowsName  = "__mvmerge_removed_rows"
 	mvRowIDName      = "__mvmerge_mv_rowid"
 )
 
@@ -97,9 +96,6 @@ type BuildResult struct {
 	CountStarMVOffset int
 
 	AggInfos []AggInfo
-
-	// RemovedRowCountDelta is non-nil when MV contains MIN/MAX, used by executor to gate quick-update.
-	RemovedRowCountDelta *DeltaColumn
 }
 
 // DeltaColumn describes one delta payload column in merge-source output.
@@ -148,7 +144,6 @@ type AggInfo struct {
 	//   - AggMax / AggMin:
 	//     - [added_val, added_cnt, removed_val, removed_cnt] when argument is NOT NULL.
 	//     - [added_val, added_cnt, removed_val, removed_cnt, matched_count_expr_mv] otherwise.
-	//     - removed_rows_delta is tracked separately by RemovedRowCountDelta as a group-level gate.
 	Dependencies []int
 }
 
@@ -352,7 +347,6 @@ func BuildFromLocal(
 		local.mv.Columns,
 		local.groupKeyOffs,
 		local.aggCols,
-		local.hasMinMax,
 		opt,
 	)
 	if err != nil {
@@ -388,7 +382,7 @@ func BuildFromLocal(
 		}
 	}
 
-	mergeSel, deltaColumns, removedDelta, rowIDHandleOffset, err := buildMergeSourceSelect(
+	mergeSel, deltaColumns, rowIDHandleOffset, err := buildMergeSourceSelect(
 		local.mvDBName,
 		local.mv,
 		local.mv.Columns,
@@ -396,7 +390,6 @@ func BuildFromLocal(
 		local.groupKeyOffs,
 		deltaSel,
 		local.aggCols,
-		local.hasMinMax,
 	)
 	if err != nil {
 		return nil, err
@@ -444,14 +437,6 @@ func BuildFromLocal(
 				deps = append(deps, mvColumnOffsetBase+countAgg.info.MVOffset)
 			}
 		case AggMax, AggMin:
-			if removedDelta == nil {
-				return nil, errors.Errorf(
-					"internal error: %v at mv offset %d requires %s delta",
-					di.Kind,
-					di.MVOffset,
-					removedRowsName,
-				)
-			}
 			addedCntOff, ok := deltaOffsetByName[ac.addedCountDeltaName]
 			if !ok {
 				return nil, errors.Errorf("internal error: delta column %s not found in output", ac.addedCountDeltaName)
@@ -477,16 +462,11 @@ func BuildFromLocal(
 		di.Dependencies = deps
 		outAggInfos = append(outAggInfos, di)
 	}
-	removedRowsDeltaOff := -1
-	if removedDelta != nil {
-		removedRowsDeltaOff = removedDelta.Offset
-	}
 	if err := validateAggDependencies(
 		outAggInfos,
 		mvColumnOffsetBase,
 		len(local.mv.Columns),
 		expectedLen,
-		removedRowsDeltaOff,
 	); err != nil {
 		return nil, err
 	}
@@ -511,13 +491,6 @@ func BuildFromLocal(
 		GroupKeyMVOffsets:              append([]int(nil), local.groupKeyOffs...),
 		CountStarMVOffset:              local.countStarMVOffset,
 		AggInfos:                       outAggInfos,
-		RemovedRowCountDelta: func() *DeltaColumn {
-			if removedDelta == nil {
-				return nil
-			}
-			c := *removedDelta
-			return &c
-		}(),
 	}
 	return res, nil
 }
@@ -883,7 +856,6 @@ func validateAggDependencies(
 	mvColumnOffsetBase int,
 	mvColumnCount int,
 	schemaLen int,
-	removedRowsDeltaOff int,
 ) error {
 	mvColumnEnd := mvColumnOffsetBase + mvColumnCount
 	for _, ai := range aggInfos {
@@ -965,9 +937,6 @@ func validateAggDependencies(
 					ai.MVOffset,
 					ai.Dependencies[4],
 				)
-			}
-			if removedRowsDeltaOff < 0 {
-				return errors.Errorf("internal error: %v at mv offset %d requires removed_rows delta", ai.Kind, ai.MVOffset)
 			}
 		default:
 			return errors.Errorf("unsupported aggregate kind %v", ai.Kind)
@@ -1109,7 +1078,6 @@ func buildMLogDeltaSelect(
 	mvCols []*model.ColumnInfo,
 	groupKeyOffsets []int,
 	aggCols []aggColInfo,
-	hasMinMax bool,
 	opt BuildOptions,
 ) (*ast.SelectStmt, error) {
 	fields := make([]*ast.SelectField, 0, len(groupKeyOffsets)+1+len(aggCols)+1)
@@ -1237,15 +1205,6 @@ func buildMLogDeltaSelect(
 		}
 	}
 
-	if hasMinMax {
-		// removed_rows := SUM(IF old_new = -1 THEN 1 ELSE 0)
-		cond := binary(opcode.EQ, oldNewCol, ast.NewValueExpr(int64(-1), "", ""))
-		fields = append(fields, &ast.SelectField{
-			Expr:   aggSum(ifExpr(cond, ast.NewValueExpr(int64(1), "", ""), ast.NewValueExpr(int64(0), "", ""))),
-			AsName: pmodel.NewCIStr(removedRowsName),
-		})
-	}
-
 	mlogFrom := &ast.TableRefsClause{TableRefs: &ast.Join{Left: &ast.TableSource{
 		Source: &ast.TableName{Schema: dbName, Name: mlogTable.Name},
 	}}}
@@ -1287,8 +1246,7 @@ func buildMergeSourceSelect(
 	groupKeyOffsets []int,
 	deltaSel *ast.SelectStmt,
 	aggCols []aggColInfo,
-	hasMinMax bool,
-) (*ast.SelectStmt, []DeltaColumn, *DeltaColumn, int, error) {
+) (*ast.SelectStmt, []DeltaColumn, int, error) {
 	deltaSrc := &ast.TableSource{Source: deltaSel, AsName: pmodel.NewCIStr(deltaTableAlias)}
 	mvSrc := &ast.TableSource{
 		Source: &ast.TableName{Schema: dbName, Name: mv.Name},
@@ -1309,7 +1267,7 @@ func buildMergeSourceSelect(
 		}
 	}
 	if onExpr == nil {
-		return nil, nil, nil, -1, errors.New("empty join key for mvmerge")
+		return nil, nil, -1, errors.New("empty join key for mvmerge")
 	}
 
 	// Use delta as left side so every changed group survives even when MV row doesn't exist yet.
@@ -1325,8 +1283,7 @@ func buildMergeSourceSelect(
 	// delta is the LEFT side and always exists for changed groups.
 	fields := make([]*ast.SelectField, 0, len(mvCols)+1+len(aggCols)+1)
 
-	deltaColumns := make([]DeltaColumn, 0, 1+len(aggCols)+1)
-	var removedDelta *DeltaColumn
+	deltaColumns := make([]DeltaColumn, 0, 1+len(aggCols))
 	nextOffset := 0
 	// Keep all delta columns contiguous before MV columns, and track their absolute output offsets.
 	rowIDHandleOffset := -1
@@ -1364,14 +1321,6 @@ func buildMergeSourceSelect(
 			})
 		}
 	}
-	if hasMinMax {
-		off := addDeltaCol(removedRowsName)
-		fields = append(fields, &ast.SelectField{
-			Expr:   qualColExpr(deltaTableAlias, removedRowsName),
-			AsName: pmodel.NewCIStr(removedRowsName),
-		})
-		removedDelta = &DeltaColumn{Name: removedRowsName, Offset: off}
-	}
 
 	for i, col := range mvCols {
 		if _, ok := groupKeySet[i]; ok {
@@ -1398,7 +1347,7 @@ func buildMergeSourceSelect(
 	return &ast.SelectStmt{
 		Fields: &ast.FieldList{Fields: fields},
 		From:   &ast.TableRefsClause{TableRefs: join},
-	}, deltaColumns, removedDelta, rowIDHandleOffset, nil
+	}, deltaColumns, rowIDHandleOffset, nil
 }
 
 func buildFullUpdateLookupTemplateSelect(
