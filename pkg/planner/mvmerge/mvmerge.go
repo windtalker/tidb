@@ -1092,10 +1092,7 @@ func buildMLogDeltaSelect(
 
 	buildMLogWhere := func() (ast.ExprNode, error) {
 		tsCol := colExpr(model.ExtraCommitTSName.L)
-		where := andExpr(
-			binary(opcode.GT, tsCol, ast.NewValueExpr(opt.FromTS, "", "")),
-			binary(opcode.LE, tsCol, ast.NewValueExpr(opt.ToTS, "", "")),
-		)
+		var where ast.ExprNode = binary(opcode.GT, tsCol, ast.NewValueExpr(opt.FromTS, "", ""))
 		if mvSel.Where != nil {
 			mvWhere, err := cloneExprByRestore(sctx, mvSel.Where)
 			if err != nil {
