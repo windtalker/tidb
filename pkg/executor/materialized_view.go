@@ -1330,6 +1330,9 @@ func validateRefreshMaterializedViewStmt(s *ast.RefreshMaterializedViewStmt, isI
 	switch s.Type {
 	case ast.RefreshMaterializedViewTypeComplete:
 		methodType = "complete"
+		if s.OutOfPlace {
+			methodType = "complete-oop"
+		}
 	case ast.RefreshMaterializedViewTypeFast:
 		// Framework is supported; actual execution happens via RefreshMaterializedViewImplementStmt.
 		methodType = "fast"

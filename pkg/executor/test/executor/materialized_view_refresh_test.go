@@ -139,18 +139,28 @@ func TestMaterializedViewRefreshOutOfPlaceNextTimeOnlyUpdatesForInternalSQL(t *t
 	tk.MustExec(fmt.Sprintf("update mysql.tidb_mview_refresh_info set NEXT_TIME = null where MVIEW_ID = %d", mviewID))
 
 	// User SQL out-of-place refresh should not update NEXT_TIME.
+	refreshHistMViewID := mviewID
 	tk.MustExec("refresh materialized view mv_oop_next complete out of place")
 	mviewID = currentMViewID()
 	tk.MustQuery(fmt.Sprintf("select NEXT_TIME is null from mysql.tidb_mview_refresh_info where MVIEW_ID = %d", mviewID)).
 		Check(testkit.Rows("1"))
+	tk.MustQuery(fmt.Sprintf(
+		"select REFRESH_METHOD from mysql.tidb_mview_refresh_hist where MVIEW_ID = %d order by REFRESH_JOB_ID desc limit 1",
+		refreshHistMViewID,
+	)).Check(testkit.Rows("complete-oop manually"))
 
 	// Internal SQL out-of-place refresh should update NEXT_TIME by evaluating RefreshNext.
+	refreshHistMViewID = mviewID
 	mustExecInternal(t, tk, "refresh materialized view mv_oop_next complete out of place")
 	mviewID = currentMViewID()
 	tk.MustQuery(fmt.Sprintf(
 		"select NEXT_TIME is not null, NEXT_TIME > UTC_TIMESTAMP() + interval 20 minute, NEXT_TIME < UTC_TIMESTAMP() + interval 2 hour from mysql.tidb_mview_refresh_info where MVIEW_ID = %d",
 		mviewID,
 	)).Check(testkit.Rows("1 1 1"))
+	tk.MustQuery(fmt.Sprintf(
+		"select REFRESH_METHOD from mysql.tidb_mview_refresh_hist where MVIEW_ID = %d order by REFRESH_JOB_ID desc limit 1",
+		refreshHistMViewID,
+	)).Check(testkit.Rows("complete-oop automatically"))
 }
 
 func TestMaterializedViewRefreshInternalSQLStartWithNoNextSetsNextTimeNull(t *testing.T) {
@@ -695,7 +705,7 @@ func TestMaterializedViewRefreshCompleteOutOfPlaceCutoverBasic(t *testing.T) {
 		Check(testkit.Rows("1"))
 	tk.MustQuery("show tables like '\\_\\_mv\\_shadow\\_%'").Check(testkit.Rows())
 	tk.MustQuery(fmt.Sprintf("select REFRESH_STATUS, REFRESH_METHOD, REFRESH_ENDTIME is not null, REFRESH_READ_TSO > 0, REFRESH_FAILED_REASON is null from mysql.tidb_mview_refresh_hist where MVIEW_ID = %d order by REFRESH_JOB_ID desc limit 1", oldMViewID)).
-		Check(testkit.Rows("success complete manually 1 1 1"))
+		Check(testkit.Rows("success complete-oop manually 1 1 1"))
 	tk.MustQuery(fmt.Sprintf("select count(*) from mysql.tidb_mview_refresh_hist where MVIEW_ID = %d and REFRESH_STATUS = 'running'", oldMViewID)).
 		Check(testkit.Rows("0"))
 
@@ -731,7 +741,7 @@ func TestMaterializedViewRefreshCompleteOutOfPlaceBuildFailureCleansShadow(t *te
 	require.ErrorContains(t, err, "Duplicate")
 	tk.MustQuery("show tables like '\\_\\_mv\\_shadow\\_%'").Check(testkit.Rows())
 	tk.MustQuery(fmt.Sprintf("select REFRESH_STATUS, REFRESH_METHOD, REFRESH_ENDTIME is not null, REFRESH_READ_TSO is null, REFRESH_FAILED_REASON is not null from mysql.tidb_mview_refresh_hist where MVIEW_ID = %d order by REFRESH_JOB_ID desc limit 1", mviewID)).
-		Check(testkit.Rows("failed complete manually 1 1 1"))
+		Check(testkit.Rows("failed complete-oop manually 1 1 1"))
 	tk.MustQuery(fmt.Sprintf("select count(*) from mysql.tidb_mview_refresh_hist where MVIEW_ID = %d and REFRESH_STATUS = 'running'", mviewID)).
 		Check(testkit.Rows("0"))
 	reasonRow := tk.MustQuery(fmt.Sprintf("select REFRESH_FAILED_REASON from mysql.tidb_mview_refresh_hist where MVIEW_ID = %d order by REFRESH_JOB_ID desc limit 1", mviewID)).Rows()
@@ -778,7 +788,7 @@ func TestMaterializedViewRefreshCompleteOutOfPlaceCutoverCASMismatch(t *testing.
 		Check(testkit.Rows("1"))
 	tk.MustQuery("show tables like '\\_\\_mv\\_shadow\\_%'").Check(testkit.Rows())
 	tk.MustQuery(fmt.Sprintf("select REFRESH_STATUS, REFRESH_METHOD, REFRESH_ENDTIME is not null, REFRESH_READ_TSO is null, REFRESH_FAILED_REASON is not null from mysql.tidb_mview_refresh_hist where MVIEW_ID = %d order by REFRESH_JOB_ID desc limit 1", mviewID)).
-		Check(testkit.Rows("failed complete manually 1 1 1"))
+		Check(testkit.Rows("failed complete-oop manually 1 1 1"))
 	tk.MustQuery(fmt.Sprintf("select count(*) from mysql.tidb_mview_refresh_hist where MVIEW_ID = %d and REFRESH_STATUS = 'running'", mviewID)).
 		Check(testkit.Rows("0"))
 	reasonRow := tk.MustQuery(fmt.Sprintf("select REFRESH_FAILED_REASON from mysql.tidb_mview_refresh_hist where MVIEW_ID = %d order by REFRESH_JOB_ID desc limit 1", mviewID)).Rows()
