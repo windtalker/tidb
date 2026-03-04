@@ -271,6 +271,7 @@ func TestBuildCountExprSumExpr(t *testing.T) {
 
 func TestBuildMinMaxHasRemovedGate(t *testing.T) {
 	sctx := core.MockContext()
+	sctx.GetSessionVars().EnableINLJoinInnerMultiPattern = true
 
 	baseID := int64(10)
 	mlogID := int64(20)
@@ -283,6 +284,16 @@ func TestBuildMinMaxHasRemovedGate(t *testing.T) {
 		Columns: []*model.ColumnInfo{
 			mkCol(1, "a", 0, mysql.TypeLong),
 			mkCol(2, "b", 1, mysql.TypeLong),
+		},
+		Indices: []*model.IndexInfo{
+			{
+				ID:    1,
+				Name:  pmodel.NewCIStr("idx_a"),
+				State: model.StatePublic,
+				Columns: []*model.IndexColumn{
+					{Name: pmodel.NewCIStr("a"), Offset: 0},
+				},
+			},
 		},
 		MaterializedViewBase: &model.MaterializedViewBaseInfo{MLogID: mlogID},
 	}
@@ -332,6 +343,15 @@ func TestBuildMinMaxHasRemovedGate(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, res.RemovedRowCountDelta)
 	require.Equal(t, 1, res.CountStarMVOffset)
+	require.NotNil(t, res.FullUpdateLookupTemplateSelect)
+	fullPlan, fullOutputNames, err := optimizeForTest(sctx, is)(context.Background(), res.FullUpdateLookupTemplateSelect)
+	require.NoError(t, err)
+	require.NotNil(t, fullPlan)
+	indexJoin := findIndexJoinPlan(fullPlan)
+	require.NotNilf(t, indexJoin, "lookup template best plan: %s", core.ToString(fullPlan))
+	require.Equal(t, len(mv.Columns), fullPlan.Schema().Len())
+	require.Equal(t, len(mv.Columns), len(fullOutputNames))
+	requireOutputColNames(t, fullOutputNames, []string{"x", "cnt", "mx", "mn"})
 
 	var hasMax, hasMin bool
 	for _, ai := range res.AggInfos {
@@ -543,6 +563,29 @@ func TestBuildMissingOldNew(t *testing.T) {
 	require.ErrorContains(t, err, model.MaterializedViewLogOldNewColumnName)
 }
 
+func findIndexJoinPlan(plan corebase.PhysicalPlan) *core.PhysicalIndexJoin {
+	if plan == nil {
+		return nil
+	}
+	switch x := plan.(type) {
+	case *core.PhysicalIndexJoin:
+		return x
+	case *core.PhysicalIndexHashJoin:
+		return &x.PhysicalIndexJoin
+	case *core.PhysicalIndexMergeJoin:
+		return &x.PhysicalIndexJoin
+	}
+	for _, child := range plan.Children() {
+		if child == nil {
+			continue
+		}
+		if found := findIndexJoinPlan(child); found != nil {
+			return found
+		}
+	}
+	return nil
+}
+
 func mkCol(id int64, name string, offset int, tp byte) *model.ColumnInfo {
 	ft := types.NewFieldType(tp)
 	return &model.ColumnInfo{
@@ -597,4 +640,12 @@ func requireMergePlanOutputNames(t *testing.T, plan corebase.PhysicalPlan, outpu
 	require.Len(t, outputNames, plan.Schema().Len())
 	require.Len(t, expected, len(outputNames))
 	require.Equal(t, expected, nameSliceInfo(outputNames))
+}
+
+func requireOutputColNames(t *testing.T, outputNames types.NameSlice, expected []string) {
+	t.Helper()
+	require.Len(t, outputNames, len(expected))
+	for i, colName := range expected {
+		require.Equal(t, colName, outputNames[i].ColName.O)
+	}
 }

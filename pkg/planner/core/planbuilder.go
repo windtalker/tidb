@@ -3933,19 +3933,54 @@ func (b *PlanBuilder) buildRefreshMaterializedViewImplement(ctx context.Context,
 			res.SourceColumnCount,
 		)
 	}
+	var fullUpdateInnerSource base.PhysicalPlan
+	var fullUpdateInnerColumnCount int
+	var fullUpdateIndexRanges ranger.MutableRanges
+	var fullUpdateKeyOff2IdxOff []int
+	if res.FullUpdateLookupTemplateSelect != nil {
+		// The lookup template relies on index-join inner-child pattern (Selection/Agg on probe side),
+		// so force-enable the switch during this one-shot optimization and restore it afterward.
+		savedEnableINLJoinInnerMultiPattern := b.ctx.GetSessionVars().EnableINLJoinInnerMultiPattern
+		b.ctx.GetSessionVars().EnableINLJoinInnerMultiPattern = true
+		fullUpdateLookupPlan, _, err := optimizeSelect(ctx, res.FullUpdateLookupTemplateSelect)
+		b.ctx.GetSessionVars().EnableINLJoinInnerMultiPattern = savedEnableINLJoinInnerMultiPattern
+		if err != nil {
+			return nil, err
+		}
+		if fullUpdateLookupPlan.Schema().Len() != res.MVColumnCount {
+			return nil, errors.Errorf("mvmerge full-update lookup template: unexpected output schema length: got %d, expected %d", fullUpdateLookupPlan.Schema().Len(), res.MVColumnCount)
+		}
+		var template *mvFullUpdateLookupTemplate
+		template, err = extractMVFullUpdateLookupTemplate(
+			fullUpdateLookupPlan,
+			res.MVColumnCount,
+			len(res.GroupKeyMVOffsets),
+		)
+		if err != nil {
+			return nil, err
+		}
+		fullUpdateInnerSource = template.InnerSource
+		fullUpdateInnerColumnCount = template.InnerColumnCount
+		fullUpdateIndexRanges = template.IndexRanges
+		fullUpdateKeyOff2IdxOff = template.KeyOff2IdxOff
+	}
 
 	plan := MVDeltaMerge{
-		Source:            sourcePlan,
-		SourceOutputNames: sourceOutputNames,
-		MVTableID:         res.MVTableID,
-		BaseTableID:       res.BaseTableID,
-		MLogTableID:       res.MLogTableID,
-		MVColumnCount:     res.MVColumnCount,
-		DeltaColumnCount:  res.DeltaColumnCount,
-		MVTablePKCols:     res.MVTablePKCols,
-		GroupKeyMVOffsets: res.GroupKeyMVOffsets,
-		CountStarMVOffset: res.CountStarMVOffset,
-		AggInfos:          res.AggInfos,
+		Source:                     sourcePlan,
+		SourceOutputNames:          sourceOutputNames,
+		FullUpdateInnerSource:      fullUpdateInnerSource,
+		FullUpdateInnerColumnCount: fullUpdateInnerColumnCount,
+		FullUpdateIndexRanges:      fullUpdateIndexRanges,
+		FullUpdateKeyOff2IdxOff:    fullUpdateKeyOff2IdxOff,
+		MVTableID:                  res.MVTableID,
+		BaseTableID:                res.BaseTableID,
+		MLogTableID:                res.MLogTableID,
+		MVColumnCount:              res.MVColumnCount,
+		DeltaColumnCount:           res.DeltaColumnCount,
+		MVTablePKCols:              res.MVTablePKCols,
+		GroupKeyMVOffsets:          res.GroupKeyMVOffsets,
+		CountStarMVOffset:          res.CountStarMVOffset,
+		AggInfos:                   res.AggInfos,
 		RemovedRowCountDelta: func() *mvmerge.DeltaColumn {
 			if res.RemovedRowCountDelta == nil {
 				return nil
@@ -3955,6 +3990,95 @@ func (b *PlanBuilder) buildRefreshMaterializedViewImplement(ctx context.Context,
 		}(),
 	}.Init(b.ctx)
 	return plan, nil
+}
+
+type mvFullUpdateLookupTemplate struct {
+	InnerSource      base.PhysicalPlan
+	InnerColumnCount int
+	IndexRanges      ranger.MutableRanges
+	KeyOff2IdxOff    []int
+}
+
+func extractMVFullUpdateLookupTemplate(
+	lookupPlan base.PhysicalPlan,
+	expectedInnerColumnCount int,
+	expectedGroupKeyCount int,
+) (*mvFullUpdateLookupTemplate, error) {
+	if lookupPlan == nil {
+		return nil, errors.New("mvmerge full-update lookup template: lookup plan is nil")
+	}
+
+	indexJoin := findMVFullUpdateIndexJoinTemplatePlan(lookupPlan)
+	if indexJoin == nil {
+		return nil, errors.New("mvmerge full-update lookup template: expected index join plan but not found")
+	}
+	if indexJoin.innerPlan == nil {
+		return nil, errors.New("mvmerge full-update lookup template: index join inner plan is nil")
+	}
+	if indexJoin.innerPlan.Schema().Len() != expectedInnerColumnCount {
+		return nil, errors.Errorf(
+			"mvmerge full-update lookup template: unexpected inner schema length: got %d, expected %d",
+			indexJoin.innerPlan.Schema().Len(),
+			expectedInnerColumnCount,
+		)
+	}
+	if indexJoin.Ranges == nil || len(indexJoin.Ranges.Range()) == 0 {
+		return nil, errors.New("mvmerge full-update lookup template: index join ranges are empty")
+	}
+	// The fallback template is built from pure group-key equality join without range-comparison predicates.
+	intest.Assert(indexJoin.CompareFilters == nil, "mvmerge full-update lookup template should not have compare filters")
+
+	// Keep key mapping in MV group-key order; executor side will refill each key into the corresponding index position.
+	keyOff2IdxOff := append([]int(nil), indexJoin.KeyOff2IdxOff...)
+	if len(keyOff2IdxOff) != expectedGroupKeyCount {
+		return nil, errors.Errorf(
+			"mvmerge full-update lookup template: unexpected keyOff2IdxOff length: got %d, expected %d",
+			len(keyOff2IdxOff),
+			expectedGroupKeyCount,
+		)
+	}
+	rangeWidth := indexJoin.Ranges.Range()[0].Width()
+	for i, idxOff := range keyOff2IdxOff {
+		if idxOff < 0 || idxOff >= rangeWidth {
+			return nil, errors.Errorf(
+				"mvmerge full-update lookup template: invalid keyOff2IdxOff[%d]=%d for range width %d",
+				i,
+				idxOff,
+				rangeWidth,
+			)
+		}
+	}
+
+	return &mvFullUpdateLookupTemplate{
+		InnerSource:      indexJoin.innerPlan,
+		InnerColumnCount: indexJoin.innerPlan.Schema().Len(),
+		// Clone mutable ranges for plan-cache style rebuild behavior; never share optimizer-owned instances.
+		IndexRanges:   indexJoin.Ranges.CloneForPlanCache(),
+		KeyOff2IdxOff: keyOff2IdxOff,
+	}, nil
+}
+
+func findMVFullUpdateIndexJoinTemplatePlan(plan base.PhysicalPlan) *PhysicalIndexJoin {
+	if plan == nil {
+		return nil
+	}
+	switch x := plan.(type) {
+	case *PhysicalIndexJoin:
+		return x
+	case *PhysicalIndexHashJoin:
+		return &x.PhysicalIndexJoin
+	case *PhysicalIndexMergeJoin:
+		return &x.PhysicalIndexJoin
+	}
+	for _, child := range plan.Children() {
+		if child == nil {
+			continue
+		}
+		if found := findMVFullUpdateIndexJoinTemplatePlan(child); found != nil {
+			return found
+		}
+	}
+	return nil
 }
 
 func collectVisitInfoFromRevokeStmt(sctx base.PlanContext, vi []visitInfo, stmt *ast.RevokeStmt) ([]visitInfo, error) {
