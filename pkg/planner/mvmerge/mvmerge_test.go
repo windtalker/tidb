@@ -472,6 +472,91 @@ func TestBuildMinMaxNullableDependencyOrder(t *testing.T) {
 	}
 }
 
+func TestBuildFullUpdateLookupTemplateSelectGroupKeysFirst(t *testing.T) {
+	sctx := core.MockContext()
+	sctx.GetSessionVars().EnableINLJoinInnerMultiPattern = true
+
+	baseID := int64(210)
+	mlogID := int64(220)
+	mvID := int64(230)
+
+	base := &model.TableInfo{
+		ID:    baseID,
+		Name:  pmodel.NewCIStr("t"),
+		State: model.StatePublic,
+		Columns: []*model.ColumnInfo{
+			mkCol(1, "a", 0, mysql.TypeLong),
+			mkCol(2, "b", 1, mysql.TypeLong),
+		},
+		Indices: []*model.IndexInfo{
+			{
+				ID:    1,
+				Name:  pmodel.NewCIStr("idx_a"),
+				State: model.StatePublic,
+				Columns: []*model.IndexColumn{
+					{Name: pmodel.NewCIStr("a"), Offset: 0},
+				},
+			},
+		},
+		MaterializedViewBase: &model.MaterializedViewBaseInfo{MLogID: mlogID},
+	}
+	base.Columns[1].FieldType.AddFlag(mysql.NotNullFlag)
+
+	mlog := &model.TableInfo{
+		ID:    mlogID,
+		Name:  pmodel.NewCIStr("$mlog$t"),
+		State: model.StatePublic,
+		Columns: []*model.ColumnInfo{
+			mkCol(1, "a", 0, mysql.TypeLong),
+			mkCol(2, "b", 1, mysql.TypeLong),
+			mkCol(3, model.MaterializedViewLogDMLTypeColumnName, 2, mysql.TypeVarchar),
+			mkCol(4, model.MaterializedViewLogOldNewColumnName, 3, mysql.TypeTiny),
+		},
+		MaterializedViewLog: &model.MaterializedViewLogInfo{
+			BaseTableID: baseID,
+			Columns:     []pmodel.CIStr{pmodel.NewCIStr("a"), pmodel.NewCIStr("b")},
+		},
+	}
+	mlog.Columns[1].FieldType.AddFlag(mysql.NotNullFlag)
+
+	// GROUP key is not the first MV output column; template output should still put group keys first.
+	mv := &model.TableInfo{
+		ID:    mvID,
+		Name:  pmodel.NewCIStr("mv_minmax_gk_not_first"),
+		State: model.StatePublic,
+		Columns: []*model.ColumnInfo{
+			mkCol(1, "cnt", 0, mysql.TypeLonglong),
+			mkCol(2, "x", 1, mysql.TypeLong),
+			mkCol(3, "mx", 2, mysql.TypeLong),
+			mkCol(4, "mn", 3, mysql.TypeLong),
+		},
+		MaterializedView: &model.MaterializedViewInfo{
+			BaseTableIDs: []int64{baseID},
+			SQLContent:   "select count(1), a, max(b), min(b) from t group by a",
+		},
+	}
+
+	is := infoschema.MockInfoSchema([]*model.TableInfo{base, mlog, mv})
+	domain.GetDomain(sctx).MockInfoCacheAndLoadInfoSchema(is)
+
+	res, err := mvmerge.BuildForTest(
+		sctx.GetPlanCtx(),
+		is,
+		mv,
+		mvmerge.BuildOptions{FromTS: 1, ToTS: 2},
+		nil,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, res.FullUpdateLookupTemplateSelect)
+	require.Equal(t, 3, res.FullUpdateLookupColumnCount)
+
+	fullPlan, fullOutputNames, err := optimizeForTest(sctx, is)(context.Background(), res.FullUpdateLookupTemplateSelect)
+	require.NoError(t, err)
+	require.NotNil(t, fullPlan)
+	require.Equal(t, res.FullUpdateLookupColumnCount, len(fullOutputNames))
+	requireOutputColNames(t, fullOutputNames, []string{"x", "mx", "mn"})
+}
+
 func TestBuildSumWithoutCountExpr(t *testing.T) {
 	sctx := core.MockContext()
 
