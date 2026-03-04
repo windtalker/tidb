@@ -3938,6 +3938,9 @@ func (b *PlanBuilder) buildRefreshMaterializedViewImplement(ctx context.Context,
 	var fullUpdateIndexRanges ranger.MutableRanges
 	var fullUpdateKeyOff2IdxOff []int
 	if res.FullUpdateLookupTemplateSelect != nil {
+		if res.FullUpdateLookupColumnCount <= 0 {
+			return nil, errors.New("mvmerge full-update lookup template: invalid output column count")
+		}
 		// The lookup template relies on index-join inner-child pattern (Selection/Agg on probe side),
 		// so force-enable the switch during this one-shot optimization and restore it afterward.
 		savedEnableINLJoinInnerMultiPattern := b.ctx.GetSessionVars().EnableINLJoinInnerMultiPattern
@@ -3947,13 +3950,13 @@ func (b *PlanBuilder) buildRefreshMaterializedViewImplement(ctx context.Context,
 		if err != nil {
 			return nil, err
 		}
-		if fullUpdateLookupPlan.Schema().Len() != res.MVColumnCount {
-			return nil, errors.Errorf("mvmerge full-update lookup template: unexpected output schema length: got %d, expected %d", fullUpdateLookupPlan.Schema().Len(), res.MVColumnCount)
+		if fullUpdateLookupPlan.Schema().Len() != res.FullUpdateLookupColumnCount {
+			return nil, errors.Errorf("mvmerge full-update lookup template: unexpected output schema length: got %d, expected %d", fullUpdateLookupPlan.Schema().Len(), res.FullUpdateLookupColumnCount)
 		}
 		var template *mvFullUpdateLookupTemplate
 		template, err = extractMVFullUpdateLookupTemplate(
 			fullUpdateLookupPlan,
-			res.MVColumnCount,
+			res.FullUpdateLookupColumnCount,
 			len(res.GroupKeyMVOffsets),
 		)
 		if err != nil {

@@ -165,14 +165,14 @@ func TestBuildRefreshMVFastPlanWithMinMaxHasFullUpdate(t *testing.T) {
 	mlogID := int64(10002)
 	mvID := int64(10003)
 
+	baseColA := mkTestCol(1, "a", 0, mysql.TypeLong)
+	baseColB := mkTestCol(2, "b", 1, mysql.TypeLong)
+	baseColB.FieldType.AddFlag(mysql.NotNullFlag)
 	baseTbl := &model.TableInfo{
-		ID:    baseID,
-		Name:  pmodel.NewCIStr("t"),
-		State: model.StatePublic,
-		Columns: []*model.ColumnInfo{
-			mkTestCol(1, "a", 0, mysql.TypeLong),
-			mkTestCol(2, "b", 1, mysql.TypeLong),
-		},
+		ID:      baseID,
+		Name:    pmodel.NewCIStr("t"),
+		State:   model.StatePublic,
+		Columns: []*model.ColumnInfo{baseColA, baseColB},
 		Indices: []*model.IndexInfo{
 			{
 				ID:    1,
@@ -185,13 +185,16 @@ func TestBuildRefreshMVFastPlanWithMinMaxHasFullUpdate(t *testing.T) {
 		},
 		MaterializedViewBase: &model.MaterializedViewBaseInfo{MLogID: mlogID},
 	}
+	mlogColA := mkTestCol(1, "a", 0, mysql.TypeLong)
+	mlogColB := mkTestCol(2, "b", 1, mysql.TypeLong)
+	mlogColB.FieldType.AddFlag(mysql.NotNullFlag)
 	mlogTbl := &model.TableInfo{
 		ID:    mlogID,
 		Name:  pmodel.NewCIStr("$mlog$t"),
 		State: model.StatePublic,
 		Columns: []*model.ColumnInfo{
-			mkTestCol(1, "a", 0, mysql.TypeLong),
-			mkTestCol(2, "b", 1, mysql.TypeLong),
+			mlogColA,
+			mlogColB,
 			mkTestCol(3, model.MaterializedViewLogDMLTypeColumnName, 2, mysql.TypeVarchar),
 			mkTestCol(4, model.MaterializedViewLogOldNewColumnName, 3, mysql.TypeTiny),
 		},
@@ -209,10 +212,11 @@ func TestBuildRefreshMVFastPlanWithMinMaxHasFullUpdate(t *testing.T) {
 			mkTestCol(2, "cnt", 1, mysql.TypeLonglong),
 			mkTestCol(3, "mx", 2, mysql.TypeLong),
 			mkTestCol(4, "mn", 3, mysql.TypeLong),
+			mkTestCol(5, "s", 4, mysql.TypeLonglong),
 		},
 		MaterializedView: &model.MaterializedViewInfo{
 			BaseTableIDs: []int64{baseID},
-			SQLContent:   "select a, count(1), max(b), min(b) from t group by a",
+			SQLContent:   "select a, count(1), max(b), min(b), sum(b) from t group by a",
 		},
 	}
 
@@ -235,7 +239,13 @@ func TestBuildRefreshMVFastPlanWithMinMaxHasFullUpdate(t *testing.T) {
 	require.True(t, ok)
 	require.NotNil(t, mergePlan.Source)
 	require.NotNil(t, mergePlan.FullUpdateInnerSource)
-	require.Equal(t, len(mvTbl.Columns), mergePlan.FullUpdateInnerColumnCount)
+	minMaxCount := 0
+	for _, ai := range mergePlan.AggInfos {
+		if ai.Kind == mvmerge.AggMin || ai.Kind == mvmerge.AggMax {
+			minMaxCount++
+		}
+	}
+	require.Equal(t, len(mergePlan.GroupKeyMVOffsets)+minMaxCount, mergePlan.FullUpdateInnerColumnCount)
 	require.NotNil(t, mergePlan.FullUpdateIndexRanges)
 	require.Len(t, mergePlan.FullUpdateKeyOff2IdxOff, len(mergePlan.GroupKeyMVOffsets))
 
@@ -448,10 +458,10 @@ func TestExplainRefreshMVFastPlanTreeMinMax(t *testing.T) {
 		{"│ │       └─TableFullScan", "10000.00", "cop[tikv]", "table:$mlog$t", "keep order:false, stats:pseudo"},
 		{"│ └─TableReader(Probe)", "10000.00", "root", "", "data:TableFullScan"},
 		{"│   └─TableFullScan", "10000.00", "cop[tikv]", "table:mv", "keep order:false, stats:pseudo"},
-		{"└─HashAgg", "0.80", "root", "", "group by:test.t.a, funcs:count(Column#34)->Column#30, funcs:max(Column#35)->Column#31, funcs:min(Column#36)->Column#32, funcs:firstrow(test.t.a)->test.t.a"},
+		{"└─HashAgg", "0.80", "root", "", "group by:test.t.a, funcs:max(Column#33)->Column#30, funcs:min(Column#34)->Column#31, funcs:firstrow(test.t.a)->test.t.a"},
 		{"  └─IndexLookUp", "0.80", "root", "", ""},
 		{"    ├─IndexRangeScan(Build)", "0.80", "cop[tikv]", "table:t, index:idx_a(a)", "range: decided by [eq(test.t.a, test.t.a)], keep order:false, stats:pseudo"},
-		{"    └─HashAgg(Probe)", "0.80", "cop[tikv]", "", "group by:test.t.a, funcs:count(1)->Column#34, funcs:max(test.t.b)->Column#35, funcs:min(test.t.b)->Column#36"},
+		{"    └─HashAgg(Probe)", "0.80", "cop[tikv]", "", "group by:test.t.a, funcs:max(test.t.b)->Column#33, funcs:min(test.t.b)->Column#34"},
 		{"      └─Selection", "0.80", "cop[tikv]", "", "not(isnull(test.t.a))"},
 		{"        └─TableRowIDScan", "0.80", "cop[tikv]", "table:t", "keep order:false, stats:pseudo"},
 	}, explain.Rows)

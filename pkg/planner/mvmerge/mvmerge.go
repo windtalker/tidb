@@ -65,9 +65,11 @@ type BuildResult struct {
 	SourceColumnCount int
 	// FullUpdateLookupTemplateSelect is an optional index-lookup template used for group-level full recomputation.
 	// It is generated when MV contains MIN/MAX and is expected to optimize to an IndexJoin-style plan where:
-	//   - the inner child outputs the MV row shape directly
+	//   - the inner child outputs fallback recomputation columns (group keys + MIN/MAX-related aggregates)
 	//   - the outer child only provides group-key probe values
 	FullUpdateLookupTemplateSelect *ast.SelectStmt
+	// FullUpdateLookupColumnCount is the expected output column count of FullUpdateLookupTemplateSelect.
+	FullUpdateLookupColumnCount int
 
 	MVTableID   int64
 	BaseTableID int64
@@ -348,6 +350,7 @@ func BuildFromLocal(
 		return nil, err
 	}
 	var fullUpdateSel *ast.SelectStmt
+	fullUpdateColumnCount := 0
 	if local.hasMinMax {
 		fullUpdateSel, err = buildFullUpdateLookupTemplateSelect(
 			local.sctx,
@@ -362,6 +365,10 @@ func BuildFromLocal(
 		if err != nil {
 			return nil, err
 		}
+		if fullUpdateSel.Fields == nil {
+			return nil, errors.New("mvmerge: full-update lookup template has nil field list")
+		}
+		fullUpdateColumnCount = len(fullUpdateSel.Fields.Fields)
 	}
 
 	mergeSel, deltaColumns, removedDelta, rowIDHandleOffset, err := buildMergeSourceSelect(
@@ -452,6 +459,7 @@ func BuildFromLocal(
 		MergeSourceSelect:              mergeSel,
 		SourceColumnCount:              expectedLen,
 		FullUpdateLookupTemplateSelect: fullUpdateSel,
+		FullUpdateLookupColumnCount:    fullUpdateColumnCount,
 		MVTableID:                      local.mv.ID,
 		BaseTableID:                    local.baseTableID,
 		MLogTableID:                    local.mlogTableID,
@@ -1272,6 +1280,10 @@ func buildFullUpdateLookupTemplateSelect(
 		}
 		groupKeyBaseColByMVOffset[mvOffset] = baseColExpr.Name.Name.O
 	}
+	aggKindByMVOffset := make(map[int]AggKind, len(aggCols))
+	for _, ac := range aggCols {
+		aggKindByMVOffset[ac.info.MVOffset] = ac.info.Kind
+	}
 	innerSel, err := buildFullUpdateLookupInnerSelect(
 		sctx,
 		dbName,
@@ -1302,6 +1314,10 @@ func buildFullUpdateLookupTemplateSelect(
 
 	fields := make([]*ast.SelectField, 0, len(mvCols))
 	for mvOffset, mvCol := range mvCols {
+		// Full-update fallback only returns group keys and MIN/MAX aggregate columns.
+		if kind, ok := aggKindByMVOffset[mvOffset]; ok && kind != AggMin && kind != AggMax {
+			continue
+		}
 		outColName := mvCol.Name.O
 		if baseColName, ok := groupKeyBaseColByMVOffset[mvOffset]; ok {
 			outColName = baseColName
@@ -1423,6 +1439,10 @@ func buildFullUpdateLookupInnerSelect(
 		ac, ok := aggByMVOffset[i]
 		if !ok {
 			return nil, errors.Errorf("mv offset %d is neither group key nor aggregate", i)
+		}
+		// Full-update fallback only recomputes MIN/MAX aggregates.
+		if ac.info.Kind != AggMin && ac.info.Kind != AggMax {
+			continue
 		}
 		fullAggExpr, err := buildFullUpdateAggExpr(sctx, ac)
 		if err != nil {

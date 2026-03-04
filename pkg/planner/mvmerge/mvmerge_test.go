@@ -349,9 +349,9 @@ func TestBuildMinMaxHasRemovedGate(t *testing.T) {
 	require.NotNil(t, fullPlan)
 	indexJoin := findIndexJoinPlan(fullPlan)
 	require.NotNilf(t, indexJoin, "lookup template best plan: %s", core.ToString(fullPlan))
-	require.Equal(t, len(mv.Columns), fullPlan.Schema().Len())
-	require.Equal(t, len(mv.Columns), len(fullOutputNames))
-	requireOutputColNames(t, fullOutputNames, []string{"x", "cnt", "mx", "mn"})
+	require.Equal(t, res.FullUpdateLookupColumnCount, fullPlan.Schema().Len())
+	require.Equal(t, res.FullUpdateLookupColumnCount, len(fullOutputNames))
+	requireOutputColNames(t, fullOutputNames, []string{"x", "mx", "mn"})
 
 	var hasMax, hasMin bool
 	for _, ai := range res.AggInfos {
