@@ -539,7 +539,7 @@ func TestBuildFullUpdateLookupTemplateSelectGroupKeysFirst(t *testing.T) {
 		sctx.GetPlanCtx(),
 		is,
 		mv,
-		mvmerge.BuildOptions{FromTS: 1, ToTS: 2},
+		mvmerge.BuildOptions{FromTS: 1},
 		nil,
 	)
 	require.NoError(t, err)

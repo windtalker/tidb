@@ -473,7 +473,7 @@ func TestExplainRefreshMVFastPlanTreeMinMax(t *testing.T) {
 		{"│   ├─HashAgg(Build)", "6400.00", "root", "", "group by:test.$mlog$t.a, funcs:sum_int(Column#20)->Column#7, funcs:max(Column#21)->Column#8, funcs:count(Column#22)->Column#9, funcs:max(Column#23)->Column#10, funcs:count(Column#24)->Column#11, funcs:min(Column#25)->Column#12, funcs:min(Column#26)->Column#13, funcs:firstrow(test.$mlog$t.a)->test.$mlog$t.a"},
 		{"│   │ └─TableReader", "6400.00", "root", "", "data:HashAgg"},
 		{"│   │   └─HashAgg", "6400.00", "cop[tikv]", "", "group by:test.$mlog$t.a, funcs:sum_int(test.$mlog$t._mlog$_old_new)->Column#20, funcs:max(if(eq(test.$mlog$t._mlog$_old_new, 1), test.$mlog$t.b, NULL))->Column#21, funcs:count(if(eq(test.$mlog$t._mlog$_old_new, 1), test.$mlog$t.b, NULL))->Column#22, funcs:max(if(eq(test.$mlog$t._mlog$_old_new, -1), test.$mlog$t.b, NULL))->Column#23, funcs:count(if(eq(test.$mlog$t._mlog$_old_new, -1), test.$mlog$t.b, NULL))->Column#24, funcs:min(if(eq(test.$mlog$t._mlog$_old_new, 1), test.$mlog$t.b, NULL))->Column#25, funcs:min(if(eq(test.$mlog$t._mlog$_old_new, -1), test.$mlog$t.b, NULL))->Column#26"},
-		{"│   │     └─Selection", "8000.00", "cop[tikv]", "", "gt(test.$mlog$t._tidb_commit_ts, 0), le(test.$mlog$t._tidb_commit_ts, 1)"},
+		{"│   │     └─Selection", "8000.00", "cop[tikv]", "", "gt(test.$mlog$t._tidb_commit_ts, 0)"},
 		{"│   │       └─TableFullScan", "10000.00", "cop[tikv]", "table:$mlog$t", "keep order:false, stats:pseudo"},
 		{"│   └─TableReader(Probe)", "10000.00", "root", "", "data:TableFullScan"},
 		{"│     └─TableFullScan", "10000.00", "cop[tikv]", "table:mv", "keep order:false, stats:pseudo"},
