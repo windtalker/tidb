@@ -1501,7 +1501,8 @@ func buildFullUpdateLookupTemplateSelect(
 	for _, mvOffset := range groupKeyOffsets {
 		outerGK := qualColExpr(fullUpdateOuterAlias, outerGKAliasByMVOffset[mvOffset])
 		innerGK := qualColExpr(fullUpdateInnerAlias, groupKeyBaseColByMVOffset[mvOffset])
-		onExpr = andExpr(onExpr, binary(opcode.EQ, outerGK, innerGK))
+		// Group keys can be NULL, so full-update lookup must use null-safe equality.
+		onExpr = andExpr(onExpr, binary(opcode.NullEQ, outerGK, innerGK))
 	}
 	if onExpr == nil {
 		return nil, nil, errors.New("mvmerge: empty group key offsets for full-update lookup template")

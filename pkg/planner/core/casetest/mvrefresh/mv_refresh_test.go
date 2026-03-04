@@ -482,12 +482,11 @@ func TestExplainRefreshMVFastPlanTreeMinMax(t *testing.T) {
 		{"│ │         └─TableFullScan", "10000.00", "cop[tikv]", "table:$mlog$t", "keep order:false, stats:pseudo"},
 		{"│ └─TableReader(Probe)", "10000.00", "root", "", "data:TableFullScan"},
 		{"│   └─TableFullScan", "10000.00", "cop[tikv]", "table:mv", "keep order:false, stats:pseudo"},
-		{"└─HashAgg", "0.80", "root", "", "group by:test.t.a, funcs:max(Column#60)->Column#57, funcs:min(Column#61)->Column#58, funcs:firstrow(test.t.a)->test.t.a"},
-		{"  └─IndexLookUp", "0.80", "root", "", ""},
-		{"    ├─IndexRangeScan(Build)", "0.80", "cop[tikv]", "table:t, index:idx_a(a)", "range: decided by [eq(test.t.a, test.t.a)], keep order:false, stats:pseudo"},
-		{"    └─HashAgg(Probe)", "0.80", "cop[tikv]", "", "group by:test.t.a, funcs:max(test.t.b)->Column#60, funcs:min(test.t.b)->Column#61"},
-		{"      └─Selection", "0.80", "cop[tikv]", "", "not(isnull(test.t.a))"},
-		{"        └─TableRowIDScan", "0.80", "cop[tikv]", "table:t", "keep order:false, stats:pseudo"},
+		{"└─HashAgg", "1.00", "root", "", "group by:test.t.a, funcs:max(Column#60)->Column#57, funcs:min(Column#61)->Column#58, funcs:firstrow(test.t.a)->test.t.a"},
+		{"  └─IndexLookUp", "1.00", "root", "", ""},
+		{"    ├─IndexRangeScan(Build)", "1.00", "cop[tikv]", "table:t, index:idx_a(a)", "range: decided by [eq(test.t.a, test.t.a)], keep order:false, stats:pseudo"},
+		{"    └─HashAgg(Probe)", "1.00", "cop[tikv]", "", "group by:test.t.a, funcs:max(test.t.b)->Column#60, funcs:min(test.t.b)->Column#61"},
+		{"      └─TableRowIDScan", "1.00", "cop[tikv]", "table:t", "keep order:false, stats:pseudo"},
 	}, explain.Rows)
 }
 
