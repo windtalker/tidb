@@ -297,6 +297,7 @@ func TestBuildMinMaxHasRemovedGate(t *testing.T) {
 		},
 		MaterializedViewBase: &model.MaterializedViewBaseInfo{MLogID: mlogID},
 	}
+	base.Columns[1].FieldType.AddFlag(mysql.NotNullFlag)
 	mlog := &model.TableInfo{
 		ID:    mlogID,
 		Name:  pmodel.NewCIStr("$mlog$t"),
@@ -312,6 +313,7 @@ func TestBuildMinMaxHasRemovedGate(t *testing.T) {
 			Columns:     []pmodel.CIStr{pmodel.NewCIStr("a"), pmodel.NewCIStr("b")},
 		},
 	}
+	mlog.Columns[1].FieldType.AddFlag(mysql.NotNullFlag)
 	mv := &model.TableInfo{
 		ID:    mvID,
 		Name:  pmodel.NewCIStr("mv_minmax_tbl"),
@@ -357,11 +359,11 @@ func TestBuildMinMaxHasRemovedGate(t *testing.T) {
 	for _, ai := range res.AggInfos {
 		if ai.Kind == mvmerge.AggMax {
 			hasMax = true
-			requireDependencies(t, ai, []int{1, 3})
+			requireDependencies(t, ai, []int{1, 2, 3, 4})
 		}
 		if ai.Kind == mvmerge.AggMin {
 			hasMin = true
-			requireDependencies(t, ai, []int{2, 3})
+			requireDependencies(t, ai, []int{5, 6, 7, 8})
 		}
 		if ai.Kind == mvmerge.AggCountStar {
 			requireDependencies(t, ai, []int{0})
@@ -377,14 +379,97 @@ func TestBuildMinMaxHasRemovedGate(t *testing.T) {
 	requireMergePlanOutputNames(t, plan, outputNames, []fieldNameInfo{
 		{Pos: 0, Tbl: deltaTableAlias, Col: deltaCntStarName},
 		{Pos: 1, Tbl: deltaTableAlias, Col: "__mvmerge_max_in_added_2"},
-		{Pos: 2, Tbl: deltaTableAlias, Col: "__mvmerge_min_in_added_3"},
-		{Pos: 3, Tbl: deltaTableAlias, Col: removedRowsName},
-		{Pos: 4, DB: mvDBName, Tbl: deltaTableAlias, Col: "x", OrigTbl: mlog.Name.O, OrigCol: "a"},
-		{Pos: 5, DB: mvDBName, Tbl: mvTableAlias, Col: "cnt", OrigTbl: mv.Name.O, OrigCol: "cnt"},
-		{Pos: 6, DB: mvDBName, Tbl: mvTableAlias, Col: "mx", OrigTbl: mv.Name.O, OrigCol: "mx"},
-		{Pos: 7, DB: mvDBName, Tbl: mvTableAlias, Col: "mn", OrigTbl: mv.Name.O, OrigCol: "mn"},
-		{Pos: 8, DB: mvDBName, Tbl: mvTableAlias, Col: "__mvmerge_mv_rowid", OrigCol: "_tidb_rowid"},
+		{Pos: 2, Tbl: deltaTableAlias, Col: "__mvmerge_max_cnt_in_added_2"},
+		{Pos: 3, Tbl: deltaTableAlias, Col: "__mvmerge_max_in_removed_2"},
+		{Pos: 4, Tbl: deltaTableAlias, Col: "__mvmerge_max_cnt_in_removed_2"},
+		{Pos: 5, Tbl: deltaTableAlias, Col: "__mvmerge_min_in_added_3"},
+		{Pos: 6, Tbl: deltaTableAlias, Col: "__mvmerge_min_cnt_in_added_3"},
+		{Pos: 7, Tbl: deltaTableAlias, Col: "__mvmerge_min_in_removed_3"},
+		{Pos: 8, Tbl: deltaTableAlias, Col: "__mvmerge_min_cnt_in_removed_3"},
+		{Pos: 9, Tbl: deltaTableAlias, Col: removedRowsName},
+		{Pos: 10, DB: mvDBName, Tbl: deltaTableAlias, Col: "x", OrigTbl: mlog.Name.O, OrigCol: "a"},
+		{Pos: 11, DB: mvDBName, Tbl: mvTableAlias, Col: "cnt", OrigTbl: mv.Name.O, OrigCol: "cnt"},
+		{Pos: 12, DB: mvDBName, Tbl: mvTableAlias, Col: "mx", OrigTbl: mv.Name.O, OrigCol: "mx"},
+		{Pos: 13, DB: mvDBName, Tbl: mvTableAlias, Col: "mn", OrigTbl: mv.Name.O, OrigCol: "mn"},
+		{Pos: 14, DB: mvDBName, Tbl: mvTableAlias, Col: "__mvmerge_mv_rowid", OrigCol: "_tidb_rowid"},
 	})
+}
+
+func TestBuildMinMaxNullableDependencyOrder(t *testing.T) {
+	sctx := core.MockContext()
+
+	baseID := int64(110)
+	mlogID := int64(120)
+	mvID := int64(130)
+
+	base := &model.TableInfo{
+		ID:    baseID,
+		Name:  pmodel.NewCIStr("t"),
+		State: model.StatePublic,
+		Columns: []*model.ColumnInfo{
+			mkCol(1, "a", 0, mysql.TypeLong),
+			mkCol(2, "b", 1, mysql.TypeLong),
+		},
+		MaterializedViewBase: &model.MaterializedViewBaseInfo{MLogID: mlogID},
+	}
+	mlog := &model.TableInfo{
+		ID:    mlogID,
+		Name:  pmodel.NewCIStr("$mlog$t"),
+		State: model.StatePublic,
+		Columns: []*model.ColumnInfo{
+			mkCol(1, "a", 0, mysql.TypeLong),
+			mkCol(2, "b", 1, mysql.TypeLong),
+			mkCol(3, model.MaterializedViewLogDMLTypeColumnName, 2, mysql.TypeVarchar),
+			mkCol(4, model.MaterializedViewLogOldNewColumnName, 3, mysql.TypeTiny),
+		},
+		MaterializedViewLog: &model.MaterializedViewLogInfo{
+			BaseTableID: baseID,
+			Columns:     []pmodel.CIStr{pmodel.NewCIStr("a"), pmodel.NewCIStr("b")},
+		},
+	}
+	mv := &model.TableInfo{
+		ID:    mvID,
+		Name:  pmodel.NewCIStr("mv_minmax_nullable_tbl"),
+		State: model.StatePublic,
+		Columns: []*model.ColumnInfo{
+			mkCol(1, "x", 0, mysql.TypeLong),
+			mkCol(2, "cnt", 1, mysql.TypeLonglong),
+			mkCol(3, "cnt_b", 2, mysql.TypeLonglong),
+			mkCol(4, "mx", 3, mysql.TypeLong),
+			mkCol(5, "mn", 4, mysql.TypeLong),
+		},
+		MaterializedView: &model.MaterializedViewInfo{
+			BaseTableIDs: []int64{baseID},
+			SQLContent:   "select a, count(1), count(b), max(b), min(b) from t group by a",
+		},
+	}
+
+	is := infoschema.MockInfoSchema([]*model.TableInfo{base, mlog, mv})
+	domain.GetDomain(sctx).MockInfoCacheAndLoadInfoSchema(is)
+
+	res, err := mvmerge.BuildForTest(
+		sctx.GetPlanCtx(),
+		is,
+		mv,
+		mvmerge.BuildOptions{FromTS: 1, ToTS: 2},
+		nil,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, res.RemovedRowCountDelta)
+
+	for _, ai := range res.AggInfos {
+		switch ai.Kind {
+		case mvmerge.AggCountStar:
+			requireDependencies(t, ai, []int{0})
+		case mvmerge.AggCount:
+			require.Equal(t, "b", ai.ArgColName)
+			requireDependencies(t, ai, []int{1})
+		case mvmerge.AggMax:
+			requireDependencies(t, ai, []int{2, 3, 4, 5, 13})
+		case mvmerge.AggMin:
+			requireDependencies(t, ai, []int{6, 7, 8, 9, 13})
+		}
+	}
 }
 
 func TestBuildSumWithoutCountExpr(t *testing.T) {

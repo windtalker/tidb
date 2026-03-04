@@ -389,6 +389,7 @@ func TestExplainRefreshMVFastPlanTreeMinMax(t *testing.T) {
 		},
 		MaterializedViewBase: &model.MaterializedViewBaseInfo{MLogID: mlogID},
 	}
+	baseTbl.Columns[1].FieldType.AddFlag(mysql.NotNullFlag)
 	mlogTbl := &model.TableInfo{
 		ID:    mlogID,
 		Name:  pmodel.NewCIStr("$mlog$t"),
@@ -404,6 +405,7 @@ func TestExplainRefreshMVFastPlanTreeMinMax(t *testing.T) {
 			Columns:     []pmodel.CIStr{pmodel.NewCIStr("a"), pmodel.NewCIStr("b")},
 		},
 	}
+	mlogTbl.Columns[1].FieldType.AddFlag(mysql.NotNullFlag)
 	mvTbl := &model.TableInfo{
 		ID:    mvID,
 		Name:  pmodel.NewCIStr("mv_tbl_explain_minmax"),
@@ -449,19 +451,20 @@ func TestExplainRefreshMVFastPlanTreeMinMax(t *testing.T) {
 	explain.SetSCtx(p.SCtx())
 	require.NoError(t, explain.RenderResult())
 	require.Equal(t, [][]string{
-		{"MVDeltaMerge", "N/A", "root", "", "agg_deps:[count(*)@1->[0], max(b)@2->[1,3], min(b)@3->[2,3]], full_update:index_lookup"},
-		{"├─HashJoin", "8000.00", "root", "", "left outer join, equal:[nulleq(test.$mlog$t.a, test.mv_tbl_explain_minmax.a)]"},
-		{"│ ├─HashAgg(Build)", "6400.00", "root", "", "group by:test.$mlog$t.a, funcs:sum_int(Column#17)->Column#7, funcs:max(Column#18)->Column#8, funcs:min(Column#19)->Column#9, funcs:sum(Column#20)->Column#10, funcs:firstrow(test.$mlog$t.a)->test.$mlog$t.a"},
-		{"│ │ └─TableReader", "6400.00", "root", "", "data:HashAgg"},
-		{"│ │   └─HashAgg", "6400.00", "cop[tikv]", "", "group by:test.$mlog$t.a, funcs:sum_int(test.$mlog$t._mlog$_old_new)->Column#17, funcs:max(if(eq(test.$mlog$t._mlog$_old_new, 1), test.$mlog$t.b, NULL))->Column#18, funcs:min(if(eq(test.$mlog$t._mlog$_old_new, 1), test.$mlog$t.b, NULL))->Column#19, funcs:sum(if(eq(test.$mlog$t._mlog$_old_new, -1), 1, 0))->Column#20"},
-		{"│ │     └─Selection", "8000.00", "cop[tikv]", "", "gt(test.$mlog$t._tidb_commit_ts, 0), le(test.$mlog$t._tidb_commit_ts, 1)"},
-		{"│ │       └─TableFullScan", "10000.00", "cop[tikv]", "table:$mlog$t", "keep order:false, stats:pseudo"},
-		{"│ └─TableReader(Probe)", "10000.00", "root", "", "data:TableFullScan"},
-		{"│   └─TableFullScan", "10000.00", "cop[tikv]", "table:mv", "keep order:false, stats:pseudo"},
-		{"└─HashAgg", "0.80", "root", "", "group by:test.t.a, funcs:max(Column#33)->Column#30, funcs:min(Column#34)->Column#31, funcs:firstrow(test.t.a)->test.t.a"},
+		{"MVDeltaMerge", "N/A", "root", "", "agg_deps:[count(*)@1->[0], max(b)@2->[1,2,3,4], min(b)@3->[5,6,7,8]], full_update:index_lookup"},
+		{"├─Projection", "8000.00", "root", "", "Column#7, Column#8, Column#9, Column#10, Column#11, Column#12, Column#9, Column#13, Column#11, Column#14, test.$mlog$t.a, test.mv_tbl_explain_minmax.cnt, test.mv_tbl_explain_minmax.mx, test.mv_tbl_explain_minmax.mn, test.mv_tbl_explain_minmax._tidb_rowid"},
+		{"│ └─HashJoin", "8000.00", "root", "", "left outer join, equal:[nulleq(test.$mlog$t.a, test.mv_tbl_explain_minmax.a)]"},
+		{"│   ├─HashAgg(Build)", "6400.00", "root", "", "group by:test.$mlog$t.a, funcs:sum_int(Column#21)->Column#7, funcs:max(Column#22)->Column#8, funcs:count(Column#23)->Column#9, funcs:max(Column#24)->Column#10, funcs:count(Column#25)->Column#11, funcs:min(Column#26)->Column#12, funcs:min(Column#27)->Column#13, funcs:sum(Column#28)->Column#14, funcs:firstrow(test.$mlog$t.a)->test.$mlog$t.a"},
+		{"│   │ └─TableReader", "6400.00", "root", "", "data:HashAgg"},
+		{"│   │   └─HashAgg", "6400.00", "cop[tikv]", "", "group by:test.$mlog$t.a, funcs:sum_int(test.$mlog$t._mlog$_old_new)->Column#21, funcs:max(if(eq(test.$mlog$t._mlog$_old_new, 1), test.$mlog$t.b, NULL))->Column#22, funcs:count(if(eq(test.$mlog$t._mlog$_old_new, 1), test.$mlog$t.b, NULL))->Column#23, funcs:max(if(eq(test.$mlog$t._mlog$_old_new, -1), test.$mlog$t.b, NULL))->Column#24, funcs:count(if(eq(test.$mlog$t._mlog$_old_new, -1), test.$mlog$t.b, NULL))->Column#25, funcs:min(if(eq(test.$mlog$t._mlog$_old_new, 1), test.$mlog$t.b, NULL))->Column#26, funcs:min(if(eq(test.$mlog$t._mlog$_old_new, -1), test.$mlog$t.b, NULL))->Column#27, funcs:sum(if(eq(test.$mlog$t._mlog$_old_new, -1), 1, 0))->Column#28"},
+		{"│   │     └─Selection", "8000.00", "cop[tikv]", "", "gt(test.$mlog$t._tidb_commit_ts, 0), le(test.$mlog$t._tidb_commit_ts, 1)"},
+		{"│   │       └─TableFullScan", "10000.00", "cop[tikv]", "table:$mlog$t", "keep order:false, stats:pseudo"},
+		{"│   └─TableReader(Probe)", "10000.00", "root", "", "data:TableFullScan"},
+		{"│     └─TableFullScan", "10000.00", "cop[tikv]", "table:mv", "keep order:false, stats:pseudo"},
+		{"└─HashAgg", "0.80", "root", "", "group by:test.t.a, funcs:max(Column#41)->Column#38, funcs:min(Column#42)->Column#39, funcs:firstrow(test.t.a)->test.t.a"},
 		{"  └─IndexLookUp", "0.80", "root", "", ""},
 		{"    ├─IndexRangeScan(Build)", "0.80", "cop[tikv]", "table:t, index:idx_a(a)", "range: decided by [eq(test.t.a, test.t.a)], keep order:false, stats:pseudo"},
-		{"    └─HashAgg(Probe)", "0.80", "cop[tikv]", "", "group by:test.t.a, funcs:max(test.t.b)->Column#33, funcs:min(test.t.b)->Column#34"},
+		{"    └─HashAgg(Probe)", "0.80", "cop[tikv]", "", "group by:test.t.a, funcs:max(test.t.b)->Column#41, funcs:min(test.t.b)->Column#42"},
 		{"      └─Selection", "0.80", "cop[tikv]", "", "not(isnull(test.t.a))"},
 		{"        └─TableRowIDScan", "0.80", "cop[tikv]", "table:t", "keep order:false, stats:pseudo"},
 	}, explain.Rows)

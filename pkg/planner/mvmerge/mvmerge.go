@@ -142,14 +142,20 @@ type AggInfo struct {
 	//     - matched_count_expr_mv: absolute output offset of matched COUNT(expr) MV column.
 	//       COUNT(expr) must be updated before SUM(expr), and SUM should read this updated MV value.
 	//       The same matched COUNT(expr) can be a dependency for multiple aggregate functions.
-	//   - AggMax / AggMin: [self_delta, removed_rows_delta]
+	//   - AggMax / AggMin:
+	//     - [added_val, added_cnt, removed_val, removed_cnt] when argument is NOT NULL.
+	//     - [added_val, added_cnt, removed_val, removed_cnt, matched_count_expr_mv] otherwise.
+	//     - removed_rows_delta is tracked separately by RemovedRowCountDelta as a group-level gate.
 	Dependencies []int
 }
 
 type aggColInfo struct {
-	info      AggInfo
-	deltaName string
-	argExpr   ast.ExprNode
+	info                AggInfo
+	deltaName           string
+	addedCountDeltaName string
+	removedValueDelta   string
+	removedCountDelta   string
+	argExpr             ast.ExprNode
 }
 
 // BuildLocalResult contains the parsed MV definition and all metadata derived from it.
@@ -183,13 +189,13 @@ func BuildForTest(
 	is infoschema.InfoSchema,
 	mv *model.TableInfo,
 	opt BuildOptions,
-	sumArgNotNullByOffset map[int]bool,
+	aggArgNotNullByOffset map[int]bool,
 ) (*BuildResult, error) {
 	local, err := BuildLocal(sctx, is, mv)
 	if err != nil {
 		return nil, err
 	}
-	return BuildFromLocal(local, opt, sumArgNotNullByOffset)
+	return BuildFromLocal(local, opt, aggArgNotNullByOffset)
 }
 
 // BuildLocal validates MV/MLoG metadata, parses the MV definition, and derives local layout metadata.
@@ -320,7 +326,7 @@ func BuildLocal(
 func BuildFromLocal(
 	local *BuildLocalResult,
 	opt BuildOptions,
-	sumArgNotNullByOffset map[int]bool,
+	aggArgNotNullByOffset map[int]bool,
 ) (*BuildResult, error) {
 	if local == nil {
 		return nil, errors.New("mvmerge: local result is nil")
@@ -328,8 +334,8 @@ func BuildFromLocal(
 	if local.MVSelect == nil {
 		return nil, errors.New("mvmerge: local MVSelect is nil")
 	}
-	if sumArgNotNullByOffset == nil {
-		sumArgNotNullByOffset = inferSumArgNotNullByOffset(local)
+	if aggArgNotNullByOffset == nil {
+		aggArgNotNullByOffset = inferAggArgNotNullByOffset(local)
 	}
 
 	// Stage 2: build merge source SQL in two steps:
@@ -391,7 +397,11 @@ func BuildFromLocal(
 		expectedLen++
 	}
 
-	sumToCountExprIdx, err := mapSumToCountExprDependencies(local.aggCols, sumArgNotNullByOffset)
+	sumToCountExprIdx, err := mapSumToCountExprDependencies(local.aggCols, aggArgNotNullByOffset)
+	if err != nil {
+		return nil, err
+	}
+	minMaxToCountExprIdx, err := mapMinMaxToCountExprDependencies(local.aggCols, aggArgNotNullByOffset)
 	if err != nil {
 		return nil, err
 	}
@@ -404,7 +414,7 @@ func BuildFromLocal(
 	outAggInfos := make([]AggInfo, 0, len(local.aggCols))
 	for i, ac := range local.aggCols {
 		di := ac.info
-		deps := make([]int, 0, 3)
+		deps := make([]int, 0, 5)
 		if ac.deltaName != "" {
 			off, ok := deltaOffsetByName[ac.deltaName]
 			if !ok {
@@ -414,7 +424,7 @@ func BuildFromLocal(
 		}
 		switch di.Kind {
 		case AggSum:
-			if !sumArgNotNullByOffset[di.MVOffset] {
+			if !aggArgNotNullByOffset[di.MVOffset] {
 				countIdx, ok := sumToCountExprIdx[i]
 				if !ok {
 					return nil, errors.Errorf("internal error: SUM at mv offset %d has no COUNT(expr) dependency", di.MVOffset)
@@ -431,7 +441,27 @@ func BuildFromLocal(
 					removedRowsName,
 				)
 			}
-			deps = append(deps, removedDelta.Offset)
+			addedCntOff, ok := deltaOffsetByName[ac.addedCountDeltaName]
+			if !ok {
+				return nil, errors.Errorf("internal error: delta column %s not found in output", ac.addedCountDeltaName)
+			}
+			removedValOff, ok := deltaOffsetByName[ac.removedValueDelta]
+			if !ok {
+				return nil, errors.Errorf("internal error: delta column %s not found in output", ac.removedValueDelta)
+			}
+			removedCntOff, ok := deltaOffsetByName[ac.removedCountDelta]
+			if !ok {
+				return nil, errors.Errorf("internal error: delta column %s not found in output", ac.removedCountDelta)
+			}
+			deps = append(deps, addedCntOff, removedValOff, removedCntOff)
+			if !aggArgNotNullByOffset[di.MVOffset] {
+				countIdx, ok := minMaxToCountExprIdx[i]
+				if !ok {
+					return nil, errors.Errorf("internal error: %v at mv offset %d has no COUNT(expr) dependency", di.Kind, di.MVOffset)
+				}
+				countAgg := local.aggCols[countIdx]
+				deps = append(deps, mvColumnOffsetBase+countAgg.info.MVOffset)
+			}
 		}
 		di.Dependencies = deps
 		outAggInfos = append(outAggInfos, di)
@@ -551,7 +581,7 @@ func buildMVTablePKHandleCols(
 	}
 }
 
-func inferSumArgNotNullByOffset(local *BuildLocalResult) map[int]bool {
+func inferAggArgNotNullByOffset(local *BuildLocalResult) map[int]bool {
 	if local == nil || local.baseTable == nil {
 		return nil
 	}
@@ -569,7 +599,7 @@ func inferSumArgNotNullByOffset(local *BuildLocalResult) map[int]bool {
 
 	out := make(map[int]bool)
 	for _, ac := range local.aggCols {
-		if ac.info.Kind != AggSum || ac.info.ArgColName == "" {
+		if ac.info.ArgColName == "" {
 			continue
 		}
 		if baseColNotNull[ac.info.ArgColName] {
@@ -727,7 +757,11 @@ func extractAggInfosFromMVSelect(sel *ast.SelectStmt) (aggCols []aggColInfo, has
 					MVOffset:   i,
 					ArgColName: argCol.Name.Name.L,
 				},
-				deltaName: fmt.Sprintf("__mvmerge_max_in_added_%d", i),
+				deltaName:           fmt.Sprintf("__mvmerge_max_in_added_%d", i),
+				addedCountDeltaName: fmt.Sprintf("__mvmerge_max_cnt_in_added_%d", i),
+				removedValueDelta:   fmt.Sprintf("__mvmerge_max_in_removed_%d", i),
+				removedCountDelta:   fmt.Sprintf("__mvmerge_max_cnt_in_removed_%d", i),
+				argExpr:             stripColumnQualifier(agg.Args[0]),
 			})
 		case ast.AggFuncMin:
 			argCol, ok := agg.Args[0].(*ast.ColumnNameExpr)
@@ -741,7 +775,11 @@ func extractAggInfosFromMVSelect(sel *ast.SelectStmt) (aggCols []aggColInfo, has
 					MVOffset:   i,
 					ArgColName: argCol.Name.Name.L,
 				},
-				deltaName: fmt.Sprintf("__mvmerge_min_in_added_%d", i),
+				deltaName:           fmt.Sprintf("__mvmerge_min_in_added_%d", i),
+				addedCountDeltaName: fmt.Sprintf("__mvmerge_min_cnt_in_added_%d", i),
+				removedValueDelta:   fmt.Sprintf("__mvmerge_min_in_removed_%d", i),
+				removedCountDelta:   fmt.Sprintf("__mvmerge_min_cnt_in_removed_%d", i),
+				argExpr:             stripColumnQualifier(agg.Args[0]),
 			})
 		default:
 			return nil, false, errors.Errorf("unsupported aggregate function %s in mvmerge stage-1", agg.F)
@@ -787,6 +825,45 @@ func mapSumToCountExprDependencies(aggCols []aggColInfo, sumArgNotNullByOffset m
 		sumToCountIdx[i] = matchIdx
 	}
 	return sumToCountIdx, nil
+}
+
+func mapMinMaxToCountExprDependencies(aggCols []aggColInfo, aggArgNotNullByOffset map[int]bool) (map[int]int, error) {
+	minMaxToCountIdx := make(map[int]int)
+	for i, ac := range aggCols {
+		if ac.info.Kind != AggMax && ac.info.Kind != AggMin {
+			continue
+		}
+		if aggArgNotNullByOffset[ac.info.MVOffset] {
+			continue
+		}
+		if ac.argExpr == nil {
+			return nil, errors.Errorf("%v aggregate argument is nil at mv offset %d", ac.info.Kind, ac.info.MVOffset)
+		}
+		matchIdx := -1
+		for j, cand := range aggCols {
+			if cand.info.Kind != AggCount || cand.argExpr == nil {
+				continue
+			}
+			if !exprStructuralEqual(ac.argExpr, cand.argExpr) {
+				continue
+			}
+			if matchIdx >= 0 {
+				return nil, errors.Errorf(
+					"%v expression %s at mv offset %d has multiple matching COUNT(expr) dependencies (offsets %d and %d)",
+					ac.info.Kind, restoreExpr(ac.argExpr), ac.info.MVOffset, aggCols[matchIdx].info.MVOffset, cand.info.MVOffset,
+				)
+			}
+			matchIdx = j
+		}
+		if matchIdx < 0 {
+			return nil, errors.Errorf(
+				"%v expression %s at mv offset %d requires matching COUNT(expr) in SELECT list",
+				ac.info.Kind, restoreExpr(ac.argExpr), ac.info.MVOffset,
+			)
+		}
+		minMaxToCountIdx[i] = matchIdx
+	}
+	return minMaxToCountIdx, nil
 }
 
 func validateAggDependencies(
@@ -846,34 +923,39 @@ func validateAggDependencies(
 				}
 			}
 		case AggMax, AggMin:
-			// [self_delta, removed_rows_delta]
-			if len(ai.Dependencies) != 2 {
+			// [added_val, added_cnt, removed_val, removed_cnt] + optional [matched_count_expr_mv] for nullable arg.
+			if len(ai.Dependencies) != 4 && len(ai.Dependencies) != 5 {
 				return errors.Errorf(
-					"%v at mv offset %d expects dependencies [self_delta, removed_rows_delta], got %v",
+					"%v at mv offset %d expects dependencies "+
+						"[added_val, added_cnt, removed_val, removed_cnt] or "+
+						"[added_val, added_cnt, removed_val, removed_cnt, matched_count_expr_mv], got %v",
 					ai.Kind,
 					ai.MVOffset,
 					ai.Dependencies,
 				)
 			}
-			if ai.Dependencies[0] >= mvColumnOffsetBase {
+			for depPos := 0; depPos < 4; depPos++ {
+				if ai.Dependencies[depPos] >= mvColumnOffsetBase {
+					return errors.Errorf(
+						"%v at mv offset %d has invalid delta dependency[%d] offset %d",
+						ai.Kind,
+						ai.MVOffset,
+						depPos,
+						ai.Dependencies[depPos],
+					)
+				}
+			}
+			if len(ai.Dependencies) == 5 &&
+				(ai.Dependencies[4] < mvColumnOffsetBase || ai.Dependencies[4] >= mvColumnEnd) {
 				return errors.Errorf(
-					"%v at mv offset %d has invalid self_delta offset %d",
+					"%v at mv offset %d has invalid matched_count_expr_mv offset %d",
 					ai.Kind,
 					ai.MVOffset,
-					ai.Dependencies[0],
+					ai.Dependencies[4],
 				)
 			}
 			if removedRowsDeltaOff < 0 {
 				return errors.Errorf("internal error: %v at mv offset %d requires removed_rows delta", ai.Kind, ai.MVOffset)
-			}
-			if ai.Dependencies[1] != removedRowsDeltaOff {
-				return errors.Errorf(
-					"%v at mv offset %d has invalid removed_rows_delta offset %d, expected %d",
-					ai.Kind,
-					ai.MVOffset,
-					ai.Dependencies[1],
-					removedRowsDeltaOff,
-				)
 			}
 		default:
 			return errors.Errorf("unsupported aggregate kind %v", ai.Kind)
@@ -1073,27 +1155,71 @@ func buildMLogDeltaSelect(
 				AsName: pmodel.NewCIStr(ac.deltaName),
 			})
 		case AggMax:
-			// Track only candidates from added rows; removed rows are handled by detail update path.
+			if ac.info.ArgColName == "" {
+				return nil, errors.New("MAX aggregate argument column is empty for mvmerge")
+			}
 			argCol := colExpr(ac.info.ArgColName)
-			fields = append(fields, &ast.SelectField{
-				Expr: aggMax(ifExpr(
-					binary(opcode.EQ, oldNewCol, ast.NewValueExpr(int64(1), "", "")),
-					argCol,
-					ast.NewValueExpr(nil, "", ""),
-				)),
-				AsName: pmodel.NewCIStr(ac.deltaName),
-			})
+			addedCond := binary(opcode.EQ, oldNewCol, ast.NewValueExpr(int64(1), "", ""))
+			removedCond := binary(opcode.EQ, oldNewCol, ast.NewValueExpr(int64(-1), "", ""))
+			fields = append(fields,
+				&ast.SelectField{
+					Expr: aggMax(ifExpr(
+						addedCond,
+						argCol,
+						ast.NewValueExpr(nil, "", ""),
+					)),
+					AsName: pmodel.NewCIStr(ac.deltaName),
+				},
+				&ast.SelectField{
+					Expr:   aggCount(ifExpr(addedCond, argCol, ast.NewValueExpr(nil, "", ""))),
+					AsName: pmodel.NewCIStr(ac.addedCountDeltaName),
+				},
+				&ast.SelectField{
+					Expr: aggMax(ifExpr(
+						removedCond,
+						argCol,
+						ast.NewValueExpr(nil, "", ""),
+					)),
+					AsName: pmodel.NewCIStr(ac.removedValueDelta),
+				},
+				&ast.SelectField{
+					Expr:   aggCount(ifExpr(removedCond, argCol, ast.NewValueExpr(nil, "", ""))),
+					AsName: pmodel.NewCIStr(ac.removedCountDelta),
+				},
+			)
 		case AggMin:
-			// Same as MAX: only additions contribute to quick-update candidate.
+			if ac.info.ArgColName == "" {
+				return nil, errors.New("MIN aggregate argument column is empty for mvmerge")
+			}
 			argCol := colExpr(ac.info.ArgColName)
-			fields = append(fields, &ast.SelectField{
-				Expr: aggMin(ifExpr(
-					binary(opcode.EQ, oldNewCol, ast.NewValueExpr(int64(1), "", "")),
-					argCol,
-					ast.NewValueExpr(nil, "", ""),
-				)),
-				AsName: pmodel.NewCIStr(ac.deltaName),
-			})
+			addedCond := binary(opcode.EQ, oldNewCol, ast.NewValueExpr(int64(1), "", ""))
+			removedCond := binary(opcode.EQ, oldNewCol, ast.NewValueExpr(int64(-1), "", ""))
+			fields = append(fields,
+				&ast.SelectField{
+					Expr: aggMin(ifExpr(
+						addedCond,
+						argCol,
+						ast.NewValueExpr(nil, "", ""),
+					)),
+					AsName: pmodel.NewCIStr(ac.deltaName),
+				},
+				&ast.SelectField{
+					Expr:   aggCount(ifExpr(addedCond, argCol, ast.NewValueExpr(nil, "", ""))),
+					AsName: pmodel.NewCIStr(ac.addedCountDeltaName),
+				},
+				&ast.SelectField{
+					Expr: aggMin(ifExpr(
+						removedCond,
+						argCol,
+						ast.NewValueExpr(nil, "", ""),
+					)),
+					AsName: pmodel.NewCIStr(ac.removedValueDelta),
+				},
+				&ast.SelectField{
+					Expr:   aggCount(ifExpr(removedCond, argCol, ast.NewValueExpr(nil, "", ""))),
+					AsName: pmodel.NewCIStr(ac.removedCountDelta),
+				},
+			)
 		default:
 			return nil, errors.Errorf("unsupported agg kind %v", ac.info.Kind)
 		}
@@ -1206,14 +1332,25 @@ func buildMergeSourceSelect(
 		AsName: pmodel.NewCIStr(deltaCntStarName),
 	})
 	for _, ac := range aggCols {
-		if ac.info.Kind == AggCountStar {
+		switch ac.info.Kind {
+		case AggCountStar:
 			continue
+		case AggMax, AggMin:
+			names := []string{ac.deltaName, ac.addedCountDeltaName, ac.removedValueDelta, ac.removedCountDelta}
+			for _, name := range names {
+				addDeltaCol(name)
+				fields = append(fields, &ast.SelectField{
+					Expr:   qualColExpr(deltaTableAlias, name),
+					AsName: pmodel.NewCIStr(name),
+				})
+			}
+		default:
+			addDeltaCol(ac.deltaName)
+			fields = append(fields, &ast.SelectField{
+				Expr:   qualColExpr(deltaTableAlias, ac.deltaName),
+				AsName: pmodel.NewCIStr(ac.deltaName),
+			})
 		}
-		addDeltaCol(ac.deltaName)
-		fields = append(fields, &ast.SelectField{
-			Expr:   qualColExpr(deltaTableAlias, ac.deltaName),
-			AsName: pmodel.NewCIStr(ac.deltaName),
-		})
 	}
 	if hasMinMax {
 		off := addDeltaCol(removedRowsName)
