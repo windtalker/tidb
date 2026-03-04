@@ -1227,6 +1227,54 @@ func TestRejectMinMaxFallbackToCountStarForNullableExpr(t *testing.T) {
 	require.ErrorContains(t, err, "max(nullable expr) requires final-count dependency")
 }
 
+func TestRejectMinMaxFinalCountForNonNullableExpr(t *testing.T) {
+	sctx := mock.NewContext()
+	ftInt := types.NewFieldType(mysql.TypeLonglong)
+	fts := []*types.FieldType{
+		ftInt, // [0] delta_count(*)
+		ftInt, // [1] delta_max_added(v)
+		ftInt, // [2] delta_max_added_cnt(v)
+		ftInt, // [3] delta_max_removed(v)
+		ftInt, // [4] delta_max_removed_cnt(v)
+		ftInt, // [5] group key
+		ftInt, // [6] mv_count(*)
+		ftInt, // [7] mv_max(v)
+	}
+	src := newMockSource(sctx, fts, nil)
+
+	countStarDesc, err := aggregation.NewAggFuncDesc(sctx.GetExprCtx(), ast.AggFuncCount, []expression.Expression{expression.NewOne()}, false)
+	require.NoError(t, err)
+	maxArgTp := types.NewFieldType(mysql.TypeLonglong)
+	maxArgTp.AddFlag(mysql.NotNullFlag)
+	maxArg := &expression.Column{Index: 1, RetType: maxArgTp}
+	maxDesc, err := aggregation.NewAggFuncDesc(sctx.GetExprCtx(), ast.AggFuncMax, []expression.Expression{maxArg}, false)
+	require.NoError(t, err)
+
+	mergeExec := &Exec{
+		BaseExecutor: exec.NewBaseExecutor(sctx, nil, 0, src),
+		AggMappings: []Mapping{
+			{AggFunc: countStarDesc, ColID: []int{6}, DependencyColID: []int{0}},
+			{
+				AggFunc:         maxDesc,
+				ColID:           []int{7},
+				DependencyColID: []int{1, 2, 3, 4, 6},
+				MinMaxRecompute: &MinMaxRecomputeSpec{
+					Strategy:            MinMaxRecomputeBatch,
+					BatchResultColIdxes: []int{1},
+				},
+			},
+		},
+		DeltaAggColCount: 6,
+		WorkerCnt:        1,
+		MinMaxRecompute: &MinMaxRecomputeExec{
+			KeyInputColIDs: []int{5},
+			BatchBuilder:   &mockBatchRecomputeBuilder{},
+		},
+	}
+	err = mergeExec.Open(context.Background())
+	require.ErrorContains(t, err, "max(non-nullable expr) must not set final-count dependency")
+}
+
 func TestRejectMinMaxRecomputeValidation(t *testing.T) {
 	sctx := mock.NewContext()
 	ftInt := types.NewFieldType(mysql.TypeLonglong)

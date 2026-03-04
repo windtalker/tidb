@@ -34,8 +34,24 @@ func (e *Exec) buildMinMaxMerger(
 	if len(mapping.ColID) != 1 {
 		return nil, errors.Errorf("%s mapping expects exactly 1 output column, got %d", mapping.AggFunc.Name, len(mapping.ColID))
 	}
-	if len(mapping.DependencyColID) != 4 && len(mapping.DependencyColID) != 5 {
-		return nil, errors.Errorf("%s mapping expects 4 or 5 dependencies, got %d", mapping.AggFunc.Name, len(mapping.DependencyColID))
+	exprNullable, err := e.isMinMaxExprNullable(mapping)
+	if err != nil {
+		return nil, errors.Annotatef(err, "%s mapping expression nullability", mapping.AggFunc.Name)
+	}
+	if exprNullable {
+		if len(mapping.DependencyColID) != 5 {
+			return nil, errors.Errorf(
+				"%s(nullable expr) requires final-count dependency (exactly 5 dependencies), got %d",
+				mapping.AggFunc.Name,
+				len(mapping.DependencyColID),
+			)
+		}
+	} else if len(mapping.DependencyColID) != 4 {
+		return nil, errors.Errorf(
+			"%s(non-nullable expr) must not set final-count dependency (exactly 4 dependencies), got %d",
+			mapping.AggFunc.Name,
+			len(mapping.DependencyColID),
+		)
 	}
 
 	outputColID := mapping.ColID[0]
@@ -112,7 +128,7 @@ func (e *Exec) buildMinMaxMerger(
 		retTp:         retTp,
 		countRef:      depRef{},
 	}
-	if len(mapping.DependencyColID) == 5 {
+	if exprNullable {
 		countColID := mapping.DependencyColID[4]
 		countExprTp, err := resolveFieldTypeByColID(countColID, childTypes)
 		if err != nil {
@@ -129,14 +145,6 @@ func (e *Exec) buildMinMaxMerger(
 			return nil, errors.Annotatef(err, "%s mapping final-count dependency col %d", mapping.AggFunc.Name, countColID)
 		}
 	} else {
-		exprNullable, err := e.isMinMaxExprNullable(mapping)
-		if err != nil {
-			return nil, errors.Annotatef(err, "%s mapping expression nullability", mapping.AggFunc.Name)
-		}
-		if exprNullable {
-			return nil, errors.Errorf("%s(nullable expr) requires final-count dependency", mapping.AggFunc.Name)
-		}
-
 		countAllRowsColID := e.AggMappings[0].ColID[0]
 		countAllRowsTp, err := resolveFieldTypeByColID(countAllRowsColID, childTypes)
 		if err != nil {
