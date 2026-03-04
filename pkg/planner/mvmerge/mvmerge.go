@@ -144,6 +144,8 @@ type AggInfo struct {
 	//   - AggMax / AggMin:
 	//     - [added_val, added_cnt, removed_val, removed_cnt] when argument is NOT NULL.
 	//     - [added_val, added_cnt, removed_val, removed_cnt, matched_count_expr_mv] otherwise.
+	//     - added_cnt/removed_cnt are counts of rows whose argument equals added_val/removed_val
+	//       in the added/removed subdomain respectively (MAX/MIN_COUNT semantics).
 	Dependencies []int
 }
 
@@ -1080,33 +1082,59 @@ func buildMLogDeltaSelect(
 	aggCols []aggColInfo,
 	opt BuildOptions,
 ) (*ast.SelectStmt, error) {
-	fields := make([]*ast.SelectField, 0, len(groupKeyOffsets)+1+len(aggCols)+1)
+	hasMinMax := false
+	for _, ac := range aggCols {
+		if ac.info.Kind == AggMax || ac.info.Kind == AggMin {
+			hasMinMax = true
+			break
+		}
+	}
 
-	// Group keys: keep base-table column expression, alias to MV column name.
+	buildMLogWhere := func() (ast.ExprNode, error) {
+		tsCol := colExpr(model.ExtraCommitTSName.L)
+		where := andExpr(
+			binary(opcode.GT, tsCol, ast.NewValueExpr(opt.FromTS, "", "")),
+			binary(opcode.LE, tsCol, ast.NewValueExpr(opt.ToTS, "", "")),
+		)
+		if mvSel.Where != nil {
+			mvWhere, err := cloneExprByRestore(sctx, mvSel.Where)
+			if err != nil {
+				return nil, err
+			}
+			mvWhere.Accept(&columnQualifierStripper{})
+			where = andExpr(where, stripAllParentheses(mvWhere))
+		}
+		return where, nil
+	}
+
+	groupKeyBaseColByMVOffset := make(map[int]string, len(groupKeyOffsets))
+	groupBy := &ast.GroupByClause{Items: make([]*ast.ByItem, 0, len(groupKeyOffsets))}
 	for _, mvOffset := range groupKeyOffsets {
-		mvColName := mvCols[mvOffset].Name
 		baseColExpr, err := groupKeyBaseColExprAtOffset(mvSel, mvOffset)
 		if err != nil {
 			return nil, err
 		}
-		fields = append(fields, &ast.SelectField{Expr: baseColExpr, AsName: mvColName})
+		groupKeyBaseColByMVOffset[mvOffset] = baseColExpr.Name.Name.O
+		groupBy.Items = append(groupBy.Items, &ast.ByItem{Expr: baseColExpr, NullOrder: true})
 	}
 
-	// old_new is signed delta marker in mlog rows: +1 for added/new row, -1 for removed/old row.
+	phase1Fields := make([]*ast.SelectField, 0, len(groupKeyOffsets)+1+len(aggCols)+1)
+	for _, mvOffset := range groupKeyOffsets {
+		mvColName := mvCols[mvOffset].Name
+		phase1Fields = append(phase1Fields, &ast.SelectField{
+			Expr:   colExpr(groupKeyBaseColByMVOffset[mvOffset]),
+			AsName: mvColName,
+		})
+	}
 	oldNewCol := colExpr(model.MaterializedViewLogOldNewColumnName)
-
-	// Always compute delta count(*) for stage-1.
-	fields = append(fields, &ast.SelectField{
+	phase1Fields = append(phase1Fields, &ast.SelectField{
 		Expr:   aggSumInt(oldNewCol),
 		AsName: pmodel.NewCIStr(deltaCntStarName),
 	})
 
-	// Per aggregate column deltas.
-	// For normal aggs (COUNT/SUM), old_new sign naturally encodes add/remove contribution.
 	for _, ac := range aggCols {
 		switch ac.info.Kind {
 		case AggCountStar:
-			// already handled above.
 			continue
 		case AggCount:
 			if ac.argExpr == nil {
@@ -1116,8 +1144,8 @@ func buildMLogDeltaSelect(
 			if err != nil {
 				return nil, err
 			}
-			cond := &ast.IsNullExpr{Expr: argExpr, Not: true} // expr IS NOT NULL
-			fields = append(fields, &ast.SelectField{
+			cond := &ast.IsNullExpr{Expr: argExpr, Not: true}
+			phase1Fields = append(phase1Fields, &ast.SelectField{
 				Expr:   aggSumInt(ifExpr(cond, oldNewCol, ast.NewValueExpr(int64(0), "", ""))),
 				AsName: pmodel.NewCIStr(ac.deltaName),
 			})
@@ -1130,7 +1158,7 @@ func buildMLogDeltaSelect(
 				return nil, err
 			}
 			addedCond := binary(opcode.EQ, oldNewCol, ast.NewValueExpr(int64(1), "", ""))
-			fields = append(fields, &ast.SelectField{
+			phase1Fields = append(phase1Fields, &ast.SelectField{
 				Expr:   aggSum(ifExpr(addedCond, argExpr, &ast.UnaryOperationExpr{Op: opcode.Minus, V: argExpr})),
 				AsName: pmodel.NewCIStr(ac.deltaName),
 			})
@@ -1141,30 +1169,14 @@ func buildMLogDeltaSelect(
 			argCol := colExpr(ac.info.ArgColName)
 			addedCond := binary(opcode.EQ, oldNewCol, ast.NewValueExpr(int64(1), "", ""))
 			removedCond := binary(opcode.EQ, oldNewCol, ast.NewValueExpr(int64(-1), "", ""))
-			fields = append(fields,
+			phase1Fields = append(phase1Fields,
 				&ast.SelectField{
-					Expr: aggMax(ifExpr(
-						addedCond,
-						argCol,
-						ast.NewValueExpr(nil, "", ""),
-					)),
+					Expr:   aggMax(ifExpr(addedCond, argCol, ast.NewValueExpr(nil, "", ""))),
 					AsName: pmodel.NewCIStr(ac.deltaName),
 				},
 				&ast.SelectField{
-					Expr:   aggCount(ifExpr(addedCond, argCol, ast.NewValueExpr(nil, "", ""))),
-					AsName: pmodel.NewCIStr(ac.addedCountDeltaName),
-				},
-				&ast.SelectField{
-					Expr: aggMax(ifExpr(
-						removedCond,
-						argCol,
-						ast.NewValueExpr(nil, "", ""),
-					)),
+					Expr:   aggMax(ifExpr(removedCond, argCol, ast.NewValueExpr(nil, "", ""))),
 					AsName: pmodel.NewCIStr(ac.removedValueDelta),
-				},
-				&ast.SelectField{
-					Expr:   aggCount(ifExpr(removedCond, argCol, ast.NewValueExpr(nil, "", ""))),
-					AsName: pmodel.NewCIStr(ac.removedCountDelta),
 				},
 			)
 		case AggMin:
@@ -1174,30 +1186,14 @@ func buildMLogDeltaSelect(
 			argCol := colExpr(ac.info.ArgColName)
 			addedCond := binary(opcode.EQ, oldNewCol, ast.NewValueExpr(int64(1), "", ""))
 			removedCond := binary(opcode.EQ, oldNewCol, ast.NewValueExpr(int64(-1), "", ""))
-			fields = append(fields,
+			phase1Fields = append(phase1Fields,
 				&ast.SelectField{
-					Expr: aggMin(ifExpr(
-						addedCond,
-						argCol,
-						ast.NewValueExpr(nil, "", ""),
-					)),
+					Expr:   aggMin(ifExpr(addedCond, argCol, ast.NewValueExpr(nil, "", ""))),
 					AsName: pmodel.NewCIStr(ac.deltaName),
 				},
 				&ast.SelectField{
-					Expr:   aggCount(ifExpr(addedCond, argCol, ast.NewValueExpr(nil, "", ""))),
-					AsName: pmodel.NewCIStr(ac.addedCountDeltaName),
-				},
-				&ast.SelectField{
-					Expr: aggMin(ifExpr(
-						removedCond,
-						argCol,
-						ast.NewValueExpr(nil, "", ""),
-					)),
+					Expr:   aggMin(ifExpr(removedCond, argCol, ast.NewValueExpr(nil, "", ""))),
 					AsName: pmodel.NewCIStr(ac.removedValueDelta),
-				},
-				&ast.SelectField{
-					Expr:   aggCount(ifExpr(removedCond, argCol, ast.NewValueExpr(nil, "", ""))),
-					AsName: pmodel.NewCIStr(ac.removedCountDelta),
 				},
 			)
 		default:
@@ -1208,33 +1204,134 @@ func buildMLogDeltaSelect(
 	mlogFrom := &ast.TableRefsClause{TableRefs: &ast.Join{Left: &ast.TableSource{
 		Source: &ast.TableName{Schema: dbName, Name: mlogTable.Name},
 	}}}
-
-	// Restrict mlog scan to the incremental window (FromTS, +inf), then apply MV predicate.
-	tsCol := colExpr(model.ExtraCommitTSName.L)
-	var where ast.ExprNode = binary(opcode.GT, tsCol, ast.NewValueExpr(opt.FromTS, "", ""))
-	if mvSel.Where != nil {
-		mvWhere, err := cloneExprByRestore(sctx, mvSel.Where)
-		if err != nil {
-			return nil, err
-		}
-		mvWhere.Accept(&columnQualifierStripper{})
-		where = andExpr(where, stripAllParentheses(mvWhere))
+	phase1Where, err := buildMLogWhere()
+	if err != nil {
+		return nil, err
+	}
+	if !hasMinMax {
+		return &ast.SelectStmt{
+			Fields:  &ast.FieldList{Fields: phase1Fields},
+			From:    mlogFrom,
+			Where:   phase1Where,
+			GroupBy: groupBy,
+		}, nil
 	}
 
-	groupBy := &ast.GroupByClause{Items: make([]*ast.ByItem, 0, len(groupKeyOffsets))}
+	phase1Sel := &ast.SelectStmt{
+		Fields:  &ast.FieldList{Fields: phase1Fields},
+		From:    mlogFrom,
+		Where:   phase1Where,
+		GroupBy: groupBy,
+	}
+	// Phase-1 computes per-group extrema values (max/min in added/removed subdomains).
+	const (
+		deltaPhase1Alias = "__mvmerge_p1"
+		deltaRowsAlias   = "__mvmerge_rows"
+	)
+
+	rowsWhere, err := buildMLogWhere()
+	if err != nil {
+		return nil, err
+	}
+	rowsSel := &ast.SelectStmt{
+		Fields: &ast.FieldList{Fields: []*ast.SelectField{{WildCard: &ast.WildCardField{}}}},
+		From: &ast.TableRefsClause{TableRefs: &ast.Join{Left: &ast.TableSource{
+			Source: &ast.TableName{Schema: dbName, Name: mlogTable.Name},
+		}}},
+		Where: rowsWhere,
+	}
+
+	phase1Src := &ast.TableSource{Source: phase1Sel, AsName: pmodel.NewCIStr(deltaPhase1Alias)}
+	rowsSrc := &ast.TableSource{Source: rowsSel, AsName: pmodel.NewCIStr(deltaRowsAlias)}
+	var onExpr ast.ExprNode
 	for _, mvOffset := range groupKeyOffsets {
-		baseColExpr, err := groupKeyBaseColExprAtOffset(mvSel, mvOffset)
-		if err != nil {
-			return nil, err
+		leftGK := qualColExpr(deltaPhase1Alias, mvCols[mvOffset].Name.O)
+		rightGK := qualColExpr(deltaRowsAlias, groupKeyBaseColByMVOffset[mvOffset])
+		onExpr = andExpr(onExpr, binary(opcode.NullEQ, leftGK, rightGK))
+	}
+	if onExpr == nil {
+		return nil, errors.New("empty group key for mlog delta min/max stage-2")
+	}
+
+	outerFields := make([]*ast.SelectField, 0, len(groupKeyOffsets)+1+len(aggCols)*4)
+	for _, mvOffset := range groupKeyOffsets {
+		mvColName := mvCols[mvOffset].Name
+		outerFields = append(outerFields, &ast.SelectField{
+			Expr:   qualColExpr(deltaPhase1Alias, mvColName.O),
+			AsName: mvColName,
+		})
+	}
+	outerFields = append(outerFields, &ast.SelectField{
+		Expr:   aggFirstRow(qualColExpr(deltaPhase1Alias, deltaCntStarName)),
+		AsName: pmodel.NewCIStr(deltaCntStarName),
+	})
+
+	oldNewRowsCol := qualColExpr(deltaRowsAlias, model.MaterializedViewLogOldNewColumnName)
+	// Phase-2 counts how many rows equal those extrema values (MAX/MIN_COUNT semantics).
+	for _, ac := range aggCols {
+		switch ac.info.Kind {
+		case AggCountStar:
+			continue
+		case AggCount, AggSum:
+			outerFields = append(outerFields, &ast.SelectField{
+				Expr:   aggFirstRow(qualColExpr(deltaPhase1Alias, ac.deltaName)),
+				AsName: pmodel.NewCIStr(ac.deltaName),
+			})
+		case AggMax, AggMin:
+			if ac.info.ArgColName == "" {
+				return nil, errors.Errorf("%v aggregate argument column is empty for mvmerge", ac.info.Kind)
+			}
+			addedValExpr := qualColExpr(deltaPhase1Alias, ac.deltaName)
+			removedValExpr := qualColExpr(deltaPhase1Alias, ac.removedValueDelta)
+			argRowsCol := qualColExpr(deltaRowsAlias, ac.info.ArgColName)
+			addedCond := andExpr(
+				binary(opcode.EQ, oldNewRowsCol, ast.NewValueExpr(int64(1), "", "")),
+				binary(opcode.EQ, argRowsCol, addedValExpr),
+			)
+			removedCond := andExpr(
+				binary(opcode.EQ, oldNewRowsCol, ast.NewValueExpr(int64(-1), "", "")),
+				binary(opcode.EQ, argRowsCol, removedValExpr),
+			)
+			outerFields = append(outerFields,
+				&ast.SelectField{
+					Expr:   aggFirstRow(addedValExpr),
+					AsName: pmodel.NewCIStr(ac.deltaName),
+				},
+				&ast.SelectField{
+					Expr:   aggSumInt(ifExpr(addedCond, ast.NewValueExpr(int64(1), "", ""), ast.NewValueExpr(int64(0), "", ""))),
+					AsName: pmodel.NewCIStr(ac.addedCountDeltaName),
+				},
+				&ast.SelectField{
+					Expr:   aggFirstRow(removedValExpr),
+					AsName: pmodel.NewCIStr(ac.removedValueDelta),
+				},
+				&ast.SelectField{
+					Expr:   aggSumInt(ifExpr(removedCond, ast.NewValueExpr(int64(1), "", ""), ast.NewValueExpr(int64(0), "", ""))),
+					AsName: pmodel.NewCIStr(ac.removedCountDelta),
+				},
+			)
+		default:
+			return nil, errors.Errorf("unsupported agg kind %v", ac.info.Kind)
 		}
-		groupBy.Items = append(groupBy.Items, &ast.ByItem{Expr: baseColExpr, NullOrder: true})
+	}
+
+	outerGroupBy := &ast.GroupByClause{Items: make([]*ast.ByItem, 0, len(groupKeyOffsets))}
+	for _, mvOffset := range groupKeyOffsets {
+		outerGroupBy.Items = append(outerGroupBy.Items, &ast.ByItem{
+			Expr:      qualColExpr(deltaPhase1Alias, mvCols[mvOffset].Name.O),
+			NullOrder: true,
+		})
 	}
 
 	return &ast.SelectStmt{
-		Fields:  &ast.FieldList{Fields: fields},
-		From:    mlogFrom,
-		Where:   where,
-		GroupBy: groupBy,
+		Fields: &ast.FieldList{Fields: outerFields},
+		From: &ast.TableRefsClause{TableRefs: &ast.Join{
+			Left:  phase1Src,
+			Right: rowsSrc,
+			Tp:    ast.LeftJoin,
+			On:    &ast.OnCondition{Expr: onExpr},
+		}},
+		GroupBy: outerGroupBy,
 	}, nil
 }
 
@@ -1728,6 +1825,10 @@ func aggMax(arg ast.ExprNode) *ast.AggregateFuncExpr {
 
 func aggMin(arg ast.ExprNode) *ast.AggregateFuncExpr {
 	return &ast.AggregateFuncExpr{F: ast.AggFuncMin, Args: []ast.ExprNode{arg}}
+}
+
+func aggFirstRow(arg ast.ExprNode) *ast.AggregateFuncExpr {
+	return &ast.AggregateFuncExpr{F: ast.AggFuncFirstRow, Args: []ast.ExprNode{arg}}
 }
 
 func ifExpr(cond, trueExpr, falseExpr ast.ExprNode) *ast.FuncCallExpr {
