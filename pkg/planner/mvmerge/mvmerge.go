@@ -70,6 +70,9 @@ type BuildResult struct {
 	FullUpdateLookupTemplateSelect *ast.SelectStmt
 	// FullUpdateLookupColumnCount is the expected output column count of FullUpdateLookupTemplateSelect.
 	FullUpdateLookupColumnCount int
+	// FullUpdateLookupMVOffsets maps full-update lookup output columns to MV output offsets.
+	// Its length equals FullUpdateLookupColumnCount when FullUpdateLookupTemplateSelect is not nil.
+	FullUpdateLookupMVOffsets []int
 
 	MVTableID   int64
 	BaseTableID int64
@@ -357,8 +360,9 @@ func BuildFromLocal(
 	}
 	var fullUpdateSel *ast.SelectStmt
 	fullUpdateColumnCount := 0
+	var fullUpdateMVOffsets []int
 	if local.hasMinMax {
-		fullUpdateSel, err = buildFullUpdateLookupTemplateSelect(
+		fullUpdateSel, fullUpdateMVOffsets, err = buildFullUpdateLookupTemplateSelect(
 			local.sctx,
 			local.mvDBName,
 			local.baseTable,
@@ -375,6 +379,13 @@ func BuildFromLocal(
 			return nil, errors.New("mvmerge: full-update lookup template has nil field list")
 		}
 		fullUpdateColumnCount = len(fullUpdateSel.Fields.Fields)
+		if len(fullUpdateMVOffsets) != fullUpdateColumnCount {
+			return nil, errors.Errorf(
+				"mvmerge: full-update lookup template mv-offset mapping length mismatch: got %d, expected %d",
+				len(fullUpdateMVOffsets),
+				fullUpdateColumnCount,
+			)
+		}
 	}
 
 	mergeSel, deltaColumns, removedDelta, rowIDHandleOffset, err := buildMergeSourceSelect(
@@ -490,6 +501,7 @@ func BuildFromLocal(
 		SourceColumnCount:              expectedLen,
 		FullUpdateLookupTemplateSelect: fullUpdateSel,
 		FullUpdateLookupColumnCount:    fullUpdateColumnCount,
+		FullUpdateLookupMVOffsets:      append([]int(nil), fullUpdateMVOffsets...),
 		MVTableID:                      local.mv.ID,
 		BaseTableID:                    local.baseTableID,
 		MLogTableID:                    local.mlogTableID,
@@ -1398,7 +1410,7 @@ func buildFullUpdateLookupTemplateSelect(
 	groupKeySet map[int]struct{},
 	groupKeyOffsets []int,
 	aggCols []aggColInfo,
-) (*ast.SelectStmt, error) {
+) (*ast.SelectStmt, []int, error) {
 	outerSel, outerGKAliasByMVOffset, err := buildFullUpdateLookupOuterSelect(
 		sctx,
 		dbName,
@@ -1407,13 +1419,13 @@ func buildFullUpdateLookupTemplateSelect(
 		groupKeyOffsets,
 	)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	groupKeyBaseColByMVOffset := make(map[int]string, len(groupKeyOffsets))
 	for _, mvOffset := range groupKeyOffsets {
 		baseColExpr, err := groupKeyBaseColExprAtOffset(mvSel, mvOffset)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		groupKeyBaseColByMVOffset[mvOffset] = baseColExpr.Name.Name.O
 	}
@@ -1433,7 +1445,7 @@ func buildFullUpdateLookupTemplateSelect(
 		aggCols,
 	)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	outerSrc := &ast.TableSource{Source: outerSel, AsName: pmodel.NewCIStr(fullUpdateOuterAlias)}
@@ -1446,10 +1458,11 @@ func buildFullUpdateLookupTemplateSelect(
 		onExpr = andExpr(onExpr, binary(opcode.EQ, outerGK, innerGK))
 	}
 	if onExpr == nil {
-		return nil, errors.New("mvmerge: empty group key offsets for full-update lookup template")
+		return nil, nil, errors.New("mvmerge: empty group key offsets for full-update lookup template")
 	}
 
 	fields := make([]*ast.SelectField, 0, len(mvCols))
+	mvOffsets := make([]int, 0, len(mvCols))
 	for mvOffset, mvCol := range mvCols {
 		// Full-update fallback only returns group keys and MIN/MAX aggregate columns.
 		if kind, ok := aggKindByMVOffset[mvOffset]; ok && kind != AggMin && kind != AggMax {
@@ -1463,6 +1476,7 @@ func buildFullUpdateLookupTemplateSelect(
 			Expr:   qualColExpr(fullUpdateInnerAlias, outColName),
 			AsName: mvCol.Name,
 		})
+		mvOffsets = append(mvOffsets, mvOffset)
 	}
 
 	return &ast.SelectStmt{
@@ -1484,7 +1498,7 @@ func buildFullUpdateLookupTemplateSelect(
 				},
 			},
 		},
-	}, nil
+	}, mvOffsets, nil
 }
 
 func buildFullUpdateLookupOuterSelect(

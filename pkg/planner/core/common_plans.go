@@ -591,6 +591,10 @@ type MVDeltaMerge struct {
 	FullUpdateIndexRanges ranger.MutableRanges
 	// FullUpdateKeyOff2IdxOff maps lookup key offsets to index column offsets in FullUpdateIndexRanges.
 	FullUpdateKeyOff2IdxOff []int
+	// FullUpdateKeyResultColIdxes maps lookup key offsets to output column indexes in FullUpdateInnerSource.
+	FullUpdateKeyResultColIdxes []int `plan-cache-clone:"shallow"`
+	// FullUpdateOutputMVOffsets maps FullUpdateInnerSource output columns to MV output offsets.
+	FullUpdateOutputMVOffsets []int `plan-cache-clone:"shallow"`
 
 	MVTableID   int64
 	BaseTableID int64
@@ -696,6 +700,8 @@ func (p *MVDeltaMerge) MemoryUsage() (sum int64) {
 		sum += name.MemoryUsage()
 	}
 	sum += int64(cap(p.FullUpdateKeyOff2IdxOff)) * size.SizeOfInt
+	sum += int64(cap(p.FullUpdateKeyResultColIdxes)) * size.SizeOfInt
+	sum += int64(cap(p.FullUpdateOutputMVOffsets)) * size.SizeOfInt
 	if p.Source != nil {
 		sum += p.Source.MemoryUsage()
 	}

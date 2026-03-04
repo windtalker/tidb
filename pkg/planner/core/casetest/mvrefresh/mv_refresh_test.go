@@ -248,6 +248,22 @@ func TestBuildRefreshMVFastPlanWithMinMaxHasFullUpdate(t *testing.T) {
 	require.Equal(t, len(mergePlan.GroupKeyMVOffsets)+minMaxCount, mergePlan.FullUpdateInnerColumnCount)
 	require.NotNil(t, mergePlan.FullUpdateIndexRanges)
 	require.Len(t, mergePlan.FullUpdateKeyOff2IdxOff, len(mergePlan.GroupKeyMVOffsets))
+	require.Len(t, mergePlan.FullUpdateKeyResultColIdxes, len(mergePlan.GroupKeyMVOffsets))
+	require.Len(t, mergePlan.FullUpdateOutputMVOffsets, mergePlan.FullUpdateInnerColumnCount)
+	for i, keyResultColIdx := range mergePlan.FullUpdateKeyResultColIdxes {
+		require.GreaterOrEqual(t, keyResultColIdx, 0)
+		require.Less(t, keyResultColIdx, mergePlan.FullUpdateInnerColumnCount)
+		require.Equal(t, mergePlan.GroupKeyMVOffsets[i], mergePlan.FullUpdateOutputMVOffsets[keyResultColIdx])
+	}
+	mvOffsetCount := make(map[int]int, len(mergePlan.FullUpdateOutputMVOffsets))
+	for _, mvOffset := range mergePlan.FullUpdateOutputMVOffsets {
+		mvOffsetCount[mvOffset]++
+	}
+	for _, ai := range mergePlan.AggInfos {
+		if ai.Kind == mvmerge.AggMin || ai.Kind == mvmerge.AggMax {
+			require.Equal(t, 1, mvOffsetCount[ai.MVOffset])
+		}
+	}
 
 	savedIgnoreExplainIDSuffix := sctx.GetSessionVars().StmtCtx.IgnoreExplainIDSuffix
 	sctx.GetSessionVars().StmtCtx.IgnoreExplainIDSuffix = true
