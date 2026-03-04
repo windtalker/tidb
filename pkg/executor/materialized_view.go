@@ -17,7 +17,6 @@ package executor
 import (
 	"context"
 	"fmt"
-	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -1062,7 +1061,7 @@ func (e *RefreshMaterializedViewExec) executeRefreshMaterializedViewCompleteOutO
 	s *ast.RefreshMaterializedViewStmt,
 	schemaName pmodel.CIStr,
 	tblInfo *model.TableInfo,
-	expectedLastSuccessReadTSO int64,
+	expectedLastSuccessReadTSO uint64,
 	expectedLastSuccessReadTSONull bool,
 ) (buildReadTSO uint64, err error) {
 	buildSctx, err := e.GetSysSession()
@@ -1456,7 +1455,7 @@ func readRefreshInfoReadTSO(
 	refreshSctx sessionctx.Context,
 	sqlExec sqlexec.SQLExecutor,
 	mviewID int64,
-) (readTSO int64, readTSONull bool, queryStartTS uint64, err error) {
+) (readTSO uint64, readTSONull bool, queryStartTS uint64, err error) {
 	readTxnStarted := false
 	defer func() {
 		if !readTxnStarted {
@@ -1479,7 +1478,7 @@ func readRefreshInfoReadTSO(
 		return 0, false, 0, errors.Trace(err)
 	}
 	queryStartTS = txn.StartTS()
-	if queryStartTS == 0 || queryStartTS > uint64(math.MaxInt64) {
+	if queryStartTS == 0 {
 		return 0, false, 0, errors.New("refresh materialized view: invalid transaction start tso for refresh info read")
 	}
 
@@ -1595,7 +1594,7 @@ func executeRefreshMaterializedViewFast(
 	sqlExec sqlexec.SQLExecutor,
 	sessVars *variable.SessionVars,
 	s *ast.RefreshMaterializedViewStmt,
-	lastSuccessfulRefreshReadTSO int64,
+	lastSuccessfulRefreshReadTSO uint64,
 ) error {
 	implementStmt := &ast.RefreshMaterializedViewImplementStmt{
 		RefreshStmt:                  s,

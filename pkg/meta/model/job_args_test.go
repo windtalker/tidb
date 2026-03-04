@@ -595,11 +595,12 @@ func TestGetAlterMaterializedViewLogPurgeArgs(t *testing.T) {
 
 func TestGetRefreshMaterializedViewCompleteOutOfPlaceCutoverArgs(t *testing.T) {
 	nextTime := "2030-01-01 00:00:00"
+	largeTSO := (uint64(1) << 63) + 404
 	inArgs := &RefreshMaterializedViewCompleteOutOfPlaceCutoverArgs{
 		OldMViewID:                     101,
 		ShadowTableID:                  202,
 		BuildReadTSO:                   303,
-		ExpectedLastSuccessReadTSO:     404,
+		ExpectedLastSuccessReadTSO:     largeTSO,
 		ExpectedLastSuccessReadTSONull: false,
 		NextTime:                       &nextTime,
 		ShouldUpdateNextTime:           true,

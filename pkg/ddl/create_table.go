@@ -710,7 +710,7 @@ func (w *worker) buildCreateMaterializedViewData(ctx context.Context, storeName 
 //
 // Rationale (see docs/design/materialized_view/mv_log_purge.md):
 //  1. PURGE MATERIALIZED VIEW LOG computes safe_purge_tso from
-//     MIN(COALESCE(LAST_SUCCESS_READ_TSO, 0)) across dependent MVs,
+//     MIN(COALESCE(LAST_SUCCESS_READ_TSO, CAST(0 AS UNSIGNED))) across dependent MVs,
 //     including in-building CREATE MATERIALIZED VIEW jobs.
 //  2. If the refresh row is only visible after the DDL step transaction commits,
 //     purge can miss this in-building MV and delete MLog rows that are still
