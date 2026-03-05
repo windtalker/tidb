@@ -117,6 +117,17 @@ func (e *PurgeMaterializedViewLogExec) executePurgeMaterializedViewLog(
 		return err
 	}
 	defer e.ReleaseSysSession(kctx, purgeSctx)
+	purgeSessVars := purgeSctx.GetSessionVars()
+	targetMaintainMemQuota, err := resolveMVMaintenanceMemQuota(kctx, e.Ctx().GetSessionVars(), isInternalSQL)
+	if err != nil {
+		return err
+	}
+	restorePurgeMemQuota, err := applyMVMaintenanceMemQuota(purgeSessVars, targetMaintainMemQuota)
+	if err != nil {
+		return err
+	}
+	defer restorePurgeMemQuota()
+	failpoint.InjectCall("mvMaintainMemQuotaAppliedOnPurgeSession", purgeSessVars.MemQuotaQuery, targetMaintainMemQuota)
 	sqlExec := purgeSctx.GetSQLExecutor()
 
 	histSctx, err := e.GetSysSession()
@@ -362,7 +373,7 @@ func calcMaterializedViewLogSafePurgeTSO(
 	}
 	if len(allIDs) > 0 {
 		minSQL := fmt.Sprintf(
-			"SELECT MIN(COALESCE(LAST_SUCCESS_READ_TSO, 0)) FROM mysql.tidb_mview_refresh_info WHERE MVIEW_ID IN (%s)",
+			"SELECT MIN(COALESCE(LAST_SUCCESS_READ_TSO, CAST(0 AS UNSIGNED))) FROM mysql.tidb_mview_refresh_info WHERE MVIEW_ID IN (%s)",
 			buildINList(allIDs),
 		)
 		minRows, err := sqlexec.ExecSQL(kctx, sqlExec, minSQL)
@@ -374,14 +385,9 @@ func calcMaterializedViewLogSafePurgeTSO(
 		}
 
 		if len(minRows) > 0 && !minRows[0].IsNull(0) {
-			v := minRows[0].GetInt64(0)
-			if v <= 0 {
-				safePurgeTSO = 0
-			} else {
-				safePurgeTSO = uint64(v)
-				if safePurgeTSO > purgeStartTS {
-					safePurgeTSO = purgeStartTS
-				}
+			safePurgeTSO = minRows[0].GetUint64(0)
+			if safePurgeTSO > purgeStartTS {
+				safePurgeTSO = purgeStartTS
 			}
 		}
 	}
@@ -485,11 +491,7 @@ func acquireMaterializedViewLogPurgeLock(
 	if rows[0].IsNull(0) {
 		return 0, false, nil
 	}
-	v := rows[0].GetInt64(0)
-	if v < 0 {
-		return 0, false, errors.Errorf("invalid LAST_PURGED_TSO %d for mlog id %d", v, mlogID)
-	}
-	return uint64(v), true, nil
+	return rows[0].GetUint64(0), true, nil
 }
 
 func isMLogPurgeLockConflict(err error) bool {
@@ -768,6 +770,16 @@ func (e *RefreshMaterializedViewExec) executeRefreshMaterializedView(kctx contex
 	defer e.ReleaseSysSession(kctx, refreshSctx)
 	sqlExec := refreshSctx.GetSQLExecutor()
 	sessVars := refreshSctx.GetSessionVars()
+	targetMaintainMemQuota, err := resolveMVMaintenanceMemQuota(kctx, e.Ctx().GetSessionVars(), isInternalSQL)
+	if err != nil {
+		return err
+	}
+	restoreRefreshMemQuota, err := applyMVMaintenanceMemQuota(sessVars, targetMaintainMemQuota)
+	if err != nil {
+		return err
+	}
+	defer restoreRefreshMemQuota()
+	failpoint.InjectCall("mvMaintainMemQuotaAppliedOnRefreshSession", sessVars.MemQuotaQuery, targetMaintainMemQuota)
 
 	restoreSessVars, err := initRefreshMaterializedViewSession(sessVars, tblInfo.MaterializedView)
 	if err != nil {
@@ -877,9 +889,9 @@ func (e *RefreshMaterializedViewExec) executeRefreshMaterializedView(kctx contex
 	failpoint.InjectCall("refreshMaterializedViewAfterInsertRefreshHistRunning")
 	failpoint.Inject("pauseRefreshMaterializedViewAfterInsertRefreshHistRunning", func() {})
 
-	var lastSuccessfulRefreshReadTSO int64
+	var lastSuccessfulRefreshReadTSO uint64
 	if s.Type == ast.RefreshMaterializedViewTypeFast {
-		// LAST_SUCCESS_READ_TSO is BIGINT DEFAULT NULL. FAST refresh requires it to be non-NULL.
+		// LAST_SUCCESS_READ_TSO is BIGINT UNSIGNED DEFAULT NULL. FAST refresh requires it to be non-NULL.
 		if lockedReadTSONull {
 			return finalizeFailure(errors.New("refresh materialized view fast: LAST_SUCCESS_READ_TSO is NULL"))
 		}
@@ -959,6 +971,47 @@ func (e *RefreshMaterializedViewExec) executeRefreshMaterializedView(kctx contex
 		)
 	}
 	return nil
+}
+
+func applyMVMaintenanceMemQuota(sessVars *variable.SessionVars, targetMemQuota int64) (func(), error) {
+	if sessVars == nil {
+		return nil, errors.New("mv maintenance: session vars is nil")
+	}
+	originMemQuota := sessVars.MemQuotaQuery
+	if originMemQuota == targetMemQuota {
+		return func() {}, nil
+	}
+	if err := sessVars.SetSystemVar(variable.TiDBMemQuotaQuery, strconv.FormatInt(targetMemQuota, 10)); err != nil {
+		return nil, errors.Annotate(err, "mv maintenance: failed to apply tidb_mv_maintain_mem_quota to tidb_mem_quota_query")
+	}
+	return func() {
+		if err := sessVars.SetSystemVar(variable.TiDBMemQuotaQuery, strconv.FormatInt(originMemQuota, 10)); err != nil {
+			logutil.BgLogger().Warn(
+				"mv maintenance: failed to restore tidb_mem_quota_query after using tidb_mv_maintain_mem_quota",
+				zap.Int64("originMemQuota", originMemQuota),
+				zap.Int64("targetMemQuota", targetMemQuota),
+				zap.Error(err),
+			)
+		}
+	}, nil
+}
+
+func resolveMVMaintenanceMemQuota(kctx context.Context, sessVars *variable.SessionVars, isInternalSQL bool) (int64, error) {
+	if sessVars == nil {
+		return 0, errors.New("mv maintenance: session vars is nil")
+	}
+	if !isInternalSQL {
+		return sessVars.MVMaintainMemQuota, nil
+	}
+	globalQuotaVal, err := sessVars.GetGlobalSystemVar(kctx, variable.TiDBMVMaintainMemQuota)
+	if err != nil {
+		return 0, errors.Annotate(err, "mv maintenance: failed to read global tidb_mv_maintain_mem_quota")
+	}
+	globalQuota, err := strconv.ParseInt(globalQuotaVal, 10, 64)
+	if err != nil {
+		return 0, errors.Annotate(err, "mv maintenance: invalid global tidb_mv_maintain_mem_quota")
+	}
+	return globalQuota, nil
 }
 
 func initRefreshMaterializedViewSession(
@@ -1073,7 +1126,7 @@ func lockRefreshInfoRow(
 	kctx context.Context,
 	sqlExec sqlexec.SQLExecutor,
 	mviewID int64,
-) (lockedReadTSO int64, lockedReadTSONull bool, err error) {
+) (lockedReadTSO uint64, lockedReadTSONull bool, err error) {
 	lockRS, err := sqlExec.ExecuteInternal(
 		kctx,
 		// Also select LAST_SUCCESS_READ_TSO so FAST refresh can reuse this mutex/metadata load path.
@@ -1104,7 +1157,7 @@ func lockRefreshInfoRow(
 	lockedRow := lockRows[0]
 	lockedReadTSONull = lockedRow.IsNull(1)
 	if !lockedReadTSONull {
-		lockedReadTSO = lockedRow.GetInt64(1)
+		lockedReadTSO = lockedRow.GetUint64(1)
 	}
 	return lockedReadTSO, lockedReadTSONull, nil
 }
@@ -1113,7 +1166,7 @@ func readRefreshInfoReadTSO(
 	kctx context.Context,
 	sqlExec sqlexec.SQLExecutor,
 	mviewID int64,
-) (readTSO int64, readTSONull bool, err error) {
+) (readTSO uint64, readTSONull bool, err error) {
 	recheckRS, err := sqlExec.ExecuteInternal(
 		kctx,
 		"SELECT LAST_SUCCESS_READ_TSO FROM mysql.tidb_mview_refresh_info WHERE MVIEW_ID = %?",
@@ -1142,7 +1195,7 @@ func readRefreshInfoReadTSO(
 	recheckRow := recheckRows[0]
 	readTSONull = recheckRow.IsNull(0)
 	if !readTSONull {
-		readTSO = recheckRow.GetInt64(0)
+		readTSO = recheckRow.GetUint64(0)
 	}
 	return readTSO, readTSONull, nil
 }
@@ -1154,7 +1207,7 @@ func executeRefreshMaterializedViewDataChanges(
 	s *ast.RefreshMaterializedViewStmt,
 	schemaName pmodel.CIStr,
 	tblInfo *model.TableInfo,
-	lastSuccessfulRefreshReadTSO int64,
+	lastSuccessfulRefreshReadTSO uint64,
 ) error {
 	// TiFlash read is blocked for write statements when sql_mode is strict. Refresh prefers TiFlash for the
 	// scan part, so we bypass this guard for MV maintenance statements.
@@ -1437,7 +1490,7 @@ func persistRefreshSuccess(
 	kctx context.Context,
 	sqlExec sqlexec.SQLExecutor,
 	mviewID int64,
-	lockedReadTSO int64,
+	lockedReadTSO uint64,
 	lockedReadTSONull bool,
 	refreshReadTSO uint64,
 	nextTime *string,
@@ -1476,7 +1529,7 @@ WHERE MVIEW_ID = %%? AND LAST_SUCCESS_READ_TSO <=> %%?`,
 	if err != nil {
 		return err
 	}
-	if persistedReadTSONull || persistedReadTSO < 0 || uint64(persistedReadTSO) != refreshReadTSO {
+	if persistedReadTSONull || persistedReadTSO != refreshReadTSO {
 		return errors.New("refresh materialized view: inconsistent LAST_SUCCESS_READ_TSO after success update")
 	}
 	return nil
