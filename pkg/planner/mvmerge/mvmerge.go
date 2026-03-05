@@ -145,7 +145,7 @@ type AggInfo struct {
 	//     - [added_val, added_cnt, removed_val, removed_cnt] when argument is NOT NULL.
 	//     - [added_val, added_cnt, removed_val, removed_cnt, matched_count_expr_mv] otherwise.
 	//     - added_cnt/removed_cnt are counts of rows whose argument equals added_val/removed_val
-	//       in the added/removed subdomain respectively (max_count/min_count semantics).
+	//       in the added/removed subdomain respectively (MAX/MIN_COUNT semantics).
 	Dependencies []int
 }
 
