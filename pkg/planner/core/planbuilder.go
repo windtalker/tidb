@@ -3898,12 +3898,7 @@ func (b *PlanBuilder) buildRefreshMaterializedViewImplement(ctx context.Context,
 		return pp, nil
 	}
 
-	local, err := mvmerge.BuildLocal(b.ctx, b.is, mvInfo)
-	if err != nil {
-		return nil, err
-	}
-
-	res, err := mvmerge.BuildFromLocal(local, mvmerge.BuildOptions{FromTS: fromTS}, nil)
+	res, err := mvmerge.Build(b.ctx, b.is, mvInfo, mvmerge.BuildOptions{FromTS: fromTS}, nil)
 	if err != nil {
 		return nil, err
 	}

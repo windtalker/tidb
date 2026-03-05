@@ -119,7 +119,7 @@ func TestBuildCountSum(t *testing.T) {
 	is := infoschema.MockInfoSchema([]*model.TableInfo{base, mlog, mv})
 	domain.GetDomain(sctx).MockInfoCacheAndLoadInfoSchema(is)
 
-	res, err := mvmerge.BuildForTest(
+	res, err := mvmerge.Build(
 		sctx.GetPlanCtx(),
 		is,
 		mv,
@@ -220,7 +220,7 @@ func TestBuildCountExprSumExpr(t *testing.T) {
 	is := infoschema.MockInfoSchema([]*model.TableInfo{base, mlog, mv})
 	domain.GetDomain(sctx).MockInfoCacheAndLoadInfoSchema(is)
 
-	res, err := mvmerge.BuildForTest(
+	res, err := mvmerge.Build(
 		sctx.GetPlanCtx(),
 		is,
 		mv,
@@ -332,7 +332,7 @@ func TestBuildMinMaxHasRemovedGate(t *testing.T) {
 	is := infoschema.MockInfoSchema([]*model.TableInfo{base, mlog, mv})
 	domain.GetDomain(sctx).MockInfoCacheAndLoadInfoSchema(is)
 
-	res, err := mvmerge.BuildForTest(
+	res, err := mvmerge.Build(
 		sctx.GetPlanCtx(),
 		is,
 		mv,
@@ -518,7 +518,7 @@ func TestBuildSumWithoutCountExpr(t *testing.T) {
 	is := infoschema.MockInfoSchema([]*model.TableInfo{base, mlog, mv})
 	domain.GetDomain(sctx).MockInfoCacheAndLoadInfoSchema(is)
 
-	_, err := mvmerge.BuildForTest(
+	_, err := mvmerge.Build(
 		sctx.GetPlanCtx(),
 		is,
 		mv,
@@ -578,7 +578,7 @@ func TestBuildMissingCountStar(t *testing.T) {
 	is := infoschema.MockInfoSchema([]*model.TableInfo{base, mlog, mv})
 	domain.GetDomain(sctx).MockInfoCacheAndLoadInfoSchema(is)
 
-	_, err := mvmerge.BuildForTest(
+	_, err := mvmerge.Build(
 		sctx.GetPlanCtx(),
 		is,
 		mv,
@@ -634,7 +634,7 @@ func TestBuildMissingOldNew(t *testing.T) {
 	is := infoschema.MockInfoSchema([]*model.TableInfo{base, mlog, mv})
 	domain.GetDomain(sctx).MockInfoCacheAndLoadInfoSchema(is)
 
-	_, err := mvmerge.BuildForTest(
+	_, err := mvmerge.Build(
 		sctx.GetPlanCtx(),
 		is,
 		mv,
