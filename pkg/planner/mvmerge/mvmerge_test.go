@@ -444,7 +444,7 @@ func TestBuildMinMaxNullableDependencyOrder(t *testing.T) {
 	is := infoschema.MockInfoSchema([]*model.TableInfo{base, mlog, mv})
 	domain.GetDomain(sctx).MockInfoCacheAndLoadInfoSchema(is)
 
-	res, err := mvmerge.BuildForTest(
+	res, err := mvmerge.Build(
 		sctx.GetPlanCtx(),
 		is,
 		mv,
