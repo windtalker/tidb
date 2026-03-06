@@ -539,7 +539,7 @@ func (e *executor) RefreshMaterializedViewCompleteOutOfPlaceCutover(
 	oldMViewID int64,
 	shadowTableID int64,
 	buildReadTSO uint64,
-	expectedLastSuccessReadTSO int64,
+	expectedLastSuccessReadTSO uint64,
 	expectedLastSuccessReadTSONull bool,
 ) error {
 	job := &model.Job{

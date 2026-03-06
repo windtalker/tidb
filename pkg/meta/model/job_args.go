@@ -765,7 +765,7 @@ type RefreshMaterializedViewCompleteOutOfPlaceCutoverArgs struct {
 	OldMViewID                     int64  `json:"old_mview_id,omitempty"`
 	ShadowTableID                  int64  `json:"shadow_table_id,omitempty"`
 	BuildReadTSO                   uint64 `json:"build_read_tso,omitempty"`
-	ExpectedLastSuccessReadTSO     int64  `json:"expected_last_success_read_tso,omitempty"`
+	ExpectedLastSuccessReadTSO     uint64 `json:"expected_last_success_read_tso,omitempty"`
 	ExpectedLastSuccessReadTSONull bool   `json:"expected_last_success_read_tso_null,omitempty"`
 }
 

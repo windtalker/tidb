@@ -124,7 +124,7 @@ type Executor interface {
 		oldMViewID int64,
 		shadowTableID int64,
 		buildReadTSO uint64,
-		expectedLastSuccessReadTSO int64,
+		expectedLastSuccessReadTSO uint64,
 		expectedLastSuccessReadTSONull bool,
 	) error
 	RecoverTable(ctx sessionctx.Context, recoverTableInfo *model.RecoverTableInfo) (err error)

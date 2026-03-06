@@ -805,7 +805,7 @@ func (e *RefreshMaterializedViewExec) executeRefreshMaterializedView(kctx contex
 	if err != nil {
 		return err
 	}
-	stepSet, err := newMVRefreshStepSet(s.Type)
+	stepSet, err := newMVRefreshStepSet(s.Type, s.OutOfPlace)
 	if err != nil {
 		return err
 	}
@@ -884,6 +884,7 @@ func (e *RefreshMaterializedViewExec) executeRefreshMaterializedView(kctx contex
 			schemaName,
 			tblInfo,
 			refreshMethod,
+			stepSet,
 			expectedLastSuccessReadTSO,
 			expectedLastSuccessReadTSONull,
 		)
@@ -1103,7 +1104,8 @@ func (e *RefreshMaterializedViewExec) executeRefreshMaterializedViewCompleteOutO
 	schemaName pmodel.CIStr,
 	tblInfo *model.TableInfo,
 	_ string,
-	expectedLastSuccessReadTSO int64,
+	stepSet mvRefreshStepSet,
+	expectedLastSuccessReadTSO uint64,
 	expectedLastSuccessReadTSONull bool,
 ) (err error) {
 	buildSctx, err := e.GetSysSession()
@@ -1156,43 +1158,55 @@ func (e *RefreshMaterializedViewExec) executeRefreshMaterializedViewCompleteOutO
 		schemaName.O,
 		s.ViewName.Name.O,
 	)
-	if err = executeRefreshMaterializedViewInternalSQL(kctx, buildSQLExec, createShadowSQL); err != nil {
+	if err := observeMVRefreshStep(e.stepObserver, stepSet.dataChangeOutOfPlaceCreateShadow, func() error {
+		if execErr := executeRefreshMaterializedViewInternalSQL(kctx, buildSQLExec, createShadowSQL); execErr != nil {
+			return execErr
+		}
+		shadowCreated = true
+		return nil
+	}); err != nil {
 		return err
 	}
-	shadowCreated = true
 
 	failpoint.InjectCall("refreshMaterializedViewOutOfPlaceAfterCreateShadow")
 	failpoint.Inject("pauseRefreshMaterializedViewOutOfPlaceAfterCreateShadow", func() {})
-	buildReadTSO, err := executeMVRefreshOutOfPlaceBuildDataAndGetReadTSO(
-		kctx,
-		buildSQLExec,
-		schemaName,
-		shadowTableName,
-		tblInfo,
-		e.Ctx().GetStore().Name(),
-	)
-	if err != nil {
+	var buildReadTSO uint64
+	if err := observeMVRefreshStep(e.stepObserver, stepSet.dataChangeOutOfPlaceLoadShadow, func() error {
+		var buildErr error
+		buildReadTSO, buildErr = executeMVRefreshOutOfPlaceBuildDataAndGetReadTSO(
+			kctx,
+			buildSQLExec,
+			schemaName,
+			shadowTableName,
+			tblInfo,
+			e.Ctx().GetStore().Name(),
+		)
+		return buildErr
+	}); err != nil {
 		return err
 	}
+	emitMVRefreshStepPlanRows(e.stepObserver, stepSet.dataChangeOutOfPlaceLoadShadow, buildSessVars, e.planFormatForObserver)
 	failpoint.InjectCall("refreshMaterializedViewOutOfPlaceAfterBuildDataLoad", buildReadTSO)
 	failpoint.Inject("pauseRefreshMaterializedViewOutOfPlaceAfterBuildDataLoad", func() {})
-
-	shadowTableID, err := getMVRefreshOutOfPlaceShadowTableID(kctx, buildSctx, schemaName, shadowTableName)
-	if err != nil {
-		return err
-	}
-
-	return domain.GetDomain(e.Ctx()).DDLExecutor().RefreshMaterializedViewCompleteOutOfPlaceCutover(
-		e.Ctx(),
-		tblInfo.DBID,
-		schemaName,
-		s.ViewName.Name,
-		tblInfo.ID,
-		shadowTableID,
-		buildReadTSO,
-		expectedLastSuccessReadTSO,
-		expectedLastSuccessReadTSONull,
-	)
+	var shadowTableID int64
+	return observeMVRefreshStep(e.stepObserver, stepSet.dataChangeOutOfPlaceCutover, func() error {
+		var lookupErr error
+		shadowTableID, lookupErr = getMVRefreshOutOfPlaceShadowTableID(kctx, buildSctx, schemaName, shadowTableName)
+		if lookupErr != nil {
+			return lookupErr
+		}
+		return domain.GetDomain(e.Ctx()).DDLExecutor().RefreshMaterializedViewCompleteOutOfPlaceCutover(
+			e.Ctx(),
+			tblInfo.DBID,
+			schemaName,
+			s.ViewName.Name,
+			tblInfo.ID,
+			shadowTableID,
+			buildReadTSO,
+			expectedLastSuccessReadTSO,
+			expectedLastSuccessReadTSONull,
+		)
+	})
 }
 
 func applyMVMaintenanceMemQuota(sessVars *variable.SessionVars, targetMemQuota int64) (func(), error) {
