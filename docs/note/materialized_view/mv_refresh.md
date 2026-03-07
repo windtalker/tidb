@@ -332,7 +332,7 @@ Core execution semantics:
   - cutover and `mysql.tidb_mview_refresh_info` migration/update are done atomically in DDL worker transaction.
 - For `FAST`, executor constructs `RefreshMaterializedViewImplementStmt` with:
   - original `RefreshMaterializedViewStmt` (must be `Type=FAST`)
-  - `LAST_SUCCESS_READ_TSO` value (must be non-`NULL` int64)
+  - `LAST_SUCCESS_READ_TSO` value (must be non-`NULL` uint64 / `BIGINT UNSIGNED`)
 - `FAST` execution goes through `ExecuteInternalStmt(ctx, stmtNode)`.
 - If `ExecuteInternalStmt` returns non-nil `RecordSet`, refresh drains it before `Close()` to guarantee full executor-tree execution.
 - `RefreshMaterializedViewStmt` is a normal `StmtNode` with no DDL-statement semantics

@@ -1321,8 +1321,8 @@ WHERE MVIEW_ID = %? AND LAST_SUCCESS_READ_TSO <=> %?`,
 			"refresh materialized view complete OUT OF PLACE cutover: inconsistent refresh info row after migration",
 		)
 	}
-	persistedReadTSO := verifyRows[0].GetInt64(0)
-	if persistedReadTSO < 0 || uint64(persistedReadTSO) != args.BuildReadTSO {
+	persistedReadTSO := verifyRows[0].GetUint64(0)
+	if persistedReadTSO != args.BuildReadTSO {
 		return dbterror.ErrInvalidDDLJob.GenWithStackByArgs(
 			"refresh materialized view complete OUT OF PLACE cutover: inconsistent LAST_SUCCESS_READ_TSO after migration",
 		)

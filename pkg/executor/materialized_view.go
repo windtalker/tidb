@@ -1185,6 +1185,16 @@ func (e *RefreshMaterializedViewExec) executeRefreshMaterializedViewCompleteOutO
 	}); err != nil {
 		return err
 	}
+	failpoint.Inject("mockRefreshMaterializedViewOutOfPlaceBuildReadTSO", func(val failpoint.Value) {
+		s, ok := val.(string)
+		if !ok {
+			return
+		}
+		overrideTSO, parseErr := strconv.ParseUint(s, 10, 64)
+		if parseErr == nil && overrideTSO > 0 {
+			buildReadTSO = overrideTSO
+		}
+	})
 	emitMVRefreshStepPlanRows(e.stepObserver, stepSet.dataChangeOutOfPlaceLoadShadow, buildSessVars, e.planFormatForObserver)
 	failpoint.InjectCall("refreshMaterializedViewOutOfPlaceAfterBuildDataLoad", buildReadTSO)
 	failpoint.Inject("pauseRefreshMaterializedViewOutOfPlaceAfterBuildDataLoad", func() {})
