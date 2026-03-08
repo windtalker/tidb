@@ -67,16 +67,13 @@ func (e *executor) CreateMaterializedView(ctx sessionctx.Context, s *ast.CreateM
 	if baseTableName.Schema.L == "" {
 		baseTableName.Schema = schemaName
 	}
-	if baseTableName.Schema.L != schemaName.L {
-		return dbterror.ErrGeneralUnsupportedDDL.GenWithStack("CREATE MATERIALIZED VIEW only supports base table in the same schema")
-	}
 
 	baseTable, err := is.TableByName(e.ctx, baseTableName.Schema, baseTableName.Name)
 	if err != nil {
 		return err
 	}
 	if baseTable.Meta().IsView() || baseTable.Meta().IsSequence() || baseTable.Meta().TempTableType != model.TempTableNone {
-		return dbterror.ErrWrongObject.GenWithStackByArgs(schemaName, baseTableName.Name, "BASE TABLE")
+		return dbterror.ErrWrongObject.GenWithStackByArgs(baseTableName.Schema, baseTableName.Name, "BASE TABLE")
 	}
 	baseTableID := baseTable.Meta().ID
 
@@ -174,6 +171,7 @@ func (e *executor) CreateMaterializedView(ctx sessionctx.Context, s *ast.CreateM
 	tzName, tzOffset := ddlutil.GetTimeZone(ctx)
 	mvTableInfo.MaterializedView = &model.MaterializedViewInfo{
 		BaseTableIDs:      []int64{baseTableID},
+		BaseSchemaIDs:     []int64{baseTable.Meta().DBID},
 		SQLContent:        selectSQL,
 		RefreshMethod:     refreshMethod,
 		RefreshStartWith:  refreshStartWith,
@@ -188,8 +186,8 @@ func (e *executor) CreateMaterializedView(ctx sessionctx.Context, s *ast.CreateM
 	// CREATE MATERIALIZED VIEW is submitted as reorg DDL: create table first, then initial build in reorg phase.
 	involvingSchemas := []model.InvolvingSchemaInfo{
 		{Database: schema.Name.L, Table: mvTableInfo.Name.L},
-		{Database: schema.Name.L, Table: baseTable.Meta().Name.L},
-		{Database: schema.Name.L, Table: mlogTable.Meta().Name.L},
+		{Database: baseTableName.Schema.L, Table: baseTable.Meta().Name.L},
+		{Database: baseTableName.Schema.L, Table: mlogTable.Meta().Name.L},
 	}
 	job := &model.Job{
 		Version:             model.GetJobVerInUse(),
@@ -207,7 +205,10 @@ func (e *executor) CreateMaterializedView(ctx sessionctx.Context, s *ast.CreateM
 		return err
 	}
 	job.AddSessionVars(variable.TiDBScatterRegion, getScatterScopeFromSessionctx(ctx))
-	jobW := NewJobWrapperWithArgs(job, &model.CreateMaterializedViewArgs{TableInfo: mvTableInfo, MLogTableID: mlogTable.Meta().ID}, false)
+	jobW := NewJobWrapperWithArgs(job, &model.CreateMaterializedViewArgs{
+		TableInfo:    mvTableInfo,
+		MLogTableIDs: []int64{mlogTable.Meta().ID},
+	}, false)
 	if err := e.DoDDLJobWrapper(ctx, jobW); err != nil {
 		return errors.Trace(err)
 	}

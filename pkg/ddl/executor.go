@@ -761,6 +761,10 @@ func (e *executor) DropSchema(ctx sessionctx.Context, stmt *ast.DropDatabaseStmt
 	if err != nil {
 		return err
 	}
+	err = checkDatabaseHasCrossSchemaMaterializedViewReferred(e.ctx, is, old.Name)
+	if err != nil {
+		return err
+	}
 	job := &model.Job{
 		Version:        model.GetJobVerInUse(),
 		SchemaID:       old.ID,

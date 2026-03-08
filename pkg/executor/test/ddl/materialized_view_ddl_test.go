@@ -94,6 +94,7 @@ func TestMaterializedViewDDLBasic(t *testing.T) {
 
 	require.NotNil(t, mvTable.Meta().MaterializedView)
 	require.Equal(t, []int64{baseTable.Meta().ID}, mvTable.Meta().MaterializedView.BaseTableIDs)
+	require.Equal(t, []int64{baseTable.Meta().DBID}, mvTable.Meta().MaterializedView.BaseSchemaIDs)
 	require.Equal(t, "FAST", mvTable.Meta().MaterializedView.RefreshMethod)
 	require.Equal(t, "", mvTable.Meta().MaterializedView.RefreshStartWith)
 	require.Equal(t, "NOW()", mvTable.Meta().MaterializedView.RefreshNext)
@@ -1016,6 +1017,76 @@ func TestDropMaterializedViewLogRecheckWithConcurrentCreateMaterializedView(t *t
 	baseTable, err := is.TableByName(context.Background(), pmodel.NewCIStr("test"), pmodel.NewCIStr("t"))
 	require.NoError(t, err)
 	require.True(t, baseTable.Meta().MaterializedViewBase == nil || (baseTable.Meta().MaterializedViewBase.MLogID == 0 && len(baseTable.Meta().MaterializedViewBase.MViewIDs) == 0))
+}
+
+func TestDropDatabaseCleansMaterializedViewAndLogInfo(t *testing.T) {
+	store, dom := testkit.CreateMockStoreAndDomain(t)
+	tk := testkit.NewTestKit(t, store)
+
+	const dbName = "mv_drop_db_cleanup"
+	tk.MustExec("drop database if exists " + dbName)
+	tk.MustExec("create database " + dbName)
+	tk.MustExec("use " + dbName)
+	tk.MustExec("create table t (a int not null, b int not null)")
+	tk.MustExec("insert into t values (1, 10), (2, 20)")
+	tk.MustExec("create materialized view log on t (a, b) purge next date_add(now(), interval 1 hour)")
+	tk.MustExec("create materialized view mv (a, s, cnt) refresh fast next now() as select a, sum(b), count(1) from t group by a")
+
+	is := dom.InfoSchema()
+	mvTable, err := is.TableByName(context.Background(), pmodel.NewCIStr(dbName), pmodel.NewCIStr("mv"))
+	require.NoError(t, err)
+	mlogTable, err := is.TableByName(context.Background(), pmodel.NewCIStr(dbName), pmodel.NewCIStr("$mlog$t"))
+	require.NoError(t, err)
+
+	mvID := mvTable.Meta().ID
+	mlogID := mlogTable.Meta().ID
+	tk.MustQuery(fmt.Sprintf("select count(*) from mysql.tidb_mview_refresh_info where mview_id = %d", mvID)).
+		Check(testkit.Rows("1"))
+	tk.MustQuery(fmt.Sprintf("select count(*) from mysql.tidb_mlog_purge_info where mlog_id = %d", mlogID)).
+		Check(testkit.Rows("1"))
+
+	tk.MustExec("drop database " + dbName)
+	tk.MustQuery(fmt.Sprintf("select count(*) from mysql.tidb_mview_refresh_info where mview_id = %d", mvID)).
+		Check(testkit.Rows("0"))
+	tk.MustQuery(fmt.Sprintf("select count(*) from mysql.tidb_mlog_purge_info where mlog_id = %d", mlogID)).
+		Check(testkit.Rows("0"))
+}
+
+func TestDropDatabaseRejectsCrossSchemaMaterializedViewDependency(t *testing.T) {
+	store, dom := testkit.CreateMockStoreAndDomain(t)
+	tk := testkit.NewTestKit(t, store)
+
+	const baseDB = "mv_drop_db_dep_base"
+	const mvDB = "mv_drop_db_dep_mv"
+	const mvName = "mv_cross_db_dep"
+	tk.MustExec("drop database if exists " + baseDB)
+	tk.MustExec("drop database if exists " + mvDB)
+	defer tk.MustExec("drop database if exists " + baseDB)
+	defer tk.MustExec("drop database if exists " + mvDB)
+
+	tk.MustExec("create database " + baseDB)
+	tk.MustExec("create database " + mvDB)
+	tk.MustExec("create table " + baseDB + ".t_base (a int not null, b int not null)")
+	tk.MustExec("insert into " + baseDB + ".t_base values (1, 10), (2, 20)")
+	tk.MustExec("create materialized view log on " + baseDB + ".t_base (a, b)")
+	tk.MustExec("create materialized view " + mvDB + "." + mvName + " (a, s, cnt) refresh fast next now() as select a, sum(b), count(1) from " + baseDB + ".t_base group by a")
+
+	is := dom.InfoSchema()
+	baseTable, err := is.TableByName(context.Background(), pmodel.NewCIStr(baseDB), pmodel.NewCIStr("t_base"))
+	require.NoError(t, err)
+	mvTable, err := is.TableByName(context.Background(), pmodel.NewCIStr(mvDB), pmodel.NewCIStr(mvName))
+	require.NoError(t, err)
+	require.NotNil(t, baseTable.Meta().MaterializedViewBase)
+	require.Contains(t, baseTable.Meta().MaterializedViewBase.MViewIDs, mvTable.Meta().ID)
+	require.NotNil(t, mvTable.Meta().MaterializedView)
+	require.Equal(t, []int64{baseTable.Meta().ID}, mvTable.Meta().MaterializedView.BaseTableIDs)
+	require.Equal(t, []int64{baseTable.Meta().DBID}, mvTable.Meta().MaterializedView.BaseSchemaIDs)
+
+	err = tk.ExecToErr("drop database " + baseDB)
+	require.ErrorContains(t, err, "dependent materialized view")
+
+	tk.MustExec("drop database " + mvDB)
+	tk.MustExec("drop database " + baseDB)
 }
 
 func TestCreateMaterializedViewRetryAfterUpsertFailure(t *testing.T) {

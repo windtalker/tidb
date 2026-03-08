@@ -723,8 +723,10 @@ func (i *MaterializedViewBaseInfo) Clone() *MaterializedViewBaseInfo {
 // MaterializedViewInfo is stored in TableInfo for a materialized view table.
 type MaterializedViewInfo struct {
 	// BaseTableIDs is the table IDs of the base tables referenced by this MV.
-	// For Stage-1, it contains exactly one element.
 	BaseTableIDs []int64 `json:"base_table_ids"`
+	// BaseSchemaIDs is the schema IDs of base tables referenced by this MV.
+	// It's aligned with BaseTableIDs by index.
+	BaseSchemaIDs []int64 `json:"base_schema_ids,omitempty"`
 
 	// SQLContent is the SELECT statement in CREATE MATERIALIZED VIEW.
 	SQLContent string `json:"sql_content"`
@@ -752,6 +754,7 @@ func (i *MaterializedViewInfo) Clone() *MaterializedViewInfo {
 	}
 	ni := *i
 	ni.BaseTableIDs = append([]int64(nil), i.BaseTableIDs...)
+	ni.BaseSchemaIDs = append([]int64(nil), i.BaseSchemaIDs...)
 	return &ni
 }
 

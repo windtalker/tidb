@@ -102,13 +102,11 @@ func (w *worker) onDropTableOrView(jobCtx *jobContext, job *model.Job) (ver int6
 
 		args.OldPartitionIDs = oldIDs
 		var extraInfos []schemaIDAndTableInfo
-		extra, extraErr := updateMaterializedViewBaseInfoOnDrop(jobCtx, job, tblInfo)
+		extras, extraErr := updateMaterializedViewBaseInfoOnDrop(jobCtx, job, tblInfo)
 		if extraErr != nil {
 			return ver, errors.Trace(extraErr)
 		}
-		if extra != nil {
-			extraInfos = append(extraInfos, *extra)
-		}
+		extraInfos = append(extraInfos, extras...)
 		ver, err = updateVersionAndTableInfo(jobCtx, job, tblInfo, originalState != tblInfo.State, extraInfos...)
 		if err != nil {
 			return ver, errors.Trace(err)
@@ -458,6 +456,25 @@ func getTableInfo(t *meta.Mutator, tableID, schemaID int64) (*model.TableInfo, e
 		))
 	}
 	return tblInfo, nil
+}
+
+func resolveSchemaIDByTableID(jobCtx *jobContext, tableID, fallbackSchemaID int64) int64 {
+	if jobCtx == nil || jobCtx.infoCache == nil {
+		return fallbackSchemaID
+	}
+	is := jobCtx.infoCache.GetLatest()
+	if is == nil {
+		return fallbackSchemaID
+	}
+	ctx := jobCtx.stepCtx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	tbl, ok := is.TableByID(ctx, tableID)
+	if !ok || tbl == nil || tbl.Meta() == nil || tbl.Meta().DBID == 0 {
+		return fallbackSchemaID
+	}
+	return tbl.Meta().DBID
 }
 
 // onTruncateTable delete old table meta, and creates a new table identical to old table except for table ID.
@@ -1502,23 +1519,23 @@ func checkDropMaterializedViewLogHasNoDependentMVs(jobCtx *jobContext, job *mode
 	return nil
 }
 
-func updateMaterializedViewBaseInfoOnDrop(jobCtx *jobContext, job *model.Job, droppingTable *model.TableInfo) (*schemaIDAndTableInfo, error) {
-	var baseTableID int64
+func updateMaterializedViewBaseInfoOnDrop(jobCtx *jobContext, job *model.Job, droppingTable *model.TableInfo) ([]schemaIDAndTableInfo, error) {
+	var baseTableIDs []int64
 	var apply func(base *model.TableInfo)
 
 	switch {
 	case droppingTable.MaterializedView != nil:
-		if len(droppingTable.MaterializedView.BaseTableIDs) != 1 {
-			return nil, errors.New("materialized view must reference exactly one base table in Stage-1")
+		if len(droppingTable.MaterializedView.BaseTableIDs) == 0 {
+			return nil, errors.New("materialized view must reference at least one base table")
 		}
-		baseTableID = droppingTable.MaterializedView.BaseTableIDs[0]
+		baseTableIDs = droppingTable.MaterializedView.BaseTableIDs
 		apply = func(base *model.TableInfo) {
 			if base.MaterializedViewBase == nil {
 				return
 			}
 			newIDs := base.MaterializedViewBase.MViewIDs[:0]
 			for _, id := range base.MaterializedViewBase.MViewIDs {
-				if id != job.TableID {
+				if id != droppingTable.ID {
 					newIDs = append(newIDs, id)
 				}
 			}
@@ -1528,12 +1545,12 @@ func updateMaterializedViewBaseInfoOnDrop(jobCtx *jobContext, job *model.Job, dr
 			}
 		}
 	case droppingTable.MaterializedViewLog != nil:
-		baseTableID = droppingTable.MaterializedViewLog.BaseTableID
+		baseTableIDs = []int64{droppingTable.MaterializedViewLog.BaseTableID}
 		apply = func(base *model.TableInfo) {
 			if base.MaterializedViewBase == nil {
 				return
 			}
-			if base.MaterializedViewBase.MLogID == job.TableID {
+			if base.MaterializedViewBase.MLogID == droppingTable.ID {
 				base.MaterializedViewBase.MLogID = 0
 			}
 			if base.MaterializedViewBase.MLogID == 0 && len(base.MaterializedViewBase.MViewIDs) == 0 {
@@ -1544,13 +1561,24 @@ func updateMaterializedViewBaseInfoOnDrop(jobCtx *jobContext, job *model.Job, dr
 		return nil, nil
 	}
 
-	baseTblInfo, err := jobCtx.metaMut.GetTable(job.SchemaID, baseTableID)
-	if err != nil || baseTblInfo == nil {
-		// The base table may already be dropped; keep dropping MV/MLOG table going.
-		return nil, nil
+	extraInfos := make([]schemaIDAndTableInfo, 0, len(baseTableIDs))
+	processedBaseTables := make(map[int64]struct{}, len(baseTableIDs))
+	for _, baseTableID := range baseTableIDs {
+		if _, ok := processedBaseTables[baseTableID]; ok {
+			continue
+		}
+		processedBaseTables[baseTableID] = struct{}{}
+
+		baseSchemaID := resolveSchemaIDByTableID(jobCtx, baseTableID, job.SchemaID)
+		baseTblInfo, err := jobCtx.metaMut.GetTable(baseSchemaID, baseTableID)
+		if err != nil || baseTblInfo == nil {
+			// The base table may already be dropped; keep dropping MV/MLOG table going.
+			continue
+		}
+		apply(baseTblInfo)
+		extraInfos = append(extraInfos, schemaIDAndTableInfo{schemaID: baseSchemaID, tblInfo: baseTblInfo})
 	}
-	apply(baseTblInfo)
-	return &schemaIDAndTableInfo{schemaID: job.SchemaID, tblInfo: baseTblInfo}, nil
+	return extraInfos, nil
 }
 
 func onAlterTableAttributes(jobCtx *jobContext, job *model.Job) (ver int64, err error) {

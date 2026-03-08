@@ -26,6 +26,7 @@ import (
 	"github.com/pingcap/tidb/pkg/kv"
 	"github.com/pingcap/tidb/pkg/meta"
 	"github.com/pingcap/tidb/pkg/meta/model"
+	pmodel "github.com/pingcap/tidb/pkg/parser/model"
 )
 
 func onCreateSchema(jobCtx *jobContext, job *model.Job) (ver int64, _ error) {
@@ -165,6 +166,10 @@ func (w *worker) onDropSchema(jobCtx *jobContext, job *model.Job) (ver int64, _ 
 		if err != nil {
 			return ver, errors.Trace(err)
 		}
+		err = checkDatabaseHasCrossSchemaMaterializedViewReferredInOwner(jobCtx, job)
+		if err != nil {
+			return ver, errors.Trace(err)
+		}
 	}
 
 	ver, err = updateSchemaVersion(jobCtx, job)
@@ -209,6 +214,18 @@ func (w *worker) onDropSchema(jobCtx *jobContext, job *model.Job) (ver int64, _ 
 		if err != nil {
 			return ver, errors.Trace(err)
 		}
+		for _, tblInfo := range tables {
+			if tblInfo.MaterializedView != nil {
+				if err = w.deleteCreateMaterializedViewRefreshInfo(jobCtx, tblInfo.ID); err != nil {
+					return ver, errors.Trace(err)
+				}
+			}
+			if tblInfo.MaterializedViewLog != nil {
+				if err = w.deleteMaterializedViewLogPurgeInfo(jobCtx, tblInfo.ID); err != nil {
+					return ver, errors.Trace(err)
+				}
+			}
+		}
 
 		err = metaMut.UpdateDatabase(dbInfo)
 		if err != nil {
@@ -247,6 +264,79 @@ func (w *worker) onDropSchema(jobCtx *jobContext, job *model.Job) (ver int64, _ 
 	}
 	job.SchemaState = dbInfo.State
 	return ver, errors.Trace(err)
+}
+
+func checkDatabaseHasCrossSchemaMaterializedViewReferred(ctx context.Context, is infoschema.InfoSchema, schema pmodel.CIStr) error {
+	tableID2Schema := make(map[int64]pmodel.CIStr)
+	for _, dbInfo := range is.AllSchemas() {
+		schemaTableInfos, err := is.SchemaSimpleTableInfos(ctx, dbInfo.Name)
+		if err != nil {
+			return errors.Trace(err)
+		}
+		for _, schemaTableInfo := range schemaTableInfos {
+			tableID2Schema[schemaTableInfo.ID] = dbInfo.Name
+		}
+	}
+
+	tableNameInfos, err := is.SchemaSimpleTableInfos(ctx, schema)
+	if err != nil {
+		return errors.Trace(err)
+	}
+	for _, tableNameInfo := range tableNameInfos {
+		baseTbl, err := is.TableByName(ctx, schema, tableNameInfo.Name)
+		if err != nil {
+			if infoschema.ErrTableNotExists.Equal(err) {
+				continue
+			}
+			return errors.Trace(err)
+		}
+		baseMeta := baseTbl.Meta().MaterializedViewBase
+		if baseMeta == nil || len(baseMeta.MViewIDs) == 0 {
+			continue
+		}
+		for _, mvID := range baseMeta.MViewIDs {
+			mvSchemaName, ok := tableID2Schema[mvID]
+			if !ok {
+				continue
+			}
+			mvTbl, ok := is.TableByID(ctx, mvID)
+			if !ok {
+				continue
+			}
+			mvMeta := mvTbl.Meta()
+			if mvMeta.MaterializedView == nil {
+				continue
+			}
+			if mvSchemaName.L != schema.L {
+				return errDropSchemaMaterializedViewDependent(
+					schema.O,
+					tableNameInfo.Name.O,
+					mvSchemaName.O,
+					mvMeta.Name.O,
+				)
+			}
+		}
+	}
+	return nil
+}
+
+func checkDatabaseHasCrossSchemaMaterializedViewReferredInOwner(jobCtx *jobContext, job *model.Job) error {
+	is := jobCtx.infoCache.GetLatest()
+	err := checkDatabaseHasCrossSchemaMaterializedViewReferred(jobCtx.stepCtx, is, pmodel.NewCIStr(job.SchemaName))
+	if err != nil {
+		job.State = model.JobStateCancelled
+	}
+	return errors.Trace(err)
+}
+
+func errDropSchemaMaterializedViewDependent(schemaName, baseTableName, mviewSchemaName, mviewName string) error {
+	return errors.Errorf(
+		"cannot drop database %s: base table %s has dependent materialized view %s.%s",
+		schemaName,
+		baseTableName,
+		mviewSchemaName,
+		mviewName,
+	)
 }
 
 func (w *worker) onRecoverSchema(jobCtx *jobContext, job *model.Job) (ver int64, _ error) {
