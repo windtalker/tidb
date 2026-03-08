@@ -723,6 +723,8 @@ func (i *MaterializedViewBaseInfo) Clone() *MaterializedViewBaseInfo {
 // MaterializedViewInfo is stored in TableInfo for a materialized view table.
 type MaterializedViewInfo struct {
 	// BaseTableIDs is the table IDs of the base tables referenced by this MV.
+	// For Stage-1, it contains exactly one element.
+	// A slice is used here to keep metadata extensible for future multi-base-table support.
 	BaseTableIDs []int64 `json:"base_table_ids"`
 
 	// SQLContent is the SELECT statement in CREATE MATERIALIZED VIEW.
