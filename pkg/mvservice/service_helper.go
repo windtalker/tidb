@@ -467,6 +467,8 @@ func shouldHandleMVCreateEvent(event *notifier.SchemaChangeEvent) bool {
 			return false
 		}
 		return tbl.MaterializedView != nil || tbl.MaterializedViewLog != nil
+	case meta.ActionAlterMaterializedViewRefresh, meta.ActionAlterMaterializedViewLogPurge:
+		return true
 	default:
 		// For other DDL types, rely on periodic refresh.
 		return false
