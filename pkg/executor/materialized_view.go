@@ -862,11 +862,11 @@ func (e *RefreshMaterializedViewExec) executeRefreshMaterializedView(kctx contex
 		logutil.BgLogger().Info("refresh materialized view is slow", fields...)
 	}()
 
-	refreshMethod, err := validateRefreshMaterializedViewStmt(s, isInternalSQL)
+	refreshMode, refreshMethod, err := validateRefreshMaterializedViewStmt(s, isInternalSQL)
 	if err != nil {
 		return err
 	}
-	stepSet, err := newMVRefreshStepSet(s.Type, s.OutOfPlace)
+	stepSet, err := newMVRefreshStepSet(refreshMode)
 	if err != nil {
 		return err
 	}
@@ -936,7 +936,7 @@ func (e *RefreshMaterializedViewExec) executeRefreshMaterializedView(kctx contex
 	}()
 	failpoint.InjectCall("refreshMaterializedViewAfterAcquireAdvisoryLock")
 
-	if s.Type == ast.RefreshMaterializedViewTypeComplete && s.OutOfPlace {
+	if refreshMode == ast.RefreshMaterializedViewModeCompleteOutOfPlace {
 		expectedLastSuccessReadTSO, expectedLastSuccessReadTSONull, err := readRefreshInfoReadTSO(kctx, sqlExec, mviewID)
 		if err != nil {
 			return err
@@ -1129,7 +1129,7 @@ func (e *RefreshMaterializedViewExec) executeRefreshMaterializedView(kctx contex
 	failpoint.Inject("pauseRefreshMaterializedViewAfterInsertRefreshHistRunning", func() {})
 
 	var lastSuccessfulRefreshReadTSO uint64
-	if s.Type == ast.RefreshMaterializedViewTypeFast {
+	if refreshMode == ast.RefreshMaterializedViewModeFast {
 		// LAST_SUCCESS_READ_TSO is BIGINT UNSIGNED DEFAULT NULL. FAST refresh requires it to be non-NULL.
 		if lockedReadTSONull {
 			return finalizeFailure(errors.New("refresh materialized view fast: LAST_SUCCESS_READ_TSO is NULL"))
@@ -1143,6 +1143,7 @@ func (e *RefreshMaterializedViewExec) executeRefreshMaterializedView(kctx contex
 		sqlExec,
 		sessVars,
 		s,
+		refreshMode,
 		schemaName,
 		tblInfo,
 		lastSuccessfulRefreshReadTSO,
@@ -1161,7 +1162,7 @@ func (e *RefreshMaterializedViewExec) executeRefreshMaterializedView(kctx contex
 	}
 
 	var refreshRows *int64
-	if s.Type == ast.RefreshMaterializedViewTypeFast {
+	if refreshMode == ast.RefreshMaterializedViewModeFast {
 		refreshRows = collectFastRefreshMLogScanRows(sessVars)
 	}
 
@@ -1675,31 +1676,36 @@ func refreshErrLevelsWithSQLMode(mode mysql.SQLMode) errctx.LevelMap {
 	}
 }
 
-func validateRefreshMaterializedViewStmt(s *ast.RefreshMaterializedViewStmt, isInternalSQL bool) (string, error) {
+func validateRefreshMaterializedViewStmt(s *ast.RefreshMaterializedViewStmt, isInternalSQL bool) (ast.RefreshMaterializedViewMode, string, error) {
 	if s == nil || s.ViewName == nil {
-		return "", errors.New("refresh materialized view: missing view name")
+		return 0, "", errors.New("refresh materialized view: missing view name")
 	}
-	if s.OutOfPlace && s.Type != ast.RefreshMaterializedViewTypeComplete {
-		return "", errors.New("refresh materialized view: OUT OF PLACE is only supported for COMPLETE")
+	mode, err := s.Mode()
+	if err != nil {
+		return 0, "", errors.Trace(err)
+	}
+	if mode == ast.RefreshMaterializedViewModeCompleteIncrementalUpdate {
+		return 0, "", errors.New("refresh materialized view: COMPLETE INCREMENTAL UPDATE is not supported yet")
 	}
 	methodType := ""
-	switch s.Type {
-	case ast.RefreshMaterializedViewTypeComplete:
-		methodType = "complete"
-	case ast.RefreshMaterializedViewTypeFast:
+	switch mode {
+	case ast.RefreshMaterializedViewModeFast:
 		// Framework is supported; actual execution happens via RefreshMaterializedViewImplementStmt.
 		methodType = "fast"
+	case ast.RefreshMaterializedViewModeCompleteInPlace,
+		ast.RefreshMaterializedViewModeCompleteOutOfPlace:
+		methodType = "complete"
 	default:
-		return "", errors.New("unknown REFRESH MATERIALIZED VIEW type")
+		return 0, "", errors.New("refresh materialized view: unknown mode")
 	}
 	methodOrigin := "manually"
 	if isInternalSQL {
 		methodOrigin = "automatically"
 	}
 	if s.WithAsyncMode {
-		return "", errors.New("refresh materialized view: WITH ASYNC MODE is not supported yet")
+		return 0, "", errors.New("refresh materialized view: WITH ASYNC MODE is not supported yet")
 	}
-	return methodType + " " + methodOrigin, nil
+	return mode, methodType + " " + methodOrigin, nil
 }
 
 func (e *RefreshMaterializedViewExec) resolveRefreshMaterializedViewTarget(
@@ -1851,6 +1857,7 @@ func executeRefreshMaterializedViewDataChanges(
 	sqlExec sqlexec.SQLExecutor,
 	sessVars *variable.SessionVars,
 	s *ast.RefreshMaterializedViewStmt,
+	refreshMode ast.RefreshMaterializedViewMode,
 	schemaName pmodel.CIStr,
 	tblInfo *model.TableInfo,
 	lastSuccessfulRefreshReadTSO uint64,
@@ -1866,11 +1873,8 @@ func executeRefreshMaterializedViewDataChanges(
 		sessVars.InMaterializedViewMaintenance = origInMaterializedViewMaintenance
 	}()
 
-	switch s.Type {
-	case ast.RefreshMaterializedViewTypeComplete:
-		if s.OutOfPlace {
-			return errors.New("refresh materialized view: complete OUT OF PLACE should use dedicated execution path")
-		}
+	switch refreshMode {
+	case ast.RefreshMaterializedViewModeCompleteInPlace:
 		return executeRefreshMaterializedViewCompleteInPlace(
 			kctx,
 			sqlExec,
@@ -1882,7 +1886,7 @@ func executeRefreshMaterializedViewDataChanges(
 			stepObserver,
 			explainFormat,
 		)
-	case ast.RefreshMaterializedViewTypeFast:
+	case ast.RefreshMaterializedViewModeFast:
 		return executeRefreshMaterializedViewFast(
 			kctx,
 			sqlExec,
@@ -1893,8 +1897,12 @@ func executeRefreshMaterializedViewDataChanges(
 			stepObserver,
 			explainFormat,
 		)
+	case ast.RefreshMaterializedViewModeCompleteOutOfPlace:
+		return errors.New("refresh materialized view: complete OUT OF PLACE should use dedicated execution path")
+	case ast.RefreshMaterializedViewModeCompleteIncrementalUpdate:
+		return errors.New("refresh materialized view: COMPLETE INCREMENTAL UPDATE is not supported yet")
 	default:
-		return errors.New("unknown REFRESH MATERIALIZED VIEW type")
+		return errors.New("refresh materialized view: unknown mode")
 	}
 }
 

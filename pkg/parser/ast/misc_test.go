@@ -127,14 +127,131 @@ func TestRefreshMaterializedViewStmtRestoreOutOfPlace(t *testing.T) {
 			Schema: model.NewCIStr("test"),
 			Name:   model.NewCIStr("mv"),
 		},
-		Type:       ast.RefreshMaterializedViewTypeComplete,
-		OutOfPlace: true,
+		WithAsyncMode: true,
+		Type:          ast.RefreshMaterializedViewTypeComplete,
+		CompleteType:  ast.RefreshMaterializedViewCompleteTypeOutOfPlace,
 	}
 
 	var sb strings.Builder
 	rctx := format.NewRestoreCtx(format.DefaultRestoreFlags, &sb)
 	require.NoError(t, stmt.Restore(rctx))
-	require.Equal(t, "REFRESH MATERIALIZED VIEW `test`.`mv` COMPLETE OUT OF PLACE", sb.String())
+	require.Equal(t, "REFRESH MATERIALIZED VIEW `test`.`mv` WITH ASYNC MODE COMPLETE OUT OF PLACE", sb.String())
+}
+
+func TestRefreshMaterializedViewStmtRestoreIncrementalUpdate(t *testing.T) {
+	stmt := &ast.RefreshMaterializedViewStmt{
+		ViewName: &ast.TableName{
+			Schema: model.NewCIStr("test"),
+			Name:   model.NewCIStr("mv"),
+		},
+		Type:         ast.RefreshMaterializedViewTypeComplete,
+		CompleteType: ast.RefreshMaterializedViewCompleteTypeIncrementalUpdate,
+	}
+
+	var sb strings.Builder
+	rctx := format.NewRestoreCtx(format.DefaultRestoreFlags, &sb)
+	require.NoError(t, stmt.Restore(rctx))
+	require.Equal(t, "REFRESH MATERIALIZED VIEW `test`.`mv` COMPLETE INCREMENTAL UPDATE", sb.String())
+}
+
+func TestRefreshMaterializedViewStmtRestoreFastIgnoresOutOfPlaceCompleteType(t *testing.T) {
+	stmt := &ast.RefreshMaterializedViewStmt{
+		ViewName: &ast.TableName{
+			Schema: model.NewCIStr("test"),
+			Name:   model.NewCIStr("mv"),
+		},
+		Type:         ast.RefreshMaterializedViewTypeFast,
+		CompleteType: ast.RefreshMaterializedViewCompleteTypeOutOfPlace,
+	}
+
+	var sb strings.Builder
+	rctx := format.NewRestoreCtx(format.DefaultRestoreFlags, &sb)
+	require.NoError(t, stmt.Restore(rctx))
+	require.Equal(t, "REFRESH MATERIALIZED VIEW `test`.`mv` FAST", sb.String())
+}
+
+func TestRefreshMaterializedViewStmtRestoreFastIgnoresIncrementalCompleteType(t *testing.T) {
+	stmt := &ast.RefreshMaterializedViewStmt{
+		ViewName: &ast.TableName{
+			Schema: model.NewCIStr("test"),
+			Name:   model.NewCIStr("mv"),
+		},
+		Type:         ast.RefreshMaterializedViewTypeFast,
+		CompleteType: ast.RefreshMaterializedViewCompleteTypeIncrementalUpdate,
+	}
+
+	var sb strings.Builder
+	rctx := format.NewRestoreCtx(format.DefaultRestoreFlags, &sb)
+	require.NoError(t, stmt.Restore(rctx))
+	require.Equal(t, "REFRESH MATERIALIZED VIEW `test`.`mv` FAST", sb.String())
+}
+
+func TestRefreshMaterializedViewStmtMode(t *testing.T) {
+	cases := []struct {
+		name         string
+		stmt         *ast.RefreshMaterializedViewStmt
+		expectedMode ast.RefreshMaterializedViewMode
+		expectErr    string
+	}{
+		{
+			name: "fast",
+			stmt: &ast.RefreshMaterializedViewStmt{
+				Type: ast.RefreshMaterializedViewTypeFast,
+			},
+			expectedMode: ast.RefreshMaterializedViewModeFast,
+		},
+		{
+			name: "complete in place",
+			stmt: &ast.RefreshMaterializedViewStmt{
+				Type:         ast.RefreshMaterializedViewTypeComplete,
+				CompleteType: ast.RefreshMaterializedViewCompleteTypeInPlace,
+			},
+			expectedMode: ast.RefreshMaterializedViewModeCompleteInPlace,
+		},
+		{
+			name: "complete out of place",
+			stmt: &ast.RefreshMaterializedViewStmt{
+				Type:         ast.RefreshMaterializedViewTypeComplete,
+				CompleteType: ast.RefreshMaterializedViewCompleteTypeOutOfPlace,
+			},
+			expectedMode: ast.RefreshMaterializedViewModeCompleteOutOfPlace,
+		},
+		{
+			name: "complete incremental update",
+			stmt: &ast.RefreshMaterializedViewStmt{
+				Type:         ast.RefreshMaterializedViewTypeComplete,
+				CompleteType: ast.RefreshMaterializedViewCompleteTypeIncrementalUpdate,
+			},
+			expectedMode: ast.RefreshMaterializedViewModeCompleteIncrementalUpdate,
+		},
+		{
+			name: "unknown type",
+			stmt: &ast.RefreshMaterializedViewStmt{
+				Type: ast.RefreshMaterializedViewType(-1),
+			},
+			expectErr: "unknown REFRESH MATERIALIZED VIEW type",
+		},
+		{
+			name: "unknown complete type",
+			stmt: &ast.RefreshMaterializedViewStmt{
+				Type:         ast.RefreshMaterializedViewTypeComplete,
+				CompleteType: ast.RefreshMaterializedViewCompleteType(-1),
+			},
+			expectErr: "unknown COMPLETE mode",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			mode, err := tc.stmt.Mode()
+			if tc.expectErr != "" {
+				require.Error(t, err)
+				require.ErrorContains(t, err, tc.expectErr)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, tc.expectedMode, mode)
+		})
+	}
 }
 
 func TestPurgeMaterializedViewLogStmtIsStmtNode(t *testing.T) {
