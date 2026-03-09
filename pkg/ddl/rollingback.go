@@ -680,6 +680,7 @@ func convertJob2RollbackJob(w *worker, jobCtx *jobContext, job *model.Job) (ver 
 		model.ActionModifyTableCharsetAndCollate, model.ActionAlterMaterializedViewRefresh,
 		model.ActionAlterMaterializedViewAttributes,
 		model.ActionAlterMaterializedViewLogPurge,
+		model.ActionMViewRefreshOutOfPlaceCutover,
 		model.ActionModifySchemaCharsetAndCollate, model.ActionRepairTable,
 		model.ActionModifyTableAutoIDCache, model.ActionAlterIndexVisibility,
 		model.ActionModifySchemaDefaultPlacement, model.ActionRecoverSchema:

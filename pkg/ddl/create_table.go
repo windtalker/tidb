@@ -888,6 +888,19 @@ func (w *worker) buildCreateMaterializedViewData(ctx context.Context, storeName 
 		failpoint.Return(errors.New("mock create materialized view build error"))
 	})
 
+	method := "insert-into"
+	if storeName == "TiKV" {
+		method = "import-into"
+	}
+	logutil.DDLLogger().Info(
+		"create materialized view: choose init build method",
+		zap.Int64("jobID", job.ID),
+		zap.String("schema", job.SchemaName),
+		zap.String("mview", mvTblInfo.Name.O),
+		zap.String("storeName", storeName),
+		zap.String("method", method),
+	)
+
 	if storeName != "TiKV" {
 		return w.buildCreateMaterializedViewDataByInsert(ctx, job, mvTblInfo)
 	}
