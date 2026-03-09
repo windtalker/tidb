@@ -267,6 +267,13 @@ func SetSchemaDiffForCreateTable(diff *model.SchemaDiff, job *model.Job, jobCtx 
 	return nil
 }
 
+// SetSchemaDiffForMViewRefreshOutOfPlaceCutover sets SchemaDiff for ActionMViewRefreshOutOfPlaceCutover.
+func SetSchemaDiffForMViewRefreshOutOfPlaceCutover(diff *model.SchemaDiff, jobCtx *jobContext) {
+	args := jobCtx.jobArgs.(*model.RefreshMaterializedViewCompleteOutOfPlaceCutoverArgs)
+	diff.TableID = args.ShadowTableID
+	diff.OldTableID = args.OldMViewID
+}
+
 // SetSchemaDiffForRecoverSchema set SchemaDiff for ActionRecoverSchema.
 func SetSchemaDiffForRecoverSchema(diff *model.SchemaDiff, job *model.Job) error {
 	args, err := model.GetRecoverArgs(job)
@@ -357,6 +364,8 @@ func updateSchemaVersion(jobCtx *jobContext, job *model.Job, multiInfos ...schem
 		SetSchemaDiffForPartitionModify(diff, job, jobCtx)
 	case model.ActionCreateTable, model.ActionCreateMaterializedView:
 		err = SetSchemaDiffForCreateTable(diff, job, jobCtx)
+	case model.ActionMViewRefreshOutOfPlaceCutover:
+		SetSchemaDiffForMViewRefreshOutOfPlaceCutover(diff, jobCtx)
 	case model.ActionRecoverSchema:
 		err = SetSchemaDiffForRecoverSchema(diff, job)
 	case model.ActionFlashbackCluster:
