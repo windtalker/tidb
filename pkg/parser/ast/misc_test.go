@@ -121,6 +121,23 @@ func TestRefreshMaterializedViewStmtIsStmtNode(t *testing.T) {
 	require.True(t, ok)
 }
 
+func TestRefreshMaterializedViewStmtRestoreOutOfPlace(t *testing.T) {
+	stmt := &ast.RefreshMaterializedViewStmt{
+		ViewName: &ast.TableName{
+			Schema: model.NewCIStr("test"),
+			Name:   model.NewCIStr("mv"),
+		},
+		WithSyncMode: true,
+		Type:         ast.RefreshMaterializedViewTypeComplete,
+		OutOfPlace:   true,
+	}
+
+	var sb strings.Builder
+	rctx := format.NewRestoreCtx(format.DefaultRestoreFlags, &sb)
+	require.NoError(t, stmt.Restore(rctx))
+	require.Equal(t, "REFRESH MATERIALIZED VIEW `test`.`mv` WITH SYNC MODE COMPLETE OUT OF PLACE", sb.String())
+}
+
 func TestPurgeMaterializedViewLogStmtIsStmtNode(t *testing.T) {
 	_, ok := any(&ast.PurgeMaterializedViewLogStmt{}).(ast.StmtNode)
 	require.True(t, ok)

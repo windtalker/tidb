@@ -593,6 +593,34 @@ func TestGetAlterMaterializedViewLogPurgeArgs(t *testing.T) {
 	}
 }
 
+func TestGetRefreshMaterializedViewCompleteOutOfPlaceCutoverArgs(t *testing.T) {
+	inArgs := &RefreshMaterializedViewCompleteOutOfPlaceCutoverArgs{
+		OldMViewID:                     101,
+		ShadowTableID:                  202,
+		BuildReadTSO:                   303,
+		ExpectedLastSuccessReadTSO:     404,
+		ExpectedLastSuccessReadTSONull: false,
+	}
+
+	for _, v := range []JobVersion{JobVersion1, JobVersion2} {
+		j2 := &Job{}
+		require.NoError(t, j2.Decode(getJobBytes(t, inArgs, v, ActionMViewRefreshOutOfPlaceCutover)))
+		args, err := GetRefreshMaterializedViewCompleteOutOfPlaceCutoverArgs(j2)
+		require.NoError(t, err)
+		require.Equal(t, inArgs, args)
+	}
+
+	inArgs.ExpectedLastSuccessReadTSO = 0
+	inArgs.ExpectedLastSuccessReadTSONull = true
+	for _, v := range []JobVersion{JobVersion1, JobVersion2} {
+		j2 := &Job{}
+		require.NoError(t, j2.Decode(getJobBytes(t, inArgs, v, ActionMViewRefreshOutOfPlaceCutover)))
+		args, err := GetRefreshMaterializedViewCompleteOutOfPlaceCutoverArgs(j2)
+		require.NoError(t, err)
+		require.Equal(t, inArgs, args)
+	}
+}
+
 func TestGetAlterIndexVisibilityArgs(t *testing.T) {
 	inArgs := &AlterIndexVisibilityArgs{
 		IndexName: model.NewCIStr("index-name"),
