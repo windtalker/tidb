@@ -392,6 +392,280 @@ Recommended implementation shape:
    - Verify cutover keeps `mysql.tidb_mview_refresh_info`, `LAST_SUCCESS_READ_TSO`, `NEXT_TIME`,
      and refresh history behavior unchanged from the current out-of-place contract.
 
+### Support COMPLETE INCREMENTAL UPDATE (full compute, incremental apply)
+
+After `COMPLETE OUT OF PLACE`, the next refresh mode is:
+
+- `COMPLETE INCREMENTAL UPDATE`: still compute full MV definition result, but apply only changed rows to MV.
+
+#### Syntax contract (V1)
+
+Refresh mode matrix should be:
+
+- `REFRESH MATERIALIZED VIEW ... COMPLETE`
+- `REFRESH MATERIALIZED VIEW ... COMPLETE OUT OF PLACE`
+- `REFRESH MATERIALIZED VIEW ... COMPLETE INCREMENTAL UPDATE`
+- `REFRESH MATERIALIZED VIEW ... FAST`
+
+and reject these combinations:
+
+- `FAST OUT OF PLACE`
+- `FAST INCREMENTAL UPDATE`
+- `COMPLETE OUT OF PLACE INCREMENTAL UPDATE` (not in V1)
+
+`OUT OF PLACE` and `INCREMENTAL UPDATE` should be treated as `COMPLETE`-only options.
+Parser should enforce that they can only appear after `COMPLETE`.
+
+#### Scope and assumptions (V1)
+
+V1 is correctness-first and keeps implementation scope tight:
+
+1. Require one usable row identity on MV:
+   - `PRIMARY KEY`, or
+   - `UNIQUE` key where all key columns are `NOT NULL`.
+2. If requirement is not met, reject `COMPLETE INCREMENTAL UPDATE` directly
+   (do not silently fallback to `COMPLETE` replace mode).
+3. Keep existing outer advisory lock for refresh mutex semantics.
+4. Keep existing in-place refresh transaction framework (`BEGIN PESSIMISTIC`, history lifecycle, success-only refresh-info persistence).
+
+#### Why not split into three independent re-compute SQLs in one txn
+
+A naive split (`INSERT diff`, `DELETE diff`, `UPDATE diff`) where each statement re-reads MV/query data has two issues:
+
+1. Later statements can read earlier uncommitted writes in the same transaction.
+2. Statement-level read ts can drift across statements, so all diffs may not be computed from one stable snapshot.
+
+Also, stale-read SQL (`... AS OF TIMESTAMP ...`) is not a practical fix here because:
+
+- it is rejected when used inside an explicit transaction;
+- `tidb_snapshot` mode blocks write statements.
+
+So V1 should avoid "recompute-per-DML-step" design.
+
+#### Diff computation approach (V1)
+
+Use one `FULL OUTER JOIN`-based diff source query, then let one dedicated sink operator apply row changes.
+
+High-level algorithm:
+
+1. Build query-side full result (`Q`) from MV definition SQL.
+2. Full-outer-join `Q` with current MV table (`M`) by row identity key.
+3. Keep only changed rows:
+   - `Q-only` => `INSERT`
+   - `M-only` => `DELETE`
+   - both exist but payload differs => `UPDATE`
+4. Output one diff stream (`FOJ + Selection`) and feed it directly into a dedicated MV-apply sink operator.
+   - this operator executes per-row `INSERT` / `UPDATE` / `DELETE` on target MV table in the same transaction.
+   - avoid splitting into three standalone write SQL statements.
+5. On success, persist refresh watermark (`LAST_SUCCESS_READ_TSO`) with existing CAS + readback validation.
+
+Example diff-shaping SQL (simplified):
+
+```sql
+WITH q AS (
+    -- Full MV definition result; map selected marker column to q_marker
+    SELECT k1, k2, <mv_marker_col> AS q_marker, v1, v2
+    FROM (<mv_definition_sql>) q0
+),
+m AS (
+    -- Current MV data; map same marker column to m_marker
+    SELECT k1, k2, <mv_marker_col> AS m_marker, v1, v2
+    FROM <mv_table>
+)
+SELECT
+    CASE
+        WHEN m.m_marker IS NULL THEN 'I'
+        WHEN q.q_marker IS NULL THEN 'D'
+        ELSE 'U'
+    END AS diff_op,
+    COALESCE(q.k1, m.k1) AS k1,
+    COALESCE(q.k2, m.k2) AS k2,
+    q.v1 AS new_v1, q.v2 AS new_v2,
+    m.v1 AS old_v1, m.v2 AS old_v2
+FROM q
+FULL OUTER JOIN m
+  ON q.k1 = m.k1
+ AND q.k2 = m.k2
+WHERE
+      q.q_marker IS NULL
+   OR m.m_marker IS NULL
+   OR NOT (q.v1 <=> m.v1 AND q.v2 <=> m.v2);
+```
+
+#### Join and diff rules
+
+1. Join predicate:
+   - V1 key columns are `NOT NULL`, so `=` can be used.
+   - keep extension path open for nullable keys (future can switch to `<=>`).
+2. Payload equality check should use null-safe comparison (`<=>`) per column.
+3. Side-missing detection should use one deterministic marker column from MV schema:
+   - pick the first visible `NOT NULL` column from MV `TableInfo.Columns` (stable column order);
+   - map this column as `q_marker` / `m_marker` in diff SQL;
+   - `q_marker IS NULL` => row missing on query side (`DELETE`);
+   - `m_marker IS NULL` => row missing on MV side (`INSERT`).
+
+This avoids relying on key-column `IS NULL` checks and does not bind design
+to any specific aggregate output column.
+
+#### Write-path architecture (align with FAST refresh)
+
+`COMPLETE INCREMENTAL UPDATE` write stage should follow `FAST` refresh architecture:
+
+1. Use an internal implementation statement path, not ad-hoc SQL text concatenation for write phase.
+2. Let optimizer build one physical diff-source plan (`FOJ + Selection`) first.
+3. Add one dedicated sink physical operator on top (similar role to `MVDeltaMerge` in FAST path).
+4. Executor reads diff rows chunk-by-chunk and applies row operations to MV table directly.
+
+Expected end-to-end shape:
+
+```text
+RefreshMaterializedViewExec
+  -> executeRefreshMaterializedViewDataChanges(...)
+    -> ExecuteInternalStmt(RefreshMaterializedViewImplementStmt for COMPLETE INCREMENTAL UPDATE)
+      -> PlanBuilder.buildRefreshMaterializedViewImplement(...)
+        -> optimize diff-source SELECT (FOJ + Selection)
+        -> wrap by new sink plan node (for example MVCompleteDiffApply)
+      -> executorBuilder.build<NewSink>(...)
+        -> new sink exec consumes child rows and writes target table (insert/update/delete)
+```
+
+This preserves the same key properties as FAST path:
+
+- one statement-level read snapshot for diff computation;
+- write/apply is in the same refresh transaction;
+- no "statement A writes, statement B reads uncommitted write" drift from split DMLs.
+
+For operator input layout, keep it explicit and stable (planner-executor contract):
+
+1. row-op column (`diff_op`);
+2. side-missing markers (`q_marker`, `m_marker`) for diagnostics and safety checks;
+3. target key/handle columns needed for `UPDATE`/`DELETE` locate;
+4. old row image (`M`) columns for delete/update old values;
+5. new row image (`Q`) columns for insert/update new values.
+
+`diff_op` should be generated in diff-source projection (instead of re-evaluating marker logic in sink):
+
+```sql
+CASE
+  WHEN m_marker IS NULL THEN 1  -- INSERT
+  WHEN q_marker IS NULL THEN 2  -- DELETE
+  ELSE 3                        -- UPDATE
+END AS diff_op
+```
+
+Recommended encoding:
+
+- `1` = `INSERT`
+- `2` = `DELETE`
+- `3` = `UPDATE`
+
+Use integer op code (for example `TINYINT`) instead of string op code to keep executor branch cost low.
+
+Note on diff filtering:
+
+1. Keep existing diff filter (`q_marker IS NULL OR m_marker IS NULL OR payload_changed`) in `WHERE`.
+2. Do not rely on select-field alias visibility in the same query block `WHERE`.
+3. If filtering by `diff_op` is needed, wrap one extra projection/query layer.
+
+Write mapping contract for sink executor should be explicit:
+
+1. `OpColID`: child column index of `diff_op`.
+2. `MHandleCols`: handle columns built from `M` side (used by `DELETE` and `UPDATE`).
+3. `QWritableInputColIDs`: mapping from target writable columns to `Q`-side input columns.
+4. `MWritableInputColIDs`: mapping from target writable columns to `M`-side input columns.
+
+Per-row operation behavior in sink executor:
+
+1. `diff_op = 1` (`INSERT`): write `Q` row image via `AddRecord`.
+2. `diff_op = 2` (`DELETE`): build handle from `MHandleCols`, remove `M` old row via `RemoveRecord`.
+3. `diff_op = 3` (`UPDATE`): build handle from `MHandleCols`, update from `M` old row to `Q` new row via `UpdateRecord`.
+
+V1 write strategy:
+
+1. Prioritize correctness first: keep sink writer simple and deterministic.
+2. For `UPDATE`, V1 may set touched columns conservatively (all aggregate/writable payload columns).
+3. Column-level touched optimization (bitmap/minimal-set update) can be added later as a performance phase.
+
+#### Milestones (recommended implementation order)
+
+M1. Syntax/AST contract milestone
+
+1. Extend grammar to support `COMPLETE INCREMENTAL UPDATE`.
+2. Enforce mode matrix in parser/validator (`OUT OF PLACE` and `INCREMENTAL UPDATE` are `COMPLETE`-only options).
+3. Keep restore output stable for all accepted/rejected combinations.
+
+Done criteria:
+
+1. Parser accepts supported syntax and rejects unsupported combinations.
+2. AST can round-trip restore for new syntax.
+
+M2. Planner diff-source milestone
+
+1. Build FOJ-based diff-source AST (`Q` vs `M`) in planner mview builder.
+2. Produce stable output layout including `diff_op`, markers, handle cols, old/new row images.
+3. Keep `WHERE` diff-filter semantics stable (`side-missing OR payload-changed`).
+
+Done criteria:
+
+1. Planner case tests show expected `FULL OUTER JOIN + Selection + projection(diff_op)` shape.
+2. Output layout metadata is explicit and validated in planner.
+
+M3. New sink plan/executor skeleton milestone
+
+1. Add new physical sink plan node for complete-incremental apply.
+2. Add executor builder path and mapping validation (`OpColID`, `MHandleCols`, `QWritableInputColIDs`, `MWritableInputColIDs`).
+3. Add sink runtime skeleton that consumes child rows and branches by `diff_op`.
+
+Done criteria:
+
+1. Plan can be built and executed end-to-end without write regression.
+2. Invalid mapping/layout fails early with clear errors.
+
+M4. Correctness-first write milestone
+
+1. Implement row writes in sink runtime:
+   - `diff_op=1` -> `AddRecord`
+   - `diff_op=2` -> `RemoveRecord`
+   - `diff_op=3` -> `UpdateRecord`
+2. For `UPDATE`, use conservative touched strategy first.
+3. Keep all writes inside existing refresh transaction framework.
+
+Done criteria:
+
+1. Correctness tests pass for insert-only/delete-only/update-only/mixed/no-op cases.
+2. Failure path rolls back MV data and keeps refresh-info watermark unchanged.
+
+M5. Refresh framework integration milestone
+
+1. Route `COMPLETE INCREMENTAL UPDATE` through data-change dispatch path.
+2. Keep existing advisory lock / history lifecycle / CAS watermark semantics unchanged.
+3. Add observability step for incremental apply.
+
+Done criteria:
+
+1. `WITH PROFILE`/`DRY RUN` can distinguish incremental-apply step.
+2. Concurrency behavior remains compatible with current refresh mutex semantics.
+
+M6. Hardening/performance milestone (post-V1)
+
+1. Add touched-column minimization for `UPDATE`.
+2. Evaluate/optimize large-diff memory behavior (projection trimming, spill behavior checks).
+3. Add TiFlash/FOJ path validation when feature switches permit.
+
+Done criteria:
+
+1. No correctness regression versus M4/M5.
+2. Performance improvements are measurable and guarded by tests.
+
+#### Performance notes
+
+- `FULL OUTER JOIN` is chosen for V1 because it keeps one-pass diff semantics and simple correctness model.
+- Filtering unchanged rows reduces output/write volume, but does not remove full-join compute cost itself.
+- For large tables, memory/spill pressure is expected; keep projection minimal in diff query and rely on spill path correctness.
+- If future TiFlash full-join pushdown/MPP is available, this diff-query shape can reuse that capability without changing SQL semantics.
+
+## Test suggestions (for future implementation)
+
 ### Support FAST refresh upper bound with `AS OF TIMESTAMP`
 
 Another planned evolution for `FAST` refresh is to allow users to specify a refresh upper bound
