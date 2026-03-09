@@ -793,7 +793,7 @@ func TestMaterializedViewRefreshWithSyncModeComplete(t *testing.T) {
 	tk.MustQuery("select a, s, cnt from mv order by a").Check(testkit.Rows("1 15 2", "2 10 2", "3 4 1"))
 }
 
-func TestMaterializedViewRefreshFastOutOfPlaceRejected(t *testing.T) {
+func TestMaterializedViewRefreshCompleteIncrementalUpdateNotSupportedYet(t *testing.T) {
 	store, _ := testkit.CreateMockStoreAndDomain(t)
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
@@ -802,9 +802,9 @@ func TestMaterializedViewRefreshFastOutOfPlaceRejected(t *testing.T) {
 	tk.MustExec("create materialized view log on t (a, b) purge next date_add(now(), interval 1 hour)")
 	tk.MustExec("create materialized view mv (a, s, cnt) refresh fast next now() as select a, sum(b), count(1) from t group by a")
 
-	err := tk.ExecToErr("refresh materialized view mv fast out of place")
+	err := tk.ExecToErr("refresh materialized view mv complete incremental update")
 	require.Error(t, err)
-	require.ErrorContains(t, err, "OUT OF PLACE is only supported for COMPLETE")
+	require.ErrorContains(t, err, "COMPLETE INCREMENTAL UPDATE is not supported yet")
 }
 
 func TestMaterializedViewRefreshCompleteOutOfPlaceCutoverBasic(t *testing.T) {

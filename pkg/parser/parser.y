@@ -1446,10 +1446,9 @@ import (
 	AlterMaterializedViewActionList        "ALTER MATERIALIZED VIEW action list"
 	AlterMaterializedViewLogAction         "ALTER MATERIALIZED VIEW LOG action"
 	AlterMaterializedViewLogActionList     "ALTER MATERIALIZED VIEW LOG action list"
-	RefreshMaterializedViewType            "REFRESH MATERIALIZED VIEW type"
 	RefreshWithSyncModeOpt                 "REFRESH MATERIALIZED VIEW WITH SYNC MODE option"
 	RefreshMaterializedViewObserveOpt      "REFRESH MATERIALIZED VIEW DRY RUN/WITH PROFILE option"
-	RefreshOutOfPlaceOpt                   "REFRESH MATERIALIZED VIEW OUT OF PLACE option"
+	RefreshCompleteModeOpt                 "REFRESH MATERIALIZED VIEW COMPLETE mode option"
 	ViewSQLSecurity                        "view sql security"
 	WhereClause                            "WHERE clause"
 	WhereClauseOptional                    "Optional WHERE clause"
@@ -5617,26 +5616,28 @@ PurgeMaterializedViewLogStmt:
 	}
 
 RefreshMaterializedViewStmt:
-	"REFRESH" "MATERIALIZED" "VIEW" TableName RefreshWithSyncModeOpt RefreshMaterializedViewType RefreshOutOfPlaceOpt RefreshMaterializedViewObserveOpt
+	"REFRESH" "MATERIALIZED" "VIEW" TableName RefreshWithSyncModeOpt "COMPLETE" RefreshCompleteModeOpt RefreshMaterializedViewObserveOpt
 	{
+		completeType := $7.(ast.RefreshMaterializedViewCompleteType)
 		observeType := $8.(ast.RefreshMaterializedViewObserveType)
 		$$ = &ast.RefreshMaterializedViewStmt{
 			ViewName:     $4.(*ast.TableName),
 			WithSyncMode: $5.(bool),
-			Type:         $6.(ast.RefreshMaterializedViewType),
-			OutOfPlace:   $7.(bool),
+			Type:         ast.RefreshMaterializedViewTypeComplete,
+			CompleteType: completeType,
 			ObserveType:  observeType,
 		}
 	}
-
-RefreshMaterializedViewType:
-	"COMPLETE"
+|	"REFRESH" "MATERIALIZED" "VIEW" TableName RefreshWithSyncModeOpt "FAST" RefreshMaterializedViewObserveOpt
 	{
-		$$ = ast.RefreshMaterializedViewTypeComplete
-	}
-|	"FAST"
-	{
-		$$ = ast.RefreshMaterializedViewTypeFast
+		observeType := $7.(ast.RefreshMaterializedViewObserveType)
+		$$ = &ast.RefreshMaterializedViewStmt{
+			ViewName:     $4.(*ast.TableName),
+			WithSyncMode: $5.(bool),
+			Type:         ast.RefreshMaterializedViewTypeFast,
+			CompleteType: ast.RefreshMaterializedViewCompleteTypeInPlace,
+			ObserveType:  observeType,
+		}
 	}
 
 RefreshMaterializedViewObserveOpt:
@@ -5663,14 +5664,18 @@ RefreshWithSyncModeOpt:
 		$$ = true
 	}
 
-RefreshOutOfPlaceOpt:
+RefreshCompleteModeOpt:
 	/* EMPTY */
 	{
-		$$ = false
+		$$ = ast.RefreshMaterializedViewCompleteTypeInPlace
 	}
 |	"OUT" "OF" "PLACE"
 	{
-		$$ = true
+		$$ = ast.RefreshMaterializedViewCompleteTypeOutOfPlace
+	}
+|	"INCREMENTAL" "UPDATE"
+	{
+		$$ = ast.RefreshMaterializedViewCompleteTypeIncrementalUpdate
 	}
 
 /******************************************************************

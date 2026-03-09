@@ -176,7 +176,7 @@ func mvRefreshStepID(idx int) string {
 	return fmt.Sprintf("S%02d", idx)
 }
 
-func newMVRefreshStepSet(refreshType ast.RefreshMaterializedViewType, outOfPlace bool) (mvRefreshStepSet, error) {
+func newMVRefreshStepSet(mode ast.RefreshMaterializedViewMode) (mvRefreshStepSet, error) {
 	var set mvRefreshStepSet
 	steps := make([]mvRefreshObserveStep, 0, 8)
 	nextID := 1
@@ -188,10 +188,7 @@ func newMVRefreshStepSet(refreshType ast.RefreshMaterializedViewType, outOfPlace
 		return clone
 	}
 
-	if outOfPlace {
-		if refreshType != ast.RefreshMaterializedViewTypeComplete {
-			return mvRefreshStepSet{}, errors.New("refresh materialized view observe: out-of-place is only supported for COMPLETE")
-		}
+	if mode == ast.RefreshMaterializedViewModeCompleteOutOfPlace {
 		set.insertHistRunning = appendStep(mvRefreshObserveStepInsertHistRunning)
 		set.dataChangeOutOfPlaceCreateShadow = appendStep(mvRefreshObserveStepDataChangeOutOfPlaceCreateShadow)
 		set.dataChangeOutOfPlaceLoadShadow = appendStep(mvRefreshObserveStepDataChangeOutOfPlaceLoadShadow)
@@ -201,18 +198,22 @@ func newMVRefreshStepSet(refreshType ast.RefreshMaterializedViewType, outOfPlace
 		return set, nil
 	}
 
+	if mode == ast.RefreshMaterializedViewModeCompleteIncrementalUpdate {
+		return mvRefreshStepSet{}, errors.New("refresh materialized view observe: COMPLETE INCREMENTAL UPDATE is not supported yet")
+	}
+	if mode != ast.RefreshMaterializedViewModeCompleteInPlace && mode != ast.RefreshMaterializedViewModeFast {
+		return mvRefreshStepSet{}, errors.New("refresh materialized view observe: unknown mode")
+	}
+
 	set.txnBegin = appendStep(mvRefreshObserveStepTxnBegin)
 	set.lockRefreshInfo = appendStep(mvRefreshObserveStepLockRefreshInfo)
 	set.insertHistRunning = appendStep(mvRefreshObserveStepInsertHistRunning)
 
-	switch refreshType {
-	case ast.RefreshMaterializedViewTypeFast:
+	if mode == ast.RefreshMaterializedViewModeFast {
 		set.dataChangeFastMerge = appendStep(mvRefreshObserveStepDataChangeFastMerge)
-	case ast.RefreshMaterializedViewTypeComplete:
+	} else {
 		set.dataChangeCompleteDelete = appendStep(mvRefreshObserveStepDataChangeCompleteDelete)
 		set.dataChangeCompleteInsert = appendStep(mvRefreshObserveStepDataChangeCompleteInsert)
-	default:
-		return mvRefreshStepSet{}, errors.New("unknown REFRESH MATERIALIZED VIEW type")
 	}
 
 	set.persistRefreshInfo = appendStep(mvRefreshObserveStepPersistRefreshInfo)
@@ -263,9 +264,13 @@ func (e *RefreshMaterializedViewDryRunExec) generateRows(ctx context.Context) ([
 	if e.stmt == nil {
 		return nil, errors.New("dry run refresh materialized view: missing statement")
 	}
+	mode, _, err := validateRefreshMaterializedViewStmt(e.stmt, e.Ctx().GetSessionVars().InRestrictedSQL)
+	if err != nil {
+		return nil, err
+	}
 	ctx = kv.WithInternalSourceType(ctx, kv.InternalTxnMVMaintenance)
 
-	steps, err := buildMVRefreshObserveSteps(e.stmt)
+	steps, err := buildMVRefreshObserveSteps(mode)
 	if err != nil {
 		return nil, err
 	}
@@ -273,17 +278,16 @@ func (e *RefreshMaterializedViewDryRunExec) generateRows(ctx context.Context) ([
 	var completeDeleteRows [][]string
 	var completeInsertRows [][]string
 	var outOfPlaceLoadRows [][]string
-	if e.stmt.Type == ast.RefreshMaterializedViewTypeComplete {
-		if e.stmt.OutOfPlace {
-			outOfPlaceLoadRows, err = e.buildOutOfPlaceRefreshPlanRows(ctx)
-			if err != nil {
-				return nil, err
-			}
-		} else {
-			completeDeleteRows, completeInsertRows, err = e.buildCompleteRefreshPlanRows(ctx)
-			if err != nil {
-				return nil, err
-			}
+	switch mode {
+	case ast.RefreshMaterializedViewModeCompleteOutOfPlace:
+		outOfPlaceLoadRows, err = e.buildOutOfPlaceRefreshPlanRows(ctx)
+		if err != nil {
+			return nil, err
+		}
+	case ast.RefreshMaterializedViewModeCompleteInPlace:
+		completeDeleteRows, completeInsertRows, err = e.buildCompleteRefreshPlanRows(ctx)
+		if err != nil {
+			return nil, err
 		}
 	}
 
@@ -572,8 +576,12 @@ func (e *RefreshMaterializedViewProfileExec) generateRows(ctx context.Context) (
 	if e.stmt == nil {
 		return nil, errors.New("profile refresh materialized view: missing statement")
 	}
+	mode, _, err := validateRefreshMaterializedViewStmt(e.stmt, e.Ctx().GetSessionVars().InRestrictedSQL)
+	if err != nil {
+		return nil, err
+	}
 
-	steps, err := buildMVRefreshObserveSteps(e.stmt)
+	steps, err := buildMVRefreshObserveSteps(mode)
 	if err != nil {
 		return nil, err
 	}
@@ -752,11 +760,8 @@ func clonePlanRows(rows [][]string) [][]string {
 	return cloned
 }
 
-func buildMVRefreshObserveSteps(stmt *ast.RefreshMaterializedViewStmt) ([]mvRefreshObserveStep, error) {
-	if stmt == nil {
-		return nil, errors.New("refresh materialized view: missing statement")
-	}
-	stepSet, err := newMVRefreshStepSet(stmt.Type, stmt.OutOfPlace)
+func buildMVRefreshObserveSteps(mode ast.RefreshMaterializedViewMode) ([]mvRefreshObserveStep, error) {
+	stepSet, err := newMVRefreshStepSet(mode)
 	if err != nil {
 		return nil, err
 	}
