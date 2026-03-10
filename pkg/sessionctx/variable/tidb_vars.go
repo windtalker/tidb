@@ -146,6 +146,8 @@ const (
 	TiDBMemQuotaQuery = "tidb_mem_quota_query" // Bytes.
 	// TiDBMVMaintainMemQuota controls the memory quota used by MV refresh / MV log purge internal maintenance sessions.
 	TiDBMVMaintainMemQuota = "tidb_mv_maintain_mem_quota" // Bytes.
+	// TiDBCreateMViewImportThreads controls the thread count for MV initial build IMPORT INTO.
+	TiDBCreateMViewImportThreads = "tidb_create_mview_import_threads"
 	// TiDBMemQuotaApplyCache controls the memory quota of a query.
 	TiDBMemQuotaApplyCache = "tidb_mem_quota_apply_cache"
 
@@ -1481,6 +1483,7 @@ const (
 	DefTiDBEnableBatchDML                             = false
 	DefTiDBMemQuotaQuery                              = memory.DefMemQuotaQuery // 1GB
 	DefTiDBMVMaintainMemQuota                         = int64(2 * size.GB)
+	DefTiDBCreateMViewImportThreads                   = 0
 	DefTiDBStatsCacheMemQuota                         = 0
 	MaxTiDBStatsCacheMemQuota                         = 1024 * 1024 * 1024 * 1024 // 1TB
 	DefTiDBQueryLogMaxLen                             = 4096
