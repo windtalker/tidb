@@ -2718,6 +2718,10 @@ var defaultSysVars = []*SysVar{
 		}
 		return normalizedValue, nil
 	}},
+	{Scope: ScopeGlobal | ScopeSession, Name: TiDBCreateMViewImportThreads, Value: strconv.Itoa(DefTiDBCreateMViewImportThreads), Type: TypeInt, MinValue: 0, MaxValue: MaxConfigurableConcurrency, SetSession: func(s *SessionVars, val string) error {
+		s.CreateMViewImportThreads = TidbOptInt(val, DefTiDBCreateMViewImportThreads)
+		return nil
+	}},
 	{Scope: ScopeGlobal | ScopeSession, Name: TiDBNonTransactionalIgnoreError, Value: BoolToOnOff(DefTiDBBatchDMLIgnoreError), Type: TypeBool,
 		SetSession: func(s *SessionVars, val string) error {
 			s.NonTransactionalIgnoreError = TiDBOptOn(val)
