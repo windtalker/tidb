@@ -57,6 +57,7 @@ import (
 	"github.com/pingcap/tidb/pkg/util/intest"
 	"github.com/pingcap/tidb/pkg/util/set"
 	"github.com/pingcap/tidb/pkg/util/sqlescape"
+	"github.com/pingcap/tidb/pkg/util/sqlexec"
 	"go.uber.org/zap"
 )
 
@@ -563,6 +564,68 @@ func buildCreateMaterializedViewImportSQL(schemaName string, mvTblInfo *model.Ta
 	return prefix + "(" + selectSQL + ") WITH " + strings.Join(options, ", "), nil
 }
 
+func renderCreateMaterializedViewImportPlanRows(ctx context.Context, sctx sessionctx.Context, sql string) ([]string, []string, error) {
+	if ctx.Value(kv.RequestSourceKey) == nil {
+		ctx = kv.WithInternalSourceType(ctx, kv.InternalTxnDDL)
+	}
+	planSQL := fmt.Sprintf("EXPLAIN FORMAT='%s' %s", types.ExplainFormatBrief, sql)
+	rs, err := sctx.GetSQLExecutor().ExecuteInternal(ctx, planSQL)
+	if err != nil {
+		return nil, nil, errors.Trace(err)
+	}
+	if rs == nil {
+		return nil, nil, nil
+	}
+	fields := rs.Fields()
+	rows, err := sqlexec.DrainRecordSet(ctx, rs, 1024)
+	closeErr := rs.Close()
+	if err != nil {
+		return nil, nil, errors.Trace(err)
+	}
+	if closeErr != nil {
+		return nil, nil, errors.Trace(closeErr)
+	}
+
+	warnings := sctx.GetSessionVars().StmtCtx.GetWarnings()
+	extraWarnings := sctx.GetSessionVars().StmtCtx.GetExtraWarnings()
+	warningRows := make([]string, 0, len(warnings)+len(extraWarnings))
+	for _, warn := range warnings {
+		if warn.Err == nil {
+			continue
+		}
+		warningRows = append(warningRows, fmt.Sprintf("%s: %s", warn.Level, warn.Err.Error()))
+	}
+	for _, warn := range extraWarnings {
+		if warn.Err == nil {
+			continue
+		}
+		warningRows = append(warningRows, fmt.Sprintf("extra %s: %s", warn.Level, warn.Err.Error()))
+	}
+
+	if len(rows) == 0 {
+		return nil, warningRows, nil
+	}
+
+	result := make([]string, 0, len(rows))
+	for _, row := range rows {
+		values := make([]string, row.Len())
+		for i := 0; i < row.Len(); i++ {
+			if row.IsNull(i) {
+				values[i] = "<nil>"
+				continue
+			}
+			datum := row.GetDatum(i, &fields[i].Column.FieldType)
+			value, err := datum.ToString()
+			if err != nil {
+				return nil, warningRows, errors.Trace(err)
+			}
+			values[i] = value
+		}
+		result = append(result, strings.Join(values, " | "))
+	}
+	return result, warningRows, nil
+}
+
 func getCreateMaterializedViewBuildReadTS(ctx context.Context, ddlSess *sess.Session) (uint64, error) {
 	rows, err := ddlSess.Execute(ctx,
 		"SELECT COALESCE(CAST(JSON_UNQUOTE(JSON_EXTRACT(@@tidb_last_query_info, '$.start_ts')) AS UNSIGNED), CAST(0 AS UNSIGNED))",
@@ -673,6 +736,91 @@ func (w *worker) buildCreateMaterializedViewDataByImport(ctx context.Context, jo
 	buildSQL, err := buildCreateMaterializedViewImportSQL(job.SchemaName, mvTblInfo, threadCnt)
 	if err != nil {
 		return errors.Trace(err)
+	}
+	logutil.DDLLogger().Info(
+		"create materialized view init build import sql",
+		zap.Int64("jobID", job.ID),
+		zap.String("schemaName", job.SchemaName),
+		zap.String("tableName", mvTblInfo.Name.O),
+		zap.String("sql", buildSQL),
+	)
+	sqlModeVal, err := sessCtx.GetSessionVars().GetSessionOrGlobalSystemVar(ctx, variable.SQLModeVar)
+	if err != nil {
+		logutil.DDLLogger().Warn(
+			"create materialized view init build import read sql_mode failed",
+			zap.Error(err),
+			zap.Int64("jobID", job.ID),
+			zap.String("schemaName", job.SchemaName),
+			zap.String("tableName", mvTblInfo.Name.O),
+		)
+		sqlModeVal = ""
+	}
+	mviewModeVal := variable.BoolToOnOff(sessCtx.GetSessionVars().InMaterializedViewMaintenance)
+	isolationEnginesVal, err := sessCtx.GetSessionVars().GetSessionOrGlobalSystemVar(ctx, variable.TiDBIsolationReadEngines)
+	if err != nil {
+		logutil.DDLLogger().Warn(
+			"create materialized view init build import read tidb_isolation_read_engines failed",
+			zap.Error(err),
+			zap.Int64("jobID", job.ID),
+			zap.String("schemaName", job.SchemaName),
+			zap.String("tableName", mvTblInfo.Name.O),
+		)
+		isolationEnginesVal = ""
+	}
+	allowMPPVal, err := sessCtx.GetSessionVars().GetSessionOrGlobalSystemVar(ctx, variable.TiDBAllowMPPExecution)
+	if err != nil {
+		logutil.DDLLogger().Warn(
+			"create materialized view init build import read tidb_allow_mpp failed",
+			zap.Error(err),
+			zap.Int64("jobID", job.ID),
+			zap.String("schemaName", job.SchemaName),
+			zap.String("tableName", mvTblInfo.Name.O),
+		)
+		allowMPPVal = ""
+	}
+	logutil.DDLLogger().Info(
+		"create materialized view init build import session context",
+		zap.Int64("jobID", job.ID),
+		zap.String("schemaName", job.SchemaName),
+		zap.String("tableName", mvTblInfo.Name.O),
+		zap.String("sqlMode", sqlModeVal),
+		zap.String("InMaterializedViewMaintenance", mviewModeVal),
+		zap.String("tidb_isolation_read_engines", isolationEnginesVal),
+		zap.String("tidb_allow_mpp", allowMPPVal),
+	)
+	if planRows, warningRows, err := renderCreateMaterializedViewImportPlanRows(ctx, sessCtx, buildSQL); err != nil {
+		logutil.DDLLogger().Warn(
+			"create materialized view init build import plan failed",
+			zap.Error(err),
+			zap.Int64("jobID", job.ID),
+			zap.String("schemaName", job.SchemaName),
+			zap.String("tableName", mvTblInfo.Name.O),
+		)
+	} else if len(planRows) > 0 {
+		logutil.DDLLogger().Info(
+			"create materialized view init build import plan",
+			zap.Int64("jobID", job.ID),
+			zap.String("schemaName", job.SchemaName),
+			zap.String("tableName", mvTblInfo.Name.O),
+			zap.Strings("plan", planRows),
+		)
+		if len(warningRows) > 0 {
+			logutil.DDLLogger().Warn(
+				"create materialized view init build import plan warnings",
+				zap.Int64("jobID", job.ID),
+				zap.String("schemaName", job.SchemaName),
+				zap.String("tableName", mvTblInfo.Name.O),
+				zap.Strings("warnings", warningRows),
+			)
+		}
+	} else if len(warningRows) > 0 {
+		logutil.DDLLogger().Warn(
+			"create materialized view init build import plan warnings",
+			zap.Int64("jobID", job.ID),
+			zap.String("schemaName", job.SchemaName),
+			zap.String("tableName", mvTblInfo.Name.O),
+			zap.Strings("warnings", warningRows),
+		)
 	}
 	_, err = ddlSess.Execute(ctx, buildSQL, "create-materialized-view-build-import")
 	if err != nil {
