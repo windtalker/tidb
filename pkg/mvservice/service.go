@@ -58,12 +58,12 @@ type MVService struct {
 
 	mh Helper
 
-	fetchIntervalMillis      atomic.Int64
-	basicInterval            time.Duration
-	serverRefreshInterval    time.Duration
-	historyGCIntervalMillis  atomic.Int64
-	historyGCRetentionMillis atomic.Int64
-	lastHistoryGCMillis      atomic.Int64
+	fetchIntervalMillis             atomic.Int64
+	basicInterval                   time.Duration
+	serverRefreshInterval           time.Duration
+	mviewRefreshHistRetentionMillis atomic.Int64
+	mlogPurgeHistRetentionMillis    atomic.Int64
+	lastHistoryGCMillis             atomic.Int64
 
 	retryBaseDelayMillis atomic.Int64
 	retryMaxDelayMillis  atomic.Int64
@@ -95,7 +95,7 @@ const (
 	defaultMVBasicInterval       = time.Second
 	defaultServerRefreshInterval = 5 * time.Second
 	defaultMVHistoryGCInterval   = time.Hour
-	defaultMVHistoryGCRetention  = 7 * 24 * time.Hour
+	defaultMVHistoryGCRetention  = 365 * 24 * time.Hour
 	defaultMVTaskRetryBase       = 10 * time.Second
 	defaultMVTaskRetryMax        = 120 * time.Second
 	maxNextScheduleTs            = 9e18
@@ -571,7 +571,8 @@ func resetTimer(timer *mvsTimer, delay time.Duration) {
 }
 
 func (t *MVService) maybeGCOperationHistory(now time.Time) {
-	historyGCInterval, historyGCRetention := t.GetHistoryGCConfig()
+	historyGCInterval := t.historyGCInterval()
+	mviewRefreshRetention, mlogPurgeRetention := t.historyGCRetentionConfig()
 	nowMillis := now.UnixMilli()
 	lastMillis := t.lastHistoryGCMillis.Load()
 	if lastMillis > 0 && nowMillis-lastMillis < historyGCInterval.Milliseconds() {
@@ -596,11 +597,12 @@ func (t *MVService) maybeGCOperationHistory(now time.Time) {
 		logutil.BgLogger().Warn("get current tso failed when GC MV/MVLOG operation history", fields...)
 		return
 	}
-	if err := t.mh.PurgeMVHistoryBeforeTSO(t.ctx, t.sysSessionPool, currentTSO, historyGCRetention); err != nil {
+	if err := t.mh.PurgeMVHistoryBeforeTSO(t.ctx, t.sysSessionPool, currentTSO, mviewRefreshRetention, mlogPurgeRetention); err != nil {
 		result = mvDurationResultFailed
 		fields := append(t.runtimeLogFields(),
 			zap.Uint64("current_tso", currentTSO),
-			zap.Duration("history_gc_retention", historyGCRetention),
+			zap.Duration("mview_refresh_hist_retention", mviewRefreshRetention),
+			zap.Duration("mlog_purge_hist_retention", mlogPurgeRetention),
 			zap.Error(err),
 		)
 		logutil.BgLogger().Warn("GC MV/MVLOG operation history failed", fields...)
@@ -706,7 +708,7 @@ func (t *MVService) Run() {
 
 // markFetchFailure records a synthetic lastMetaFetchMillis to control next fetch time.
 func (t *MVService) markFetchFailure(now time.Time, ddlTriggered bool) {
-	fetchInterval := t.GetFetchInterval()
+	fetchInterval := t.fetchInterval()
 	if !ddlTriggered {
 		t.lastMetaFetchMillis.Store(now.UnixMilli())
 		return
@@ -729,12 +731,12 @@ func (t *MVService) shouldFetchMVMeta(now time.Time) bool {
 	if last == 0 {
 		return true
 	}
-	return now.Sub(mvsUnixMilli(last)) >= t.GetFetchInterval()
+	return now.Sub(mvsUnixMilli(last)) >= t.fetchInterval()
 }
 
 // nextFetchTime returns the next periodic metadata refresh time.
 func (t *MVService) nextFetchTime(now time.Time) time.Time {
-	fetchInterval := t.GetFetchInterval()
+	fetchInterval := t.fetchInterval()
 	last := t.lastMetaFetchMillis.Load()
 	if last == 0 {
 		return now

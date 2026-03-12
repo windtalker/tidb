@@ -198,22 +198,23 @@ func (mockTaskHandlerServerHelper) getAllServerInfo(context.Context) (map[string
 
 type mockMVServiceHelper struct {
 	mockTaskHandlerServerHelper
-	refreshNext             time.Time
-	purgeNext               time.Time
-	refreshErr              error
-	purgeErr                error
-	currentTSO              uint64
-	currentTSOErr           error
-	historyGCErr            error
-	fetchLogs               map[int64]*mvLog
-	fetchViews              map[int64]*mv
-	fetchLogsErr            error
-	fetchViewsErr           error
-	fetchLogsCalls          atomic.Int32
-	fetchViewCalls          atomic.Int32
-	historyGCCalls          atomic.Int32
-	lastHistoryGCCurrentTSO atomic.Uint64
-	lastHistoryGCRetention  atomic.Int64
+	refreshNext                 time.Time
+	purgeNext                   time.Time
+	refreshErr                  error
+	purgeErr                    error
+	currentTSO                  uint64
+	currentTSOErr               error
+	historyGCErr                error
+	fetchLogs                   map[int64]*mvLog
+	fetchViews                  map[int64]*mv
+	fetchLogsErr                error
+	fetchViewsErr               error
+	fetchLogsCalls              atomic.Int32
+	fetchViewCalls              atomic.Int32
+	historyGCCalls              atomic.Int32
+	lastHistoryGCCurrentTSO     atomic.Uint64
+	lastMViewHistoryGCRetention atomic.Int64
+	lastMLogHistoryGCRetention  atomic.Int64
 
 	lastRefreshID int64
 	lastPurgeID   int64
@@ -259,10 +260,17 @@ func (m *mockMVServiceHelper) GetCurrentTSO(context.Context, basic.SessionPool) 
 	return m.currentTSO, nil
 }
 
-func (m *mockMVServiceHelper) PurgeMVHistoryBeforeTSO(_ context.Context, _ basic.SessionPool, currentTSO uint64, retention time.Duration) error {
+func (m *mockMVServiceHelper) PurgeMVHistoryBeforeTSO(
+	_ context.Context,
+	_ basic.SessionPool,
+	currentTSO uint64,
+	mviewRefreshRetention time.Duration,
+	mlogPurgeRetention time.Duration,
+) error {
 	m.historyGCCalls.Add(1)
 	m.lastHistoryGCCurrentTSO.Store(currentTSO)
-	m.lastHistoryGCRetention.Store(int64(retention))
+	m.lastMViewHistoryGCRetention.Store(int64(mviewRefreshRetention))
+	m.lastMLogHistoryGCRetention.Store(int64(mlogPurgeRetention))
 	return m.historyGCErr
 }
 
@@ -417,7 +425,8 @@ func TestMVServiceMaintenanceTimerTriggersHistoryGC(t *testing.T) {
 		return helper.historyGCCalls.Load() > 0
 	}, time.Second, time.Millisecond)
 	require.Equal(t, helper.currentTSO, helper.lastHistoryGCCurrentTSO.Load())
-	require.Equal(t, int64(defaultMVHistoryGCRetention), helper.lastHistoryGCRetention.Load())
+	require.Equal(t, int64(defaultMVHistoryGCRetention), helper.lastMViewHistoryGCRetention.Load())
+	require.Equal(t, int64(defaultMVHistoryGCRetention), helper.lastMLogHistoryGCRetention.Load())
 	require.Eventually(t, func() bool {
 		return helper.taskDurationCount(mvTaskDurationTypeHistoryGC, mvDurationResultSuccess) > 0
 	}, time.Second, time.Millisecond)
@@ -965,20 +974,59 @@ func TestServerHelperGetCurrentTSOInvalidVersion(t *testing.T) {
 
 func TestServerHelperPurgeMVHistoryBeforeTSO(t *testing.T) {
 	installMockTimeForTest(t)
-	se := newRecordingSessionContext()
-	pool := recordingSessionPool{se: se}
-	currentTSO := uint64(987654321)
-	retention := time.Duration(0)
 
-	err := (&serviceHelper{}).PurgeMVHistoryBeforeTSO(context.Background(), pool, currentTSO, retention)
-	require.NoError(t, err)
-	require.Equal(t, []string{
-		testSQLDeleteMVRefreshHistBeforeTSO,
-		testSQLDeleteMVLogPurgeHistBeforeTSO,
-	}, se.executedRestrictedSQL)
-	require.Len(t, se.executedRestrictedArg, 2)
-	require.Equal(t, []any{currentTSO}, se.executedRestrictedArg[0])
-	require.Equal(t, []any{currentTSO}, se.executedRestrictedArg[1])
+	testCases := []struct {
+		name                  string
+		currentTSO            uint64
+		mviewRetention        time.Duration
+		mlogRetention         time.Duration
+		assertArgsAreEqualTSO bool
+		assertArgsNotEqual    bool
+	}{
+		{
+			name:                  "zero_retention",
+			currentTSO:            987654321,
+			mviewRetention:        0,
+			mlogRetention:         0,
+			assertArgsAreEqualTSO: true,
+		},
+		{
+			name:               "separate_retention",
+			currentTSO:         uint64((10 * time.Hour / time.Millisecond) << 18),
+			mviewRetention:     2 * time.Hour,
+			mlogRetention:      4 * time.Hour,
+			assertArgsNotEqual: true,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			se := newRecordingSessionContext()
+			pool := recordingSessionPool{se: se}
+
+			err := (&serviceHelper{}).PurgeMVHistoryBeforeTSO(
+				context.Background(),
+				pool,
+				tc.currentTSO,
+				tc.mviewRetention,
+				tc.mlogRetention,
+			)
+			require.NoError(t, err)
+			require.Equal(t, []string{
+				testSQLDeleteMVRefreshHistBeforeTSO,
+				testSQLDeleteMVLogPurgeHistBeforeTSO,
+			}, se.executedRestrictedSQL)
+			require.Len(t, se.executedRestrictedArg, 2)
+
+			if tc.assertArgsAreEqualTSO {
+				require.Equal(t, []any{tc.currentTSO}, se.executedRestrictedArg[0])
+				require.Equal(t, []any{tc.currentTSO}, se.executedRestrictedArg[1])
+			}
+			if tc.assertArgsNotEqual {
+				require.NotEqual(t, se.executedRestrictedArg[0][0], se.executedRestrictedArg[1][0])
+			}
+		})
+	}
 }
 
 func TestServerHelperRefreshMVDeletedWhenMetaNotFound(t *testing.T) {
