@@ -1500,10 +1500,12 @@ func buildFullUpdateLookupTemplateSelect(
 			{
 				// Keep the template stable on index-join path so planbuilder can extract
 				// inner child + range/key mapping as executor rebuild metadata.
+				// Internal MV refresh planning may run on a system session with empty
+				// CurrentDB, so attach DBName explicitly to keep this join hint matchable.
 				HintName: pmodel.NewCIStr("inl_join"),
 				Tables: []ast.HintTable{
-					{TableName: pmodel.NewCIStr(fullUpdateOuterAlias)},
-					{TableName: pmodel.NewCIStr(fullUpdateInnerAlias)},
+					{DBName: dbName, TableName: pmodel.NewCIStr(fullUpdateOuterAlias)},
+					{DBName: dbName, TableName: pmodel.NewCIStr(fullUpdateInnerAlias)},
 				},
 			},
 		},
