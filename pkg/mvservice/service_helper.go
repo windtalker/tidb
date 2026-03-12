@@ -17,6 +17,7 @@ package mvservice
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 
@@ -33,6 +34,10 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/tikv/client-go/v2/oracle"
 	"go.uber.org/zap"
+)
+
+const (
+	historyGCDeleteBatchSize = 10000
 )
 
 type serviceHelper struct {
@@ -311,9 +316,13 @@ func (*serviceHelper) PurgeMVHistoryBeforeTSO(
 	mviewRefreshRetention time.Duration,
 	mlogPurgeRetention time.Duration,
 ) error {
-	const (
-		deleteMVRefreshHistSQL  = `DELETE FROM mysql.tidb_mview_refresh_hist WHERE REFRESH_JOB_ID < %?`
-		deleteMVLogPurgeHistSQL = `DELETE FROM mysql.tidb_mlog_purge_hist WHERE PURGE_JOB_ID < %?`
+	deleteMVRefreshHistSQL := fmt.Sprintf(
+		`DELETE FROM mysql.tidb_mview_refresh_hist WHERE REFRESH_JOB_ID < %%? ORDER BY REFRESH_JOB_ID LIMIT %d`,
+		historyGCDeleteBatchSize,
+	)
+	deleteMVLogPurgeHistSQL := fmt.Sprintf(
+		`DELETE FROM mysql.tidb_mlog_purge_hist WHERE PURGE_JOB_ID < %%? ORDER BY PURGE_JOB_ID LIMIT %d`,
+		historyGCDeleteBatchSize,
 	)
 
 	calcCutoffTSO := func(retention time.Duration) uint64 {
@@ -325,13 +334,34 @@ func (*serviceHelper) PurgeMVHistoryBeforeTSO(
 		return cutoffTSO
 	}
 
-	if _, err := execRCRestrictedSQLWithSessionPool(ctx, sysSessionPool, deleteMVRefreshHistSQL, []any{calcCutoffTSO(mviewRefreshRetention)}); err != nil {
+	se, err := sysSessionPool.Get()
+	if err != nil {
 		return err
 	}
-	if _, err := execRCRestrictedSQLWithSessionPool(ctx, sysSessionPool, deleteMVLogPurgeHistSQL, []any{calcCutoffTSO(mlogPurgeRetention)}); err != nil {
+	defer sysSessionPool.Put(se)
+
+	ctx = kv.WithInternalSourceType(ctx, kv.InternalTxnMVMaintenance)
+	sctx := se.(sessionctx.Context)
+
+	if err := purgeMVHistoryInBatches(ctx, sctx, deleteMVRefreshHistSQL, calcCutoffTSO(mviewRefreshRetention)); err != nil {
+		return err
+	}
+	if err := purgeMVHistoryInBatches(ctx, sctx, deleteMVLogPurgeHistSQL, calcCutoffTSO(mlogPurgeRetention)); err != nil {
 		return err
 	}
 	return nil
+}
+
+func purgeMVHistoryInBatches(ctx context.Context, sctx sessionctx.Context, sql string, cutoffTSO uint64) error {
+	for {
+		if _, err := execRCRestrictedSQLWithSession(ctx, sctx, sql, []any{cutoffTSO}); err != nil {
+			return err
+		}
+		affectedRows := sctx.GetSessionVars().StmtCtx.AffectedRows()
+		if affectedRows < uint64(historyGCDeleteBatchSize) {
+			return nil
+		}
+	}
 }
 
 // fetchAllTiDBMVLogPurge loads all scheduled MV log purge tasks from metadata.

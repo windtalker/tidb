@@ -140,6 +140,7 @@ func NewMVService(ctx context.Context, se basic.SessionPool, helper Helper, cfg 
 		panic(fmt.Sprintf("invalid MV service backpressure config: cpu_threshold=%v mem_threshold=%v delay=%s err=%v",
 			cfg.TaskBackpressure.CPUThreshold, cfg.TaskBackpressure.MemThreshold, cfg.TaskBackpressure.Delay, err))
 	}
+	mgr.nextHistoryGCAtMillis.Store(mvsNow().Add(mgr.historyGCInterval()).UnixMilli())
 	return mgr
 }
 
@@ -158,9 +159,6 @@ func (t *MVService) SetTaskTimeout(timeout time.Duration) {
 
 // setFetchInterval sets metadata fetch interval.
 func (t *MVService) setFetchInterval(interval time.Duration) error {
-	if t == nil {
-		return fmt.Errorf("mv service is nil")
-	}
 	if interval <= 0 {
 		return fmt.Errorf("fetch interval must be positive")
 	}
@@ -173,9 +171,6 @@ func (t *MVService) setFetchInterval(interval time.Duration) error {
 
 // fetchInterval returns metadata fetch interval.
 func (t *MVService) fetchInterval() time.Duration {
-	if t == nil {
-		return defaultMVFetchInterval
-	}
 	interval := time.Duration(t.fetchIntervalMillis.Load()) * time.Millisecond
 	if interval <= 0 {
 		return defaultMVFetchInterval
@@ -185,9 +180,6 @@ func (t *MVService) fetchInterval() time.Duration {
 
 // setRetryDelayConfig sets retry delay config.
 func (t *MVService) setRetryDelayConfig(baseDelay, maxDelay time.Duration) error {
-	if t == nil {
-		return fmt.Errorf("mv service is nil")
-	}
 	if baseDelay <= 0 || maxDelay <= 0 {
 		return fmt.Errorf("retry delay must be positive")
 	}
@@ -204,9 +196,6 @@ func (t *MVService) setRetryDelayConfig(baseDelay, maxDelay time.Duration) error
 
 // retryDelayConfig returns retry delay config.
 func (t *MVService) retryDelayConfig() (baseDelay, maxDelay time.Duration) {
-	if t == nil {
-		return defaultMVTaskRetryBase, defaultMVTaskRetryMax
-	}
 	baseDelay = time.Duration(t.retryBaseDelayMillis.Load()) * time.Millisecond
 	maxDelay = time.Duration(t.retryMaxDelayMillis.Load()) * time.Millisecond
 	if baseDelay <= 0 {
@@ -264,9 +253,6 @@ func (t *MVService) SetTaskBackpressureController(controller TaskBackpressureCon
 
 // historyGCInterval returns history GC interval.
 func (t *MVService) historyGCInterval() time.Duration {
-	if t == nil {
-		return defaultMVHistoryGCInterval
-	}
 	mviewRefreshRetention, mlogPurgeRetention := t.historyGCRetentionConfig()
 	return deriveHistoryGCInterval(mviewRefreshRetention, mlogPurgeRetention)
 }
@@ -283,6 +269,7 @@ func (t *MVService) SetMViewRefreshHistRetention(mviewRefreshRetention time.Dura
 		return fmt.Errorf("history gc retention must be at least 1ms")
 	}
 	t.mviewRefreshHistRetentionMillis.Store(mviewRefreshRetention.Milliseconds())
+	t.rescheduleHistoryGCEarlier(mvsNow(), t.historyGCInterval())
 	return nil
 }
 
@@ -298,14 +285,12 @@ func (t *MVService) SetMLogPurgeHistRetention(mlogPurgeRetention time.Duration) 
 		return fmt.Errorf("history gc retention must be at least 1ms")
 	}
 	t.mlogPurgeHistRetentionMillis.Store(mlogPurgeRetention.Milliseconds())
+	t.rescheduleHistoryGCEarlier(mvsNow(), t.historyGCInterval())
 	return nil
 }
 
 // historyGCRetentionConfig returns separate history retention for mview refresh and mlog purge.
 func (t *MVService) historyGCRetentionConfig() (mviewRefreshRetention, mlogPurgeRetention time.Duration) {
-	if t == nil {
-		return defaultMVHistoryGCRetention, defaultMVHistoryGCRetention
-	}
 	mviewRefreshRetention = time.Duration(t.mviewRefreshHistRetentionMillis.Load()) * time.Millisecond
 	mlogPurgeRetention = time.Duration(t.mlogPurgeHistRetentionMillis.Load()) * time.Millisecond
 	if mviewRefreshRetention <= 0 {

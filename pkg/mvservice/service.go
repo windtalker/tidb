@@ -63,7 +63,9 @@ type MVService struct {
 	serverRefreshInterval           time.Duration
 	mviewRefreshHistRetentionMillis atomic.Int64
 	mlogPurgeHistRetentionMillis    atomic.Int64
-	lastHistoryGCMillis             atomic.Int64
+	nextHistoryGCAtMillis           atomic.Int64
+	historyGCRetryCount             atomic.Int64
+	historyGCRunning                atomic.Bool
 
 	retryBaseDelayMillis atomic.Int64
 	retryMaxDelayMillis  atomic.Int64
@@ -122,6 +124,8 @@ const (
 	mvRunEventHistoryGCGetTSOErr = "history_gc_get_tso_error"
 
 	mvHistoryGCOwnerKey = "gc-mv-op-hist"
+
+	historyGCRetryMaxAttempts = 8
 )
 
 type mv struct {
@@ -572,26 +576,46 @@ func resetTimer(timer *mvsTimer, delay time.Duration) {
 
 func (t *MVService) maybeGCOperationHistory(now time.Time) {
 	historyGCInterval := t.historyGCInterval()
-	mviewRefreshRetention, mlogPurgeRetention := t.historyGCRetentionConfig()
 	nowMillis := now.UnixMilli()
-	lastMillis := t.lastHistoryGCMillis.Load()
-	if lastMillis > 0 && nowMillis-lastMillis < historyGCInterval.Milliseconds() {
+	nextAtMillis := t.nextHistoryGCAtMillis.Load()
+	if nextAtMillis > nowMillis {
 		return
 	}
+	if !t.historyGCRunning.CompareAndSwap(false, true) {
+		return
+	}
+
 	if !t.sch.AvailableString(mvHistoryGCOwnerKey) {
+		t.historyGCRetryCount.Store(0)
+		t.scheduleNextHistoryGC(now, t.serverRefreshInterval)
+		t.historyGCRunning.Store(false)
 		return
 	}
-	// Throttle retries by interval even when GC fails.
-	t.lastHistoryGCMillis.Store(nowMillis)
+	go t.runGCOperationHistory(now, historyGCInterval)
+}
+
+func (t *MVService) runGCOperationHistory(now time.Time, historyGCInterval time.Duration) {
+	defer t.historyGCRunning.Store(false)
+	mviewRefreshRetention, mlogPurgeRetention := t.historyGCRetentionConfig()
 	startAt := mvsNow()
 	result := mvDurationResultSuccess
 	defer func() {
 		t.mh.observeTaskDuration(mvTaskDurationTypeHistoryGC, result, mvsSince(startAt))
 	}()
+	defer func() {
+		if r := recover(); r != nil {
+			result = mvDurationResultFailed
+			t.scheduleHistoryGCFailure(now, historyGCInterval)
+			t.mh.observeRunEvent(mvRunEventRecoveredPanic)
+			fields := append(t.runtimeLogFields(), zap.Any("panic", r), zap.ByteString("stack", debug.Stack()))
+			logutil.BgLogger().Error("MVService history GC panicked", fields...)
+		}
+	}()
 
 	currentTSO, err := t.mh.GetCurrentTSO(t.ctx, t.sysSessionPool)
 	if err != nil {
 		result = mvDurationResultFailed
+		t.scheduleHistoryGCFailure(now, historyGCInterval)
 		t.mh.observeRunEvent(mvRunEventHistoryGCGetTSOErr)
 		fields := append(t.runtimeLogFields(), zap.Error(err))
 		logutil.BgLogger().Warn("get current tso failed when GC MV/MVLOG operation history", fields...)
@@ -599,6 +623,7 @@ func (t *MVService) maybeGCOperationHistory(now time.Time) {
 	}
 	if err := t.mh.PurgeMVHistoryBeforeTSO(t.ctx, t.sysSessionPool, currentTSO, mviewRefreshRetention, mlogPurgeRetention); err != nil {
 		result = mvDurationResultFailed
+		t.scheduleHistoryGCFailure(now, historyGCInterval)
 		fields := append(t.runtimeLogFields(),
 			zap.Uint64("current_tso", currentTSO),
 			zap.Duration("mview_refresh_hist_retention", mviewRefreshRetention),
@@ -607,6 +632,61 @@ func (t *MVService) maybeGCOperationHistory(now time.Time) {
 		)
 		logutil.BgLogger().Warn("GC MV/MVLOG operation history failed", fields...)
 		return
+	}
+	t.scheduleHistoryGCSuccess(now, historyGCInterval)
+}
+
+func (t *MVService) scheduleNextHistoryGC(now time.Time, delay time.Duration) {
+	if delay <= 0 {
+		delay = defaultMVBasicInterval
+	}
+	t.nextHistoryGCAtMillis.Store(now.Add(delay).UnixMilli())
+}
+
+func (t *MVService) scheduleHistoryGCSuccess(now time.Time, historyGCInterval time.Duration) {
+	t.historyGCRetryCount.Store(0)
+	t.scheduleNextHistoryGC(now, historyGCInterval)
+}
+
+func (t *MVService) scheduleHistoryGCFailure(now time.Time, historyGCInterval time.Duration) {
+	if t.ctx.Err() != nil {
+		t.historyGCRetryCount.Store(0)
+		t.scheduleNextHistoryGC(now, historyGCInterval)
+		return
+	}
+	retryCount := t.historyGCRetryCount.Add(1)
+	if retryCount > historyGCRetryMaxAttempts {
+		t.historyGCRetryCount.Store(0)
+		t.scheduleNextHistoryGC(now, historyGCInterval)
+		return
+	}
+	baseDelay := t.basicInterval
+	if baseDelay <= 0 {
+		baseDelay = defaultMVBasicInterval
+	}
+	maxDelay := time.Minute
+	if historyGCInterval < maxDelay {
+		maxDelay = historyGCInterval
+	}
+	if maxDelay < baseDelay {
+		maxDelay = baseDelay
+	}
+	t.scheduleNextHistoryGC(now, calcRetryDelay(retryCount, baseDelay, maxDelay))
+}
+
+func (t *MVService) rescheduleHistoryGCEarlier(now time.Time, interval time.Duration) {
+	if interval <= 0 {
+		interval = defaultMVHistoryGCInterval
+	}
+	desired := now.Add(interval).UnixMilli()
+	for {
+		current := t.nextHistoryGCAtMillis.Load()
+		if current > 0 && current <= desired {
+			return
+		}
+		if t.nextHistoryGCAtMillis.CompareAndSwap(current, desired) {
+			return
+		}
 	}
 }
 
