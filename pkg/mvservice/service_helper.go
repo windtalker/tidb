@@ -304,23 +304,31 @@ func (*serviceHelper) GetCurrentTSO(_ context.Context, sysSessionPool basic.Sess
 }
 
 // PurgeMVHistoryBeforeTSO removes old records from MV history tables.
-func (*serviceHelper) PurgeMVHistoryBeforeTSO(ctx context.Context, sysSessionPool basic.SessionPool, currentTSO uint64, retention time.Duration) error {
+func (*serviceHelper) PurgeMVHistoryBeforeTSO(
+	ctx context.Context,
+	sysSessionPool basic.SessionPool,
+	currentTSO uint64,
+	mviewRefreshRetention time.Duration,
+	mlogPurgeRetention time.Duration,
+) error {
 	const (
 		deleteMVRefreshHistSQL  = `DELETE FROM mysql.tidb_mview_refresh_hist WHERE REFRESH_JOB_ID < %?`
 		deleteMVLogPurgeHistSQL = `DELETE FROM mysql.tidb_mlog_purge_hist WHERE PURGE_JOB_ID < %?`
 	)
 
-	cutoffTSO := currentTSO
-	if retention > 0 {
-		cutoffPhysical := max(oracle.ExtractPhysical(currentTSO)-int64(retention/time.Millisecond), 0)
-		cutoffTSO = oracle.ComposeTS(cutoffPhysical, 0)
+	calcCutoffTSO := func(retention time.Duration) uint64 {
+		cutoffTSO := currentTSO
+		if retention > 0 {
+			cutoffPhysical := max(oracle.ExtractPhysical(currentTSO)-int64(retention/time.Millisecond), 0)
+			cutoffTSO = oracle.ComposeTS(cutoffPhysical, 0)
+		}
+		return cutoffTSO
 	}
 
-	params := []any{cutoffTSO}
-	if _, err := execRCRestrictedSQLWithSessionPool(ctx, sysSessionPool, deleteMVRefreshHistSQL, params); err != nil {
+	if _, err := execRCRestrictedSQLWithSessionPool(ctx, sysSessionPool, deleteMVRefreshHistSQL, []any{calcCutoffTSO(mviewRefreshRetention)}); err != nil {
 		return err
 	}
-	if _, err := execRCRestrictedSQLWithSessionPool(ctx, sysSessionPool, deleteMVLogPurgeHistSQL, params); err != nil {
+	if _, err := execRCRestrictedSQLWithSessionPool(ctx, sysSessionPool, deleteMVLogPurgeHistSQL, []any{calcCutoffTSO(mlogPurgeRetention)}); err != nil {
 		return err
 	}
 	return nil
