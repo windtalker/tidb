@@ -15,8 +15,10 @@
 package executor
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"math/bits"
 	"strconv"
 	"strings"
 	"time"
@@ -36,11 +38,15 @@ import (
 	"github.com/pingcap/tidb/pkg/parser/mysql"
 	plannercore "github.com/pingcap/tidb/pkg/planner/core"
 	plannercorebase "github.com/pingcap/tidb/pkg/planner/core/base"
+	plannerutil "github.com/pingcap/tidb/pkg/planner/util"
 	"github.com/pingcap/tidb/pkg/sessionctx"
+	"github.com/pingcap/tidb/pkg/sessionctx/stmtctx"
 	"github.com/pingcap/tidb/pkg/sessionctx/variable"
 	storeerr "github.com/pingcap/tidb/pkg/store/driver/error"
+	"github.com/pingcap/tidb/pkg/table"
 	"github.com/pingcap/tidb/pkg/types"
 	"github.com/pingcap/tidb/pkg/util/chunk"
+	"github.com/pingcap/tidb/pkg/util/collate"
 	"github.com/pingcap/tidb/pkg/util/dbterror"
 	plannererrors "github.com/pingcap/tidb/pkg/util/dbterror/plannererrors"
 	"github.com/pingcap/tidb/pkg/util/generatedexpr"
@@ -76,6 +82,683 @@ type PurgeMaterializedViewLogExec struct {
 	exec.BaseExecutor
 	stmt *ast.PurgeMaterializedViewLogStmt
 	done bool
+}
+
+const (
+	mvCompleteIncrementalDiffOpInsert = int64(1)
+	mvCompleteIncrementalDiffOpDelete = int64(2)
+	mvCompleteIncrementalDiffOpUpdate = int64(3)
+)
+
+// MVCompleteIncrementalApplyExec applies COMPLETE INCREMENTAL UPDATE diff rows to the target MV table.
+// It keeps the runtime single-threaded and only batches the UPDATE old/new comparison at chunk granularity.
+type MVCompleteIncrementalApplyExec struct {
+	exec.BaseExecutor
+
+	TargetTable      table.Table
+	TargetHandleCols plannerutil.HandleCols
+	OpColID          int
+
+	MWritableInputColIDs []int
+	QWritableInputColIDs []int
+
+	CompareWritableIdxes []int
+	MCompareInputColIDs  []int
+	QCompareInputColIDs  []int
+
+	writableFieldTypes []*types.FieldType
+	compareColumns     []mvCompleteIncrementalCompareColumn
+	oldRow             []types.Datum
+	newRow             []types.Datum
+	touched            []bool
+	// currTouchedIdxes caches writable-column indexes touched by the current UPDATE row.
+	// It lets us clear only previously-set bits in `touched` and patch only changed columns in `newRow`.
+	currTouchedIdxes        []int
+	updateTouchedSingleByte bool
+
+	childChunk          *chunk.Chunk
+	updateRows          []int
+	updateTouchedBitmap []uint8
+	updateTouchedStride int
+	executed            bool
+}
+
+type mvCompleteIncrementalCompareColumn struct {
+	writableIdx      int
+	mInputColID      int
+	qInputColID      int
+	fieldType        *types.FieldType
+	collator         collate.Collator
+	notNull          bool
+	touchedBitMask   uint8
+	touchedByteIndex int
+}
+
+// Open implements the Executor interface.
+func (e *MVCompleteIncrementalApplyExec) Open(ctx context.Context) error {
+	e.executed = false
+	e.childChunk = nil
+	e.updateRows = e.updateRows[:0]
+	e.updateTouchedBitmap = e.updateTouchedBitmap[:0]
+	e.updateTouchedStride = 0
+	e.updateTouchedSingleByte = false
+	e.currTouchedIdxes = e.currTouchedIdxes[:0]
+	clear(e.touched)
+
+	if err := e.BaseExecutor.Open(ctx); err != nil {
+		return err
+	}
+
+	if e.TargetTable == nil {
+		return errors.New("MVCompleteIncrementalApply target table is nil")
+	}
+	if e.TargetHandleCols == nil {
+		return errors.New("MVCompleteIncrementalApply target handle cols is nil")
+	}
+	child := e.Children(0)
+	if child == nil {
+		return errors.New("MVCompleteIncrementalApply child executor is nil")
+	}
+
+	writableCols := e.TargetTable.WritableCols()
+	e.writableFieldTypes = make([]*types.FieldType, len(writableCols))
+	for i := range writableCols {
+		e.writableFieldTypes[i] = &writableCols[i].FieldType
+	}
+	e.oldRow = make([]types.Datum, len(writableCols))
+	e.newRow = make([]types.Datum, len(writableCols))
+	e.touched = make([]bool, len(writableCols))
+	if err := e.initCompareColumns(len(child.RetFieldTypes())); err != nil {
+		return err
+	}
+	e.currTouchedIdxes = make([]int, 0, len(e.compareColumns))
+	e.updateTouchedStride = (len(e.compareColumns) + 7) >> 3
+	e.updateTouchedSingleByte = e.updateTouchedStride == 1
+	e.childChunk = exec.NewFirstChunk(child)
+	return nil
+}
+
+// Next implements the Executor interface.
+func (e *MVCompleteIncrementalApplyExec) Next(ctx context.Context, req *chunk.Chunk) error {
+	req.GrowAndReset(e.MaxChunkSize())
+	if e.executed {
+		return nil
+	}
+	e.executed = true
+
+	child := e.Children(0)
+	if child == nil {
+		return errors.New("MVCompleteIncrementalApply child executor is nil")
+	}
+	txn, err := e.Ctx().Txn(true)
+	if err != nil {
+		return err
+	}
+	tableCtx := e.Ctx().GetTableCtx()
+	stmtCtx := e.Ctx().GetSessionVars().StmtCtx
+	insertSizeHintStep := int(e.Ctx().GetSessionVars().ShardAllocateStep)
+	if insertSizeHintStep <= 0 {
+		insertSizeHintStep = 1
+	}
+
+	for {
+		e.childChunk.Reset()
+		if err := exec.Next(ctx, child, e.childChunk); err != nil {
+			return err
+		}
+		if e.childChunk.NumRows() == 0 {
+			return nil
+		}
+		if err := e.applyChunk(txn, tableCtx, stmtCtx, insertSizeHintStep, e.childChunk); err != nil {
+			return err
+		}
+	}
+}
+
+// Close implements the Executor interface.
+func (e *MVCompleteIncrementalApplyExec) Close() error {
+	e.writableFieldTypes = nil
+	e.compareColumns = nil
+	e.oldRow = nil
+	e.newRow = nil
+	e.touched = nil
+	e.currTouchedIdxes = nil
+	e.childChunk = nil
+	e.updateRows = nil
+	e.updateTouchedBitmap = nil
+	e.updateTouchedStride = 0
+	e.updateTouchedSingleByte = false
+	e.executed = false
+	return e.BaseExecutor.Close()
+}
+
+func (e *MVCompleteIncrementalApplyExec) applyChunk(
+	txn kv.Transaction,
+	tableCtx table.MutateContext,
+	stmtCtx *stmtctx.StatementContext,
+	insertSizeHintStep int,
+	input *chunk.Chunk,
+) error {
+	ops := input.Column(e.OpColID).Int64s()[:input.NumRows()]
+	insertRemain, err := e.collectChunkUpdateRows(ops)
+	if err != nil {
+		return err
+	}
+	if err := e.markChunkUpdateTouchedColumns(input); err != nil {
+		return err
+	}
+
+	insertOrdinal := 0
+	updateOrdinal := 0
+	for rowIdx := 0; rowIdx < input.NumRows(); rowIdx++ {
+		row := input.GetRow(rowIdx)
+		op := ops[rowIdx]
+		switch op {
+		case mvCompleteIncrementalDiffOpInsert:
+			e.buildInsertRow(row)
+
+			sizeHint := 0
+			if insertOrdinal%insertSizeHintStep == 0 {
+				sizeHint = min(insertSizeHintStep, insertRemain)
+			}
+			insertOrdinal++
+			insertRemain--
+			if sizeHint > 0 {
+				_, err = e.TargetTable.AddRecord(
+					tableCtx,
+					txn,
+					e.newRow,
+					table.WithReserveAutoIDHint(sizeHint),
+					table.DupKeyCheckLazy,
+				)
+			} else {
+				_, err = e.TargetTable.AddRecord(tableCtx, txn, e.newRow, table.DupKeyCheckLazy)
+			}
+			if err != nil {
+				return err
+			}
+		case mvCompleteIncrementalDiffOpDelete:
+			e.buildDeleteRow(row)
+			handle, err := e.TargetHandleCols.BuildHandle(stmtCtx, row)
+			if err != nil {
+				return err
+			}
+			if err := e.TargetTable.RemoveRecord(tableCtx, txn, handle, e.oldRow); err != nil {
+				return err
+			}
+		case mvCompleteIncrementalDiffOpUpdate:
+			changed, err := e.buildTouchedFromBitmap(updateOrdinal)
+			if err != nil {
+				return err
+			}
+			if changed {
+				e.buildUpdateRows(row)
+				handle, err := e.TargetHandleCols.BuildHandle(stmtCtx, row)
+				if err != nil {
+					return err
+				}
+				if err := e.TargetTable.UpdateRecord(tableCtx, txn, handle, e.oldRow, e.newRow, e.touched); err != nil {
+					return err
+				}
+			}
+			updateOrdinal++
+		default:
+			return errors.Errorf("MVCompleteIncrementalApply invalid diff op %d at row %d", op, rowIdx)
+		}
+	}
+	return nil
+}
+
+func (e *MVCompleteIncrementalApplyExec) collectChunkUpdateRows(ops []int64) (int, error) {
+	if cap(e.updateRows) >= len(ops) {
+		e.updateRows = e.updateRows[:0]
+	} else {
+		e.updateRows = make([]int, 0, len(ops))
+	}
+	insertRemain := 0
+	for rowIdx, op := range ops {
+		switch op {
+		case mvCompleteIncrementalDiffOpInsert:
+			insertRemain++
+		case mvCompleteIncrementalDiffOpDelete:
+		case mvCompleteIncrementalDiffOpUpdate:
+			e.updateRows = append(e.updateRows, rowIdx)
+		default:
+			return 0, errors.Errorf("MVCompleteIncrementalApply invalid diff op %d at row %d", op, rowIdx)
+		}
+	}
+	return insertRemain, nil
+}
+
+func (e *MVCompleteIncrementalApplyExec) initCompareColumns(inputColCount int) error {
+	if len(e.MCompareInputColIDs) != len(e.CompareWritableIdxes) || len(e.QCompareInputColIDs) != len(e.CompareWritableIdxes) {
+		return errors.Errorf(
+			"MVCompleteIncrementalApply compare mapping length mismatch (compare=%d, M=%d, Q=%d)",
+			len(e.CompareWritableIdxes),
+			len(e.MCompareInputColIDs),
+			len(e.QCompareInputColIDs),
+		)
+	}
+	if cap(e.compareColumns) >= len(e.CompareWritableIdxes) {
+		e.compareColumns = e.compareColumns[:len(e.CompareWritableIdxes)]
+	} else {
+		e.compareColumns = make([]mvCompleteIncrementalCompareColumn, len(e.CompareWritableIdxes))
+	}
+	for compareIdx, writableIdx := range e.CompareWritableIdxes {
+		if writableIdx < 0 || writableIdx >= len(e.writableFieldTypes) {
+			return errors.Errorf(
+				"MVCompleteIncrementalApply writable compare index %d out of field type range [0,%d)",
+				writableIdx,
+				len(e.writableFieldTypes),
+			)
+		}
+		mInputColID := e.MCompareInputColIDs[compareIdx]
+		if mInputColID < 0 || mInputColID >= inputColCount {
+			return errors.Errorf(
+				"MVCompleteIncrementalApply M compare input col id %d out of source range [0,%d)",
+				mInputColID,
+				inputColCount,
+			)
+		}
+		qInputColID := e.QCompareInputColIDs[compareIdx]
+		if qInputColID < 0 || qInputColID >= inputColCount {
+			return errors.Errorf(
+				"MVCompleteIncrementalApply Q compare input col id %d out of source range [0,%d)",
+				qInputColID,
+				inputColCount,
+			)
+		}
+		fieldType := e.writableFieldTypes[writableIdx]
+		var stringCollator collate.Collator
+		if fieldType.EvalType() == types.ETString {
+			stringCollator = collate.GetCollator(fieldType.GetCollate())
+		}
+		e.compareColumns[compareIdx] = mvCompleteIncrementalCompareColumn{
+			writableIdx:      writableIdx,
+			mInputColID:      mInputColID,
+			qInputColID:      qInputColID,
+			fieldType:        fieldType,
+			collator:         stringCollator,
+			notNull:          mysql.HasNotNullFlag(fieldType.GetFlag()),
+			touchedBitMask:   uint8(1 << (compareIdx & 7)),
+			touchedByteIndex: compareIdx >> 3,
+		}
+	}
+	return nil
+}
+
+func (e *MVCompleteIncrementalApplyExec) markChunkUpdateTouchedColumns(input *chunk.Chunk) error {
+	updateCnt := len(e.updateRows)
+	if updateCnt == 0 || e.updateTouchedStride == 0 {
+		e.updateTouchedBitmap = e.updateTouchedBitmap[:0]
+		return nil
+	}
+
+	requiredLen := updateCnt * e.updateTouchedStride
+	if cap(e.updateTouchedBitmap) < requiredLen {
+		e.updateTouchedBitmap = make([]uint8, requiredLen)
+	} else {
+		e.updateTouchedBitmap = e.updateTouchedBitmap[:requiredLen]
+		clear(e.updateTouchedBitmap)
+	}
+
+	for _, compareCol := range e.compareColumns {
+		if err := markMVCompleteIncrementalTouchedRowsByColumn(
+			e.updateRows,
+			e.updateTouchedBitmap,
+			e.updateTouchedStride,
+			e.updateTouchedSingleByte,
+			compareCol,
+			input.Column(compareCol.mInputColID),
+			input.Column(compareCol.qInputColID),
+		); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (e *MVCompleteIncrementalApplyExec) buildDeleteRow(row chunk.Row) {
+	for writableIdx, colID := range e.MWritableInputColIDs {
+		row.DatumWithBuffer(colID, e.writableFieldTypes[writableIdx], &e.oldRow[writableIdx])
+	}
+}
+
+func (e *MVCompleteIncrementalApplyExec) buildInsertRow(row chunk.Row) {
+	for writableIdx, colID := range e.QWritableInputColIDs {
+		row.DatumWithBuffer(colID, e.writableFieldTypes[writableIdx], &e.newRow[writableIdx])
+	}
+}
+
+func (e *MVCompleteIncrementalApplyExec) buildUpdateRows(row chunk.Row) {
+	for writableIdx, colID := range e.MWritableInputColIDs {
+		row.DatumWithBuffer(colID, e.writableFieldTypes[writableIdx], &e.oldRow[writableIdx])
+	}
+	copy(e.newRow, e.oldRow)
+	// `newRow` starts from the old row image and only patches columns marked touched for this UPDATE row.
+	for _, writableIdx := range e.currTouchedIdxes {
+		row.DatumWithBuffer(e.QWritableInputColIDs[writableIdx], e.writableFieldTypes[writableIdx], &e.newRow[writableIdx])
+	}
+}
+
+func (e *MVCompleteIncrementalApplyExec) buildTouchedFromBitmap(updateOrdinal int) (bool, error) {
+	if e.updateTouchedStride == 0 {
+		return false, nil
+	}
+	for _, idx := range e.currTouchedIdxes {
+		e.touched[idx] = false
+	}
+	e.currTouchedIdxes = e.currTouchedIdxes[:0]
+
+	offset := updateOrdinal * e.updateTouchedStride
+	rowBits := e.updateTouchedBitmap[offset : offset+e.updateTouchedStride]
+	changed := false
+	for byteIdx, b := range rowBits {
+		for b != 0 {
+			bitInByte := bits.TrailingZeros8(b)
+			bitPos := (byteIdx << 3) + bitInByte
+			writableIdx := e.compareColumns[bitPos].writableIdx
+			e.touched[writableIdx] = true
+			e.currTouchedIdxes = append(e.currTouchedIdxes, writableIdx)
+			changed = true
+			b &= b - 1
+		}
+	}
+	return changed, nil
+}
+
+func markMVCompleteIncrementalTouchedRowsByColumn(
+	updateRows []int,
+	updateTouchedBitmap []uint8,
+	updateTouchedStride int,
+	updateTouchedSingleByte bool,
+	compareCol mvCompleteIncrementalCompareColumn,
+	oldCol *chunk.Column,
+	newCol *chunk.Column,
+) error {
+	setTouched := func(updateOrdinal int) {
+		if updateTouchedSingleByte {
+			updateTouchedBitmap[updateOrdinal] |= compareCol.touchedBitMask
+			return
+		}
+		updateTouchedBitmap[updateOrdinal*updateTouchedStride+compareCol.touchedByteIndex] |= compareCol.touchedBitMask
+	}
+
+	switch compareCol.fieldType.EvalType() {
+	case types.ETInt:
+		if mysql.HasUnsignedFlag(compareCol.fieldType.GetFlag()) {
+			oldVals := oldCol.Uint64s()
+			newVals := newCol.Uint64s()
+			if compareCol.notNull {
+				for updateOrdinal, rowIdx := range updateRows {
+					if oldVals[rowIdx] != newVals[rowIdx] {
+						setTouched(updateOrdinal)
+					}
+				}
+				return nil
+			}
+			for updateOrdinal, rowIdx := range updateRows {
+				oldIsNull := oldCol.IsNull(rowIdx)
+				newIsNull := newCol.IsNull(rowIdx)
+				if oldIsNull || newIsNull {
+					if oldIsNull != newIsNull {
+						setTouched(updateOrdinal)
+					}
+					continue
+				}
+				if oldVals[rowIdx] != newVals[rowIdx] {
+					setTouched(updateOrdinal)
+				}
+			}
+			return nil
+		}
+		oldVals := oldCol.Int64s()
+		newVals := newCol.Int64s()
+		if compareCol.notNull {
+			for updateOrdinal, rowIdx := range updateRows {
+				if oldVals[rowIdx] != newVals[rowIdx] {
+					setTouched(updateOrdinal)
+				}
+			}
+			return nil
+		}
+		for updateOrdinal, rowIdx := range updateRows {
+			oldIsNull := oldCol.IsNull(rowIdx)
+			newIsNull := newCol.IsNull(rowIdx)
+			if oldIsNull || newIsNull {
+				if oldIsNull != newIsNull {
+					setTouched(updateOrdinal)
+				}
+				continue
+			}
+			if oldVals[rowIdx] != newVals[rowIdx] {
+				setTouched(updateOrdinal)
+			}
+		}
+		return nil
+	case types.ETReal:
+		if compareCol.fieldType.GetType() == mysql.TypeFloat {
+			oldVals := oldCol.Float32s()
+			newVals := newCol.Float32s()
+			if compareCol.notNull {
+				for updateOrdinal, rowIdx := range updateRows {
+					if oldVals[rowIdx] != newVals[rowIdx] {
+						setTouched(updateOrdinal)
+					}
+				}
+				return nil
+			}
+			for updateOrdinal, rowIdx := range updateRows {
+				oldIsNull := oldCol.IsNull(rowIdx)
+				newIsNull := newCol.IsNull(rowIdx)
+				if oldIsNull || newIsNull {
+					if oldIsNull != newIsNull {
+						setTouched(updateOrdinal)
+					}
+					continue
+				}
+				if oldVals[rowIdx] != newVals[rowIdx] {
+					setTouched(updateOrdinal)
+				}
+			}
+			return nil
+		}
+		oldVals := oldCol.Float64s()
+		newVals := newCol.Float64s()
+		if compareCol.notNull {
+			for updateOrdinal, rowIdx := range updateRows {
+				if oldVals[rowIdx] != newVals[rowIdx] {
+					setTouched(updateOrdinal)
+				}
+			}
+			return nil
+		}
+		for updateOrdinal, rowIdx := range updateRows {
+			oldIsNull := oldCol.IsNull(rowIdx)
+			newIsNull := newCol.IsNull(rowIdx)
+			if oldIsNull || newIsNull {
+				if oldIsNull != newIsNull {
+					setTouched(updateOrdinal)
+				}
+				continue
+			}
+			if oldVals[rowIdx] != newVals[rowIdx] {
+				setTouched(updateOrdinal)
+			}
+		}
+		return nil
+	case types.ETDecimal:
+		oldVals := oldCol.Decimals()
+		newVals := newCol.Decimals()
+		if compareCol.notNull {
+			for updateOrdinal, rowIdx := range updateRows {
+				if oldVals[rowIdx].Compare(&newVals[rowIdx]) != 0 {
+					setTouched(updateOrdinal)
+				}
+			}
+			return nil
+		}
+		for updateOrdinal, rowIdx := range updateRows {
+			oldIsNull := oldCol.IsNull(rowIdx)
+			newIsNull := newCol.IsNull(rowIdx)
+			if oldIsNull || newIsNull {
+				if oldIsNull != newIsNull {
+					setTouched(updateOrdinal)
+				}
+				continue
+			}
+			if oldVals[rowIdx].Compare(&newVals[rowIdx]) != 0 {
+				setTouched(updateOrdinal)
+			}
+		}
+		return nil
+	case types.ETString:
+		switch compareCol.fieldType.GetType() {
+		case mysql.TypeEnum:
+			if compareCol.notNull {
+				for updateOrdinal, rowIdx := range updateRows {
+					if oldCol.GetEnum(rowIdx).Value != newCol.GetEnum(rowIdx).Value {
+						setTouched(updateOrdinal)
+					}
+				}
+				return nil
+			}
+			for updateOrdinal, rowIdx := range updateRows {
+				oldIsNull := oldCol.IsNull(rowIdx)
+				newIsNull := newCol.IsNull(rowIdx)
+				if oldIsNull || newIsNull {
+					if oldIsNull != newIsNull {
+						setTouched(updateOrdinal)
+					}
+					continue
+				}
+				if oldCol.GetEnum(rowIdx).Value != newCol.GetEnum(rowIdx).Value {
+					setTouched(updateOrdinal)
+				}
+			}
+			return nil
+		case mysql.TypeSet:
+			if compareCol.notNull {
+				for updateOrdinal, rowIdx := range updateRows {
+					if oldCol.GetSet(rowIdx).Value != newCol.GetSet(rowIdx).Value {
+						setTouched(updateOrdinal)
+					}
+				}
+				return nil
+			}
+			for updateOrdinal, rowIdx := range updateRows {
+				oldIsNull := oldCol.IsNull(rowIdx)
+				newIsNull := newCol.IsNull(rowIdx)
+				if oldIsNull || newIsNull {
+					if oldIsNull != newIsNull {
+						setTouched(updateOrdinal)
+					}
+					continue
+				}
+				if oldCol.GetSet(rowIdx).Value != newCol.GetSet(rowIdx).Value {
+					setTouched(updateOrdinal)
+				}
+			}
+			return nil
+		}
+		if compareCol.notNull {
+			for updateOrdinal, rowIdx := range updateRows {
+				if compareCol.collator.Compare(oldCol.GetString(rowIdx), newCol.GetString(rowIdx)) != 0 {
+					setTouched(updateOrdinal)
+				}
+			}
+			return nil
+		}
+		for updateOrdinal, rowIdx := range updateRows {
+			oldIsNull := oldCol.IsNull(rowIdx)
+			newIsNull := newCol.IsNull(rowIdx)
+			if oldIsNull || newIsNull {
+				if oldIsNull != newIsNull {
+					setTouched(updateOrdinal)
+				}
+				continue
+			}
+			if compareCol.collator.Compare(oldCol.GetString(rowIdx), newCol.GetString(rowIdx)) != 0 {
+				setTouched(updateOrdinal)
+			}
+		}
+		return nil
+	case types.ETDatetime, types.ETTimestamp:
+		oldVals := oldCol.Times()
+		newVals := newCol.Times()
+		if compareCol.notNull {
+			for updateOrdinal, rowIdx := range updateRows {
+				if oldVals[rowIdx] != newVals[rowIdx] {
+					setTouched(updateOrdinal)
+				}
+			}
+			return nil
+		}
+		for updateOrdinal, rowIdx := range updateRows {
+			oldIsNull := oldCol.IsNull(rowIdx)
+			newIsNull := newCol.IsNull(rowIdx)
+			if oldIsNull || newIsNull {
+				if oldIsNull != newIsNull {
+					setTouched(updateOrdinal)
+				}
+				continue
+			}
+			if oldVals[rowIdx] != newVals[rowIdx] {
+				setTouched(updateOrdinal)
+			}
+		}
+		return nil
+	case types.ETDuration:
+		oldVals := oldCol.GoDurations()
+		newVals := newCol.GoDurations()
+		if compareCol.notNull {
+			for updateOrdinal, rowIdx := range updateRows {
+				if oldVals[rowIdx] != newVals[rowIdx] {
+					setTouched(updateOrdinal)
+				}
+			}
+			return nil
+		}
+		for updateOrdinal, rowIdx := range updateRows {
+			oldIsNull := oldCol.IsNull(rowIdx)
+			newIsNull := newCol.IsNull(rowIdx)
+			if oldIsNull || newIsNull {
+				if oldIsNull != newIsNull {
+					setTouched(updateOrdinal)
+				}
+				continue
+			}
+			if oldVals[rowIdx] != newVals[rowIdx] {
+				setTouched(updateOrdinal)
+			}
+		}
+		return nil
+	case types.ETJson, types.ETVectorFloat32:
+		if compareCol.notNull {
+			for updateOrdinal, rowIdx := range updateRows {
+				if !bytes.Equal(oldCol.GetRaw(rowIdx), newCol.GetRaw(rowIdx)) {
+					setTouched(updateOrdinal)
+				}
+			}
+			return nil
+		}
+		for updateOrdinal, rowIdx := range updateRows {
+			oldIsNull := oldCol.IsNull(rowIdx)
+			newIsNull := newCol.IsNull(rowIdx)
+			if oldIsNull || newIsNull {
+				if oldIsNull != newIsNull {
+					setTouched(updateOrdinal)
+				}
+				continue
+			}
+			if !bytes.Equal(oldCol.GetRaw(rowIdx), newCol.GetRaw(rowIdx)) {
+				setTouched(updateOrdinal)
+			}
+		}
+		return nil
+	default:
+		return errors.Errorf("unsupported eval type %d in COMPLETE INCREMENTAL UPDATE comparison", compareCol.fieldType.EvalType())
+	}
 }
 
 // Next implements the Executor Next interface.

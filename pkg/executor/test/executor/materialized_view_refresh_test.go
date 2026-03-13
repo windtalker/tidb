@@ -24,12 +24,14 @@ import (
 
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/tidb/pkg/kv"
+	"github.com/pingcap/tidb/pkg/parser/ast"
 	"github.com/pingcap/tidb/pkg/parser/auth"
 	pmodel "github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
 	"github.com/pingcap/tidb/pkg/sessionctx/variable"
 	"github.com/pingcap/tidb/pkg/testkit"
 	"github.com/pingcap/tidb/pkg/testkit/testfailpoint"
+	"github.com/pingcap/tidb/pkg/util/sqlexec"
 	"github.com/stretchr/testify/require"
 )
 
@@ -105,6 +107,35 @@ func joinRowsAsText(rows [][]any) string {
 		lines = append(lines, fmt.Sprintf("%v", row[0]))
 	}
 	return strings.Join(lines, "\n")
+}
+
+func mustExecRefreshImplementStmt(t *testing.T, tk *testkit.TestKit, stmt *ast.RefreshMaterializedViewImplementStmt) {
+	ctx := kv.WithInternalSourceType(context.Background(), kv.InternalTxnMVMaintenance)
+	rs, err := tk.Session().ExecuteStmt(ctx, stmt)
+	if err == nil && rs != nil {
+		_, err = sqlexec.DrainRecordSet(ctx, rs, tk.Session().GetSessionVars().MaxChunkSize)
+	}
+	if rs != nil {
+		require.NoError(t, rs.Close())
+	}
+	require.NoError(t, err)
+}
+
+func buildCompleteIncrementalUpdateImplementStmt(schema, view string) *ast.RefreshMaterializedViewImplementStmt {
+	return &ast.RefreshMaterializedViewImplementStmt{
+		RefreshStmt: &ast.RefreshMaterializedViewStmt{
+			ViewName: &ast.TableName{
+				Schema: pmodel.NewCIStr(schema),
+				Name:   pmodel.NewCIStr(view),
+			},
+			Type:         ast.RefreshMaterializedViewTypeComplete,
+			CompleteType: ast.RefreshMaterializedViewCompleteTypeIncrementalUpdate,
+		},
+	}
+}
+
+func mustExecCompleteIncrementalUpdateImplementStmt(t *testing.T, tk *testkit.TestKit, schema, view string) {
+	mustExecRefreshImplementStmt(t, tk, buildCompleteIncrementalUpdateImplementStmt(schema, view))
 }
 
 func TestMaterializedViewRefreshCompleteBasic(t *testing.T) {
@@ -1091,7 +1122,7 @@ func TestMaterializedViewRefreshWithAsyncModeComplete(t *testing.T) {
 	require.ErrorContains(t, err, "WITH ASYNC MODE is not supported yet")
 }
 
-func TestMaterializedViewRefreshCompleteIncrementalUpdateNotSupportedYet(t *testing.T) {
+func TestMaterializedViewRefreshCompleteIncrementalUpdateSQLNotSupportedYet(t *testing.T) {
 	store, _ := testkit.CreateMockStoreAndDomain(t)
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
@@ -1103,6 +1134,92 @@ func TestMaterializedViewRefreshCompleteIncrementalUpdateNotSupportedYet(t *test
 	err := tk.ExecToErr("refresh materialized view mv complete incremental update")
 	require.Error(t, err)
 	require.ErrorContains(t, err, "COMPLETE INCREMENTAL UPDATE is not supported yet")
+}
+
+func TestMaterializedViewRefreshCompleteIncrementalUpdateImplementStmt(t *testing.T) {
+	testCases := []struct {
+		name     string
+		prepare  func(*testkit.TestKit)
+		expected []string
+	}{
+		{
+			name: "insert-only",
+			prepare: func(tk *testkit.TestKit) {
+				tk.MustExec("insert into t values (2, 3), (3, 4)")
+			},
+			expected: []string{"1 15 2", "2 10 2", "3 4 1"},
+		},
+		{
+			name: "delete-only",
+			prepare: func(tk *testkit.TestKit) {
+				tk.MustExec("delete from t where a = 1 and b = 5")
+			},
+			expected: []string{"1 10 1", "2 7 1"},
+		},
+		{
+			name: "update-only",
+			prepare: func(tk *testkit.TestKit) {
+				tk.MustExec("update t set b = 8 where a = 2 and b = 7")
+			},
+			expected: []string{"1 15 2", "2 8 1"},
+		},
+		{
+			name: "mixed",
+			prepare: func(tk *testkit.TestKit) {
+				tk.MustExec("update t set b = 11 where a = 1 and b = 10")
+				tk.MustExec("delete from t where a = 2 and b = 7")
+				tk.MustExec("insert into t values (3, 4)")
+			},
+			expected: []string{"1 16 2", "3 4 1"},
+		},
+		{
+			name:     "noop",
+			prepare:  func(*testkit.TestKit) {},
+			expected: []string{"1 15 2", "2 7 1"},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			store, _ := testkit.CreateMockStoreAndDomain(t)
+			tk := testkit.NewTestKit(t, store)
+			tk.MustExec("use test")
+			tk.MustExec("create table t (a int not null, b int not null)")
+			tk.MustExec("insert into t values (1, 10), (1, 5), (2, 7)")
+			tk.MustExec("create materialized view log on t (a, b) purge next date_add(now(), interval 1 hour)")
+			tk.MustExec("create materialized view mv (a, s, cnt) refresh fast next now() as select a, sum(b), count(1) from t group by a")
+			tk.MustQuery("select a, s, cnt from mv order by a").Check(testkit.Rows("1 15 2", "2 7 1"))
+
+			tc.prepare(tk)
+			mustExecCompleteIncrementalUpdateImplementStmt(t, tk, "test", "mv")
+			tk.MustQuery("select a, s, cnt from mv order by a").Check(testkit.Rows(tc.expected...))
+		})
+	}
+}
+
+func TestMaterializedViewRefreshCompleteIncrementalUpdateImplementStmtUsesForUpdateTS(t *testing.T) {
+	store, _ := testkit.CreateMockStoreAndDomain(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("create table t (a int not null, b int not null)")
+	tk.MustExec("insert into t values (1, 10), (1, 5)")
+	tk.MustExec("create materialized view log on t (a, b) purge next date_add(now(), interval 1 hour)")
+	tk.MustExec("create materialized view mv (a, s, cnt) refresh fast next now() as select a, sum(b), count(1) from t group by a")
+	tk.MustQuery("select a, s, cnt from mv order by a").Check(testkit.Rows("1 15 2"))
+
+	tkRefresh := testkit.NewTestKit(t, store)
+	tkRefresh.MustExec("use test")
+	tkRefresh.MustExec("begin pessimistic")
+
+	tkConcurrent := testkit.NewTestKit(t, store)
+	tkConcurrent.MustExec("use test")
+	tkConcurrent.MustExec("insert into t values (2, 7)")
+
+	mustExecCompleteIncrementalUpdateImplementStmt(t, tkRefresh, "test", "mv")
+	tkRefresh.MustQuery("select a, s, cnt from mv order by a").Check(testkit.Rows("1 15 2", "2 7 1"))
+	tkRefresh.MustExec("commit")
+
+	tk.MustQuery("select a, s, cnt from mv order by a").Check(testkit.Rows("1 15 2", "2 7 1"))
 }
 
 func TestMaterializedViewRefreshCompleteOutOfPlaceCutoverBasic(t *testing.T) {
