@@ -586,11 +586,17 @@ Note on diff filtering:
 
 Write mapping contract for sink executor should be explicit:
 
+Recommended root sink-plan contract (`MVCompleteIncrementalApply` style):
+
 1. `OpColID`: child column index of `diff_op`.
-2. `MHandleCols`: physical locator columns built from `M` side (used by `DELETE` and `UPDATE`,
+2. `MarkerMVOffset`: which MV column is used as the side-missing marker.
+3. `MHandleCols`: physical locator columns built from `M` side (used by `DELETE` and `UPDATE`,
    and intentionally separate from the diff-join key).
-3. `QWritableInputColIDs`: mapping from target writable columns to `Q`-side input columns.
-4. `MWritableInputColIDs`: mapping from target writable columns to `M`-side input columns.
+4. `MRowInputColIDs` / `QRowInputColIDs`: full old/new row-image mappings in MV column order.
+
+Writable input mappings should be derived in executor from `TargetTable.WritableCols()` plus
+`MRowInputColIDs` / `QRowInputColIDs`, instead of being persisted in planner contract. This keeps
+complete-incremental apply aligned with fast-refresh writer ownership.
 
 Per-row operation behavior in sink executor:
 
@@ -629,30 +635,35 @@ Done criteria:
 1. Planner case tests show expected `FULL OUTER JOIN + Selection + projection(diff_op)` shape.
 2. Output layout metadata is explicit and validated in planner.
 
-M3. New sink plan/executor skeleton milestone
+M3. Planner sink-contract milestone
 
-1. Add new physical sink plan node for complete-incremental apply.
-2. Add executor builder path and mapping validation (`OpColID`, `MHandleCols`, `QWritableInputColIDs`, `MWritableInputColIDs`).
-3. Add sink runtime skeleton that consumes child rows and branches by `diff_op`.
+1. Add new root sink plan node for complete-incremental apply.
+2. Finalize planner-side sink mapping contract (`OpColID`, `MarkerMVOffset`, `MHandleCols`,
+   `MRowInputColIDs`, `QRowInputColIDs`).
+3. Cover explain/contract tests for the new root plan shape and diff-source layout expectations.
 
 Done criteria:
 
-1. Plan can be built and executed end-to-end without write regression.
-2. Invalid mapping/layout fails early with clear errors.
+1. Planner builds `MVCompleteIncrementalApply` with explicit sink metadata.
+2. Planner-side invalid mapping/layout fails early with clear errors.
+3. Executor integration is intentionally deferred to M4.
 
-M4. Correctness-first write milestone
+M4. Executor hookup and correctness-first write milestone
 
-1. Implement row writes in sink runtime:
+1. Add executor builder/runtime for `MVCompleteIncrementalApply`.
+2. Derive writable-column mappings from `TargetTable.WritableCols()` and row-image mappings.
+3. Implement row writes in sink runtime:
    - `diff_op=1` -> `AddRecord`
    - `diff_op=2` -> `RemoveRecord`
    - `diff_op=3` -> `UpdateRecord`
-2. For `UPDATE`, use conservative touched strategy first.
-3. Keep all writes inside existing refresh transaction framework.
+4. For `UPDATE`, use conservative touched strategy first.
+5. Keep all writes inside existing refresh transaction framework.
 
 Done criteria:
 
-1. Correctness tests pass for insert-only/delete-only/update-only/mixed/no-op cases.
-2. Failure path rolls back MV data and keeps refresh-info watermark unchanged.
+1. `MVCompleteIncrementalApply` can be built into an executor and consume diff rows end-to-end.
+2. Correctness tests pass for insert-only/delete-only/update-only/mixed/no-op cases.
+3. Failure path rolls back MV data and keeps refresh-info watermark unchanged.
 
 M5. Refresh framework integration milestone
 

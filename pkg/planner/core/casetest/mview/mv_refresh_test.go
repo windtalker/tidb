@@ -602,9 +602,11 @@ func TestExplainRefreshMVCompleteIncrementalPlanTree(t *testing.T) {
 	require.NoError(t, explain.RenderResult())
 	require.NotEmpty(t, explain.Rows)
 
-	var hasProjection, hasSelection, hasFullOuterJoin bool
+	var hasApply, hasProjection, hasSelection, hasFullOuterJoin bool
 	for _, row := range explain.Rows {
 		switch {
+		case strings.HasSuffix(row[0], "MVCompleteIncrementalApply"):
+			hasApply = true
 		case strings.HasSuffix(row[0], "Projection"):
 			hasProjection = true
 		case strings.HasSuffix(row[0], "Selection"):
@@ -615,9 +617,78 @@ func TestExplainRefreshMVCompleteIncrementalPlanTree(t *testing.T) {
 			}
 		}
 	}
+	require.True(t, hasApply)
 	require.True(t, hasProjection)
 	require.True(t, hasSelection)
 	require.True(t, hasFullOuterJoin)
+}
+
+func TestBuildRefreshMVCompleteIncrementalApplyPlan(t *testing.T) {
+	sctx := plannercore.MockContext()
+	savedStore := sctx.Store
+	sctx.Store = nil
+	_, err := sctx.Txn(true)
+	require.NoError(t, err)
+	sctx.Store = savedStore
+
+	baseID := int64(1101)
+	mvID := int64(1102)
+
+	baseTbl := &model.TableInfo{
+		ID:    baseID,
+		Name:  pmodel.NewCIStr("t"),
+		State: model.StatePublic,
+		Columns: []*model.ColumnInfo{
+			mkTestCol(1, "a", 0, mysql.TypeLong),
+			mkTestCol(2, "b", 1, mysql.TypeLong),
+		},
+	}
+	baseTbl.Columns[0].FieldType.AddFlag(mysql.NotNullFlag)
+
+	mvTbl := &model.TableInfo{
+		ID:    mvID,
+		Name:  pmodel.NewCIStr("mv_tbl_complete_apply"),
+		State: model.StatePublic,
+		Columns: []*model.ColumnInfo{
+			mkTestCol(1, "a", 0, mysql.TypeLong),
+			mkTestCol(2, "cnt", 1, mysql.TypeLonglong),
+		},
+		PKIsHandle: true,
+		MaterializedView: &model.MaterializedViewInfo{
+			BaseTableIDs: []int64{baseID},
+			SQLContent:   "select a, count(1) from t group by a",
+		},
+	}
+	mvTbl.Columns[0].FieldType.AddFlag(mysql.NotNullFlag | mysql.PriKeyFlag)
+	mvTbl.Columns[1].FieldType.AddFlag(mysql.NotNullFlag)
+
+	is := infoschema.MockInfoSchema([]*model.TableInfo{baseTbl, mvTbl})
+	domain.GetDomain(sctx).MockInfoCacheAndLoadInfoSchema(is)
+
+	implementStmt := &ast.RefreshMaterializedViewImplementStmt{
+		RefreshStmt: &ast.RefreshMaterializedViewStmt{
+			ViewName:     &ast.TableName{Name: mvTbl.Name},
+			Type:         ast.RefreshMaterializedViewTypeComplete,
+			CompleteType: ast.RefreshMaterializedViewCompleteTypeIncrementalUpdate,
+		},
+		LastSuccessfulRefreshReadTSO: 0,
+	}
+
+	builder, _ := plannercore.NewPlanBuilder().Init(sctx.GetPlanCtx(), is, hint.NewQBHintHandler(nil))
+	p, err := builder.Build(context.Background(), resolve.NewNodeW(implementStmt))
+	require.NoError(t, err)
+
+	applyPlan, ok := p.(*plannercore.MVCompleteIncrementalApply)
+	require.True(t, ok)
+	require.NotNil(t, applyPlan.Source)
+	require.Equal(t, mvID, applyPlan.MVTableID)
+	require.Equal(t, len(mvTbl.Columns), applyPlan.MVColumnCount)
+	require.Equal(t, 0, applyPlan.OpColID)
+	require.Equal(t, 0, applyPlan.MarkerMVOffset)
+	require.Equal(t, []int{1, 2}, applyPlan.MRowInputColIDs)
+	require.Equal(t, []int{3, 4}, applyPlan.QRowInputColIDs)
+	require.Equal(t, 1, applyPlan.MHandleCols.NumCols())
+	require.Equal(t, 1, applyPlan.MHandleCols.GetCol(0).Index)
 }
 
 func TestBuildRefreshMVFastSumNotNullNoCountExpr(t *testing.T) {
