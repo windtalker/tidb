@@ -106,14 +106,15 @@ type executorBuilder struct {
 	hasLock bool
 	Ti      *TelemetryInfo
 	// isStaleness means whether this statement use stale read.
-	isStaleness        bool
-	txnScope           string
-	readReplicaScope   string
-	inUpdateStmt       bool
-	inDeleteStmt       bool
-	inInsertStmt       bool
-	inSelectLockStmt   bool
-	inMVDeltaMergeStmt bool
+	isStaleness                      bool
+	txnScope                         string
+	readReplicaScope                 string
+	inUpdateStmt                     bool
+	inDeleteStmt                     bool
+	inInsertStmt                     bool
+	inSelectLockStmt                 bool
+	inMVDeltaMergeStmt               bool
+	inMVCompleteIncrementalApplyStmt bool
 
 	// forDataReaderBuilder indicates whether the builder is used by a dataReaderBuilder.
 	// When forDataReader is true, the builder should use the dataReaderTS as the executor read ts. This is because
@@ -1459,21 +1460,99 @@ func (b *executorBuilder) buildMVCompleteIncrementalApply(v *plannercore.MVCompl
 		b.err = errors.New("MVCompleteIncrementalApply plan is nil")
 		return nil
 	}
+	if v.Source == nil {
+		b.err = errors.New("MVCompleteIncrementalApply source plan is nil")
+		return nil
+	}
+	if b.err = b.updateForUpdateTS(); b.err != nil {
+		return nil
+	}
+
+	originInMVCompleteIncrementalApply := b.inMVCompleteIncrementalApplyStmt
+	b.inMVCompleteIncrementalApplyStmt = true
+	defer func() {
+		b.inMVCompleteIncrementalApplyStmt = originInMVCompleteIncrementalApply
+	}()
+
+	sourceExec := b.build(v.Source)
+	if b.err != nil {
+		return nil
+	}
+	if sourceExec == nil {
+		b.err = errors.New("MVCompleteIncrementalApply source executor is nil")
+		return nil
+	}
+	sourceFieldTypes := sourceExec.RetFieldTypes()
+	if v.OpColID < 0 || v.OpColID >= len(sourceFieldTypes) {
+		b.err = errors.Errorf("MVCompleteIncrementalApply op column id %d out of source range [0,%d)", v.OpColID, len(sourceFieldTypes))
+		return nil
+	}
+	if sourceFieldTypes[v.OpColID] == nil || sourceFieldTypes[v.OpColID].EvalType() != types.ETInt {
+		b.err = errors.Errorf("MVCompleteIncrementalApply op column id %d must be integer typed", v.OpColID)
+		return nil
+	}
 	mvTable, ok := b.is.TableByID(context.Background(), v.MVTableID)
 	if !ok {
 		b.err = errors.Errorf("MVCompleteIncrementalApply target table id %d not found in infoschema", v.MVTableID)
 		return nil
 	}
-	if _, err := buildMVCompleteIncrementalWritableInputColIDs(mvTable, v.MRowInputColIDs); err != nil {
+	if v.MHandleCols == nil {
+		b.err = errors.New("MVCompleteIncrementalApply target handle cols is nil")
+		return nil
+	}
+	publicCols := mvTable.Cols()
+	if len(publicCols) != v.MVColumnCount {
+		b.err = errors.Errorf("MVCompleteIncrementalApply target public column count %d != plan MV column count %d", len(publicCols), v.MVColumnCount)
+		return nil
+	}
+	for i := 0; i < v.MHandleCols.NumCols(); i++ {
+		handleInputIdx := v.MHandleCols.GetCol(i).Index
+		if handleInputIdx < 0 || handleInputIdx >= len(sourceFieldTypes) {
+			b.err = errors.Errorf("MVCompleteIncrementalApply handle col index %d out of source range [0,%d)", handleInputIdx, len(sourceFieldTypes))
+			return nil
+		}
+	}
+
+	mWritableInputColIDs, err := buildMVCompleteIncrementalWritableInputColIDs(mvTable, v.MRowInputColIDs)
+	if err != nil {
 		b.err = err
 		return nil
 	}
-	if _, err := buildMVCompleteIncrementalWritableInputColIDs(mvTable, v.QRowInputColIDs); err != nil {
+	qWritableInputColIDs, err := buildMVCompleteIncrementalWritableInputColIDs(mvTable, v.QRowInputColIDs)
+	if err != nil {
 		b.err = err
 		return nil
 	}
-	b.err = errors.New("MVCompleteIncrementalApply executor is not supported yet")
-	return nil
+	if err := validateMVCompleteIncrementalWritableInputColTypes(mvTable, sourceFieldTypes, mWritableInputColIDs); err != nil {
+		b.err = err
+		return nil
+	}
+	if err := validateMVCompleteIncrementalWritableInputColTypes(mvTable, sourceFieldTypes, qWritableInputColIDs); err != nil {
+		b.err = err
+		return nil
+	}
+	compareWritableIdxes, mCompareInputColIDs, qCompareInputColIDs, err := buildMVCompleteIncrementalCompareMappings(
+		mvTable,
+		v.GroupKeyMVOffsets,
+		mWritableInputColIDs,
+		qWritableInputColIDs,
+	)
+	if err != nil {
+		b.err = err
+		return nil
+	}
+
+	return &MVCompleteIncrementalApplyExec{
+		BaseExecutor:         exec.NewBaseExecutor(b.ctx, v.Schema(), v.ID(), sourceExec),
+		TargetTable:          mvTable,
+		TargetHandleCols:     v.MHandleCols,
+		OpColID:              v.OpColID,
+		MWritableInputColIDs: append([]int(nil), mWritableInputColIDs...),
+		QWritableInputColIDs: append([]int(nil), qWritableInputColIDs...),
+		CompareWritableIdxes: append([]int(nil), compareWritableIdxes...),
+		MCompareInputColIDs:  append([]int(nil), mCompareInputColIDs...),
+		QCompareInputColIDs:  append([]int(nil), qCompareInputColIDs...),
+	}
 }
 
 func buildMVCompleteIncrementalWritableInputColIDs(target table.Table, rowInputColIDs []int) ([]int, error) {
@@ -1513,6 +1592,112 @@ func buildMVCompleteIncrementalWritableInputColIDs(target table.Table, rowInputC
 		writable = append(writable, rowInputColIDs[col.Offset])
 	}
 	return writable, nil
+}
+
+func validateMVCompleteIncrementalWritableInputColTypes(
+	target table.Table,
+	childTypes []*types.FieldType,
+	writableInputColIDs []int,
+) error {
+	if target == nil {
+		return errors.New("MVCompleteIncrementalApply target table is nil")
+	}
+	writableCols := target.WritableCols()
+	if len(writableInputColIDs) != len(writableCols) {
+		return errors.Errorf(
+			"MVCompleteIncrementalApply writable input column count %d != target writable column count %d",
+			len(writableInputColIDs),
+			len(writableCols),
+		)
+	}
+	for writableIdx, inputColID := range writableInputColIDs {
+		if inputColID < 0 || inputColID >= len(childTypes) {
+			return errors.Errorf(
+				"MVCompleteIncrementalApply writable input col id %d at writable offset %d out of source range [0,%d)",
+				inputColID,
+				writableIdx,
+				len(childTypes),
+			)
+		}
+		inputTp := childTypes[inputColID]
+		if inputTp == nil {
+			return errors.Errorf("MVCompleteIncrementalApply writable input col id %d type is unavailable", inputColID)
+		}
+		targetTp := &writableCols[writableIdx].FieldType
+		if !targetTp.Equal(inputTp) {
+			return errors.Errorf(
+				"MVCompleteIncrementalApply writable input col id %d type mismatch, target col `%s` expects %s but input is %s",
+				inputColID,
+				writableCols[writableIdx].Name.O,
+				targetTp.String(),
+				inputTp.String(),
+			)
+		}
+	}
+	return nil
+}
+
+func buildMVCompleteIncrementalCompareMappings(
+	target table.Table,
+	groupKeyMVOffsets []int,
+	mWritableInputColIDs []int,
+	qWritableInputColIDs []int,
+) ([]int, []int, []int, error) {
+	if target == nil {
+		return nil, nil, nil, errors.New("MVCompleteIncrementalApply target table is nil")
+	}
+	if len(mWritableInputColIDs) != len(qWritableInputColIDs) {
+		return nil, nil, nil, errors.Errorf(
+			"MVCompleteIncrementalApply writable input mapping length mismatch: M=%d Q=%d",
+			len(mWritableInputColIDs),
+			len(qWritableInputColIDs),
+		)
+	}
+	publicCols := target.Cols()
+	writableCols := target.WritableCols()
+	if len(publicCols) != len(writableCols) {
+		return nil, nil, nil, errors.New("MVCompleteIncrementalApply does not support target table with non-public writable columns")
+	}
+	if len(groupKeyMVOffsets) == 0 {
+		return nil, nil, nil, errors.New("MVCompleteIncrementalApply group key offsets are empty")
+	}
+
+	isGroupKey := make([]bool, len(publicCols))
+	for i, off := range groupKeyMVOffsets {
+		if off < 0 || off >= len(publicCols) {
+			return nil, nil, nil, errors.Errorf(
+				"MVCompleteIncrementalApply group key offset %d at index %d out of range [0,%d)",
+				off,
+				i,
+				len(publicCols),
+			)
+		}
+		isGroupKey[off] = true
+	}
+
+	compareWritableIdxes := make([]int, 0, len(writableCols))
+	mCompareInputColIDs := make([]int, 0, len(writableCols))
+	qCompareInputColIDs := make([]int, 0, len(writableCols))
+	for writableIdx, col := range writableCols {
+		if col == nil {
+			return nil, nil, nil, errors.Errorf("MVCompleteIncrementalApply target writable column at offset %d is nil", writableIdx)
+		}
+		if col.Offset < 0 || col.Offset >= len(publicCols) {
+			return nil, nil, nil, errors.Errorf(
+				"MVCompleteIncrementalApply target writable column `%s` offset %d out of range [0,%d)",
+				col.Name.O,
+				col.Offset,
+				len(publicCols),
+			)
+		}
+		if isGroupKey[col.Offset] {
+			continue
+		}
+		compareWritableIdxes = append(compareWritableIdxes, writableIdx)
+		mCompareInputColIDs = append(mCompareInputColIDs, mWritableInputColIDs[writableIdx])
+		qCompareInputColIDs = append(qCompareInputColIDs, qWritableInputColIDs[writableIdx])
+	}
+	return compareWritableIdxes, mCompareInputColIDs, qCompareInputColIDs, nil
 }
 
 func (b *executorBuilder) buildMVDeltaMergeMinMaxRecompute(
@@ -2885,7 +3070,7 @@ func (b *executorBuilder) buildExpand(v *plannercore.PhysicalExpand) exec.Execut
 
 	// Use un-parallel projection for query that write on memdb to avoid data race.
 	// See also https://github.com/pingcap/tidb/issues/26832
-	if b.inUpdateStmt || b.inDeleteStmt || b.inInsertStmt || b.inMVDeltaMergeStmt || b.hasLock {
+	if b.inUpdateStmt || b.inDeleteStmt || b.inInsertStmt || b.inMVDeltaMergeStmt || b.inMVCompleteIncrementalApplyStmt || b.hasLock {
 		e.numWorkers = 0
 	}
 	return e
@@ -2913,14 +3098,14 @@ func (b *executorBuilder) buildProjection(v *plannercore.PhysicalProjection) exe
 
 	// Use un-parallel projection for query that write on memdb to avoid data race.
 	// See also https://github.com/pingcap/tidb/issues/26832
-	if b.inUpdateStmt || b.inDeleteStmt || b.inInsertStmt || b.inMVDeltaMergeStmt || b.hasLock {
+	if b.inUpdateStmt || b.inDeleteStmt || b.inInsertStmt || b.inMVDeltaMergeStmt || b.inMVCompleteIncrementalApplyStmt || b.hasLock {
 		e.numWorkers = 0
 	}
 	return e
 }
 
 func (b *executorBuilder) shouldReadByForUpdateTS() bool {
-	return b.inInsertStmt || b.inUpdateStmt || b.inDeleteStmt || b.inSelectLockStmt || b.inMVDeltaMergeStmt
+	return b.inInsertStmt || b.inUpdateStmt || b.inDeleteStmt || b.inSelectLockStmt || b.inMVDeltaMergeStmt || b.inMVCompleteIncrementalApplyStmt
 }
 
 func (b *executorBuilder) buildTableDual(v *plannercore.PhysicalTableDual) exec.Executor {
