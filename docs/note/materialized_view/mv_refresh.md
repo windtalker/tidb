@@ -420,13 +420,16 @@ Parser should enforce that they can only appear after `COMPLETE`.
 
 V1 is correctness-first and keeps implementation scope tight:
 
-1. Require one usable row identity on MV:
-   - `PRIMARY KEY`, or
-   - `UNIQUE` key where all key columns are `NOT NULL`.
-2. If requirement is not met, reject `COMPLETE INCREMENTAL UPDATE` directly
+1. V1 targets grouped MVs; for diff computation, the logical row identity is the `GROUP BY` key.
+2. All `GROUP BY` key columns used by the diff join must map to MV columns that are `NOT NULL`.
+3. Physical row locators used later by `UPDATE` / `DELETE` are a separate concern from diff-join identity:
+   - preferred locators are table handles (`PRIMARY KEY` / common handle);
+   - `_tidb_rowid` may still be carried from the current MV side as a physical locator,
+     but it is not used as the diff-join key.
+4. If these requirements are not met, reject `COMPLETE INCREMENTAL UPDATE` directly
    (do not silently fallback to `COMPLETE` replace mode).
-3. Keep existing outer advisory lock for refresh mutex semantics.
-4. Keep existing in-place refresh transaction framework (`BEGIN PESSIMISTIC`, history lifecycle, success-only refresh-info persistence).
+5. Keep existing outer advisory lock for refresh mutex semantics.
+6. Keep existing in-place refresh transaction framework (`BEGIN PESSIMISTIC`, history lifecycle, success-only refresh-info persistence).
 
 #### Why not split into three independent re-compute SQLs in one txn
 
@@ -449,7 +452,8 @@ Use one `FULL OUTER JOIN`-based diff source query, then let one dedicated sink o
 High-level algorithm:
 
 1. Build query-side full result (`Q`) from MV definition SQL.
-2. Full-outer-join `Q` with current MV table (`M`) by row identity key.
+2. Full-outer-join `Q` with current MV table (`M`) by the `GROUP BY` key
+   (which is the logical row identity in this refresh mode).
 3. Keep only changed rows:
    - `Q-only` => `INSERT`
    - `M-only` => `DELETE`
@@ -492,15 +496,22 @@ WHERE
    OR NOT (q.v1 <=> m.v1 AND q.v2 <=> m.v2);
 ```
 
+In the SQL sketch above, `q_marker` / `m_marker` are logical aliases used to express
+side-missing detection and `diff_op` derivation. They do not have to remain as standalone
+output columns in the final planner-executor layout; the chosen marker can be read from
+the `Q` / `M` row image via explicit metadata.
+
 #### Join and diff rules
 
 1. Join predicate:
-   - V1 key columns are `NOT NULL`, so `=` can be used.
-   - keep extension path open for nullable keys (future can switch to `<=>`).
+   - use the `GROUP BY` key columns as the diff-join key;
+   - in V1 these key columns are required to be `NOT NULL`, so `=` can be used;
+   - physical locators such as `PRIMARY KEY` handle columns or `_tidb_rowid` are not suitable
+     diff-join keys; they are carried only for later `UPDATE` / `DELETE` locate.
 2. Payload equality check should use null-safe comparison (`<=>`) per column.
 3. Side-missing detection should use one deterministic marker column from MV schema:
    - pick the first visible `NOT NULL` column from MV `TableInfo.Columns` (stable column order);
-   - map this column as `q_marker` / `m_marker` in diff SQL;
+   - map this column as logical aliases `q_marker` / `m_marker` in diff SQL;
    - `q_marker IS NULL` => row missing on query side (`DELETE`);
    - `m_marker IS NULL` => row missing on MV side (`INSERT`).
 
@@ -538,10 +549,16 @@ This preserves the same key properties as FAST path:
 For operator input layout, keep it explicit and stable (planner-executor contract):
 
 1. row-op column (`diff_op`);
-2. side-missing markers (`q_marker`, `m_marker`) for diagnostics and safety checks;
-3. target key/handle columns needed for `UPDATE`/`DELETE` locate;
-4. old row image (`M`) columns for delete/update old values;
-5. new row image (`Q`) columns for insert/update new values.
+2. optional extra handle column (`_tidb_rowid`) only when MV uses extra row-id handle;
+3. old row image (`M`) columns for delete/update old values;
+4. new row image (`Q`) columns for insert/update new values.
+
+Additional layout metadata stays explicit even when columns are reused:
+
+1. marker selection is tracked by MV-column offset, so side-missing diagnostics can read the chosen
+   marker from the `M` / `Q` row image instead of projecting `q_marker` / `m_marker` twice;
+2. `MHandleCols` may either point to old-row-image columns (for PK/common handle) or to the optional
+   extra `_tidb_rowid` column.
 
 `diff_op` should be generated in diff-source projection (instead of re-evaluating marker logic in sink):
 
@@ -570,7 +587,8 @@ Note on diff filtering:
 Write mapping contract for sink executor should be explicit:
 
 1. `OpColID`: child column index of `diff_op`.
-2. `MHandleCols`: handle columns built from `M` side (used by `DELETE` and `UPDATE`).
+2. `MHandleCols`: physical locator columns built from `M` side (used by `DELETE` and `UPDATE`,
+   and intentionally separate from the diff-join key).
 3. `QWritableInputColIDs`: mapping from target writable columns to `Q`-side input columns.
 4. `MWritableInputColIDs`: mapping from target writable columns to `M`-side input columns.
 
@@ -602,7 +620,8 @@ Done criteria:
 M2. Planner diff-source milestone
 
 1. Build FOJ-based diff-source AST (`Q` vs `M`) in planner mview builder.
-2. Produce stable output layout including `diff_op`, markers, handle cols, old/new row images.
+2. Produce stable output layout including `diff_op`, optional extra handle, old/new row images,
+   with explicit metadata for marker selection and `M`-side physical locators.
 3. Keep `WHERE` diff-filter semantics stable (`side-missing OR payload-changed`).
 
 Done criteria:
