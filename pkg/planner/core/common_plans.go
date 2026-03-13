@@ -705,6 +705,70 @@ func (p *MVDeltaMerge) MemoryUsage() (sum int64) {
 	return
 }
 
+// MVCompleteIncrementalApply represents the apply sink contract for COMPLETE INCREMENTAL UPDATE.
+// It consumes one diff-source stream and carries explicit row-image metadata for later sink execution.
+type MVCompleteIncrementalApply struct {
+	baseSchemaProducer
+
+	// Source is the diff-source physical plan for COMPLETE INCREMENTAL UPDATE.
+	Source base.PhysicalPlan
+
+	MVTableID     int64
+	MVColumnCount int
+
+	// OpColID is the child column index of diff_op.
+	OpColID int
+	// MarkerMVOffset identifies which MV column is used as the side-missing marker.
+	MarkerMVOffset int
+	// MHandleCols contains physical locator columns from the current-MV side.
+	MHandleCols util.HandleCols `plan-cache-clone:"shallow"`
+	// MRowInputColIDs and QRowInputColIDs store the full old/new row-image input layout in MV column order.
+	MRowInputColIDs []int `plan-cache-clone:"shallow"`
+	QRowInputColIDs []int `plan-cache-clone:"shallow"`
+}
+
+// ExplainInfo returns the key sink mapping metadata for complete-incremental MV apply.
+func (p *MVCompleteIncrementalApply) ExplainInfo() string {
+	return fmt.Sprintf(
+		"op:%d, marker_mv:%d, m_handle:%s, m_row:%s, q_row:%s",
+		p.OpColID,
+		p.MarkerMVOffset,
+		formatHandleColsInputOffsets(p.MHandleCols),
+		formatMVDeltaMergeOffsets(p.MRowInputColIDs),
+		formatMVDeltaMergeOffsets(p.QRowInputColIDs),
+	)
+}
+
+func formatHandleColsInputOffsets(handleCols util.HandleCols) string {
+	if handleCols == nil {
+		return "[]"
+	}
+	offsets := make([]int, 0, handleCols.NumCols())
+	for i := 0; i < handleCols.NumCols(); i++ {
+		col := handleCols.GetCol(i)
+		if col == nil {
+			continue
+		}
+		offsets = append(offsets, col.Index)
+	}
+	return formatMVDeltaMergeOffsets(offsets)
+}
+
+// MemoryUsage returns the memory usage of MVCompleteIncrementalApply.
+func (p *MVCompleteIncrementalApply) MemoryUsage() (sum int64) {
+	if p == nil {
+		return
+	}
+
+	sum = p.baseSchemaProducer.MemoryUsage() + size.SizeOfInterface*2 + size.SizeOfInt64 + size.SizeOfInt*3 + size.SizeOfSlice*2
+	sum += int64(cap(p.MRowInputColIDs)) * size.SizeOfInt
+	sum += int64(cap(p.QRowInputColIDs)) * size.SizeOfInt
+	if p.Source != nil {
+		sum += p.Source.MemoryUsage()
+	}
+	return
+}
+
 // AnalyzeInfo is used to store the database name, table name and partition name of analyze task.
 type AnalyzeInfo struct {
 	DBName        string
