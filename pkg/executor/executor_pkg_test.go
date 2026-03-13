@@ -34,6 +34,7 @@ import (
 	"github.com/pingcap/tidb/pkg/sessionctx/variable"
 	"github.com/pingcap/tidb/pkg/tablecodec"
 	"github.com/pingcap/tidb/pkg/types"
+	"github.com/pingcap/tidb/pkg/util/chunk"
 	"github.com/pingcap/tidb/pkg/util/collate"
 	"github.com/pingcap/tidb/pkg/util/memory"
 	"github.com/pingcap/tidb/pkg/util/mock"
@@ -82,6 +83,58 @@ func TestShouldUseImportIntoForMVRefreshOutOfPlace(t *testing.T) {
 	require.False(t, shouldUseImportIntoForMVRefreshOutOfPlace("tikv"))
 	require.False(t, shouldUseImportIntoForMVRefreshOutOfPlace(kv.TiDB.Name()))
 	require.False(t, shouldUseImportIntoForMVRefreshOutOfPlace("mock-storage"))
+}
+
+func TestMarkMVCompleteIncrementalTouchedRowsByColumnStringUsesCollation(t *testing.T) {
+	testCases := []struct {
+		name      string
+		collation string
+		oldVal    string
+		newVal    string
+		touched   bool
+	}{
+		{
+			name:      "case-insensitive collation treats values as equal",
+			collation: "utf8mb4_general_ci",
+			oldVal:    "a",
+			newVal:    "A",
+			touched:   false,
+		},
+		{
+			name:      "binary collation keeps byte-sensitive change",
+			collation: "utf8mb4_bin",
+			oldVal:    "a",
+			newVal:    "A",
+			touched:   true,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			ft := types.NewFieldTypeWithCollation(mysql.TypeVarString, tc.collation, types.UnspecifiedLength)
+			input := chunk.NewChunkWithCapacity([]*types.FieldType{ft, ft}, 1)
+			input.AppendString(0, tc.oldVal)
+			input.AppendString(1, tc.newVal)
+
+			updateTouchedBitmap := make([]uint8, 1)
+			err := markMVCompleteIncrementalTouchedRowsByColumn(
+				[]int{0},
+				updateTouchedBitmap,
+				1,
+				true,
+				mvCompleteIncrementalCompareColumn{
+					fieldType:      ft,
+					collator:       collate.GetCollator(tc.collation),
+					notNull:        true,
+					touchedBitMask: 1,
+				},
+				input.Column(0),
+				input.Column(1),
+			)
+			require.NoError(t, err)
+			require.Equal(t, tc.touched, updateTouchedBitmap[0] != 0)
+		})
+	}
 }
 
 func TestBuildKvRangesForIndexJoinWithoutCwcAndWithMemoryTracker(t *testing.T) {
