@@ -197,6 +197,8 @@ func (b *executorBuilder) build(p base.Plan) exec.Executor {
 		return b.buildPurgeMaterializedViewLog(v)
 	case *plannercore.MVDeltaMerge:
 		return b.buildMVDeltaMerge(v)
+	case *plannercore.MVCompleteIncrementalApply:
+		return b.buildMVCompleteIncrementalApply(v)
 	case *plannercore.Deallocate:
 		return b.buildDeallocate(v)
 	case *plannercore.Delete:
@@ -1450,6 +1452,67 @@ func (b *executorBuilder) buildMVDeltaMerge(v *plannercore.MVDeltaMerge) exec.Ex
 		MinMaxRecompute:      minMaxRecompute,
 		TargetWritableColIDs: nil,
 	}
+}
+
+func (b *executorBuilder) buildMVCompleteIncrementalApply(v *plannercore.MVCompleteIncrementalApply) exec.Executor {
+	if v == nil {
+		b.err = errors.New("MVCompleteIncrementalApply plan is nil")
+		return nil
+	}
+	mvTable, ok := b.is.TableByID(context.Background(), v.MVTableID)
+	if !ok {
+		b.err = errors.Errorf("MVCompleteIncrementalApply target table id %d not found in infoschema", v.MVTableID)
+		return nil
+	}
+	if _, err := buildMVCompleteIncrementalWritableInputColIDs(mvTable, v.MRowInputColIDs); err != nil {
+		b.err = err
+		return nil
+	}
+	if _, err := buildMVCompleteIncrementalWritableInputColIDs(mvTable, v.QRowInputColIDs); err != nil {
+		b.err = err
+		return nil
+	}
+	b.err = errors.New("MVCompleteIncrementalApply executor is not supported yet")
+	return nil
+}
+
+func buildMVCompleteIncrementalWritableInputColIDs(target table.Table, rowInputColIDs []int) ([]int, error) {
+	if target == nil {
+		return nil, errors.New("MVCompleteIncrementalApply target table is nil")
+	}
+
+	writableCols := target.WritableCols()
+	if len(writableCols) == 0 {
+		return nil, errors.New("MVCompleteIncrementalApply target table has no writable columns")
+	}
+	publicCols := target.Cols()
+	if len(publicCols) != len(writableCols) {
+		return nil, errors.New("MVCompleteIncrementalApply does not support target table with non-public writable columns")
+	}
+	if len(rowInputColIDs) != len(publicCols) {
+		return nil, errors.Errorf(
+			"MVCompleteIncrementalApply row input column mapping length %d != target public column count %d",
+			len(rowInputColIDs),
+			len(publicCols),
+		)
+	}
+
+	writable := make([]int, 0, len(writableCols))
+	for i, col := range writableCols {
+		if col == nil {
+			return nil, errors.Errorf("MVCompleteIncrementalApply target writable column at offset %d is nil", i)
+		}
+		if col.Offset < 0 || col.Offset >= len(rowInputColIDs) {
+			return nil, errors.Errorf(
+				"MVCompleteIncrementalApply target writable column `%s` offset %d out of range [0,%d)",
+				col.Name.O,
+				col.Offset,
+				len(rowInputColIDs),
+			)
+		}
+		writable = append(writable, rowInputColIDs[col.Offset])
+	}
+	return writable, nil
 }
 
 func (b *executorBuilder) buildMVDeltaMergeMinMaxRecompute(
