@@ -131,12 +131,12 @@ type CompleteDiffBuildResult struct {
 	MVTableID     int64
 	MVColumnCount int
 
-	OpColOffset    int
-	MarkerMVOffset int
+	OpColOffset       int
+	MarkerMVOffset    int
 	GroupKeyMVOffsets []int
-	MHandleCols    plannerutil.HandleCols
-	MRowOffsets    []int
-	QRowOffsets    []int
+	MHandleCols       plannerutil.HandleCols
+	MRowOffsets       []int
+	QRowOffsets       []int
 }
 
 // ValidateSourceLayout validates output layout metadata against a concrete schema length (if provided).
