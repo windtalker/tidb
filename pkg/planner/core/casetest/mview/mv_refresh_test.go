@@ -16,6 +16,7 @@ package mvrefresh
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/pingcap/tidb/pkg/domain"
@@ -529,6 +530,94 @@ func TestExplainRefreshMVFastPlanTreeMinMax(t *testing.T) {
 		{"    └─HashAgg(Probe)", "1.00", "cop[tikv]", "", "group by:test.t.a, funcs:max(test.t.b)->Column#43, funcs:min(test.t.b)->Column#44"},
 		{"      └─TableRowIDScan", "1.00", "cop[tikv]", "table:t", "keep order:false, stats:pseudo"},
 	}, explain.Rows)
+}
+
+func TestExplainRefreshMVCompleteIncrementalPlanTree(t *testing.T) {
+	sctx := plannercore.MockContext()
+	// Ensure we have a non-zero StartTS; mock.Store.Begin returns nil, so create a fake txn first.
+	savedStore := sctx.Store
+	sctx.Store = nil
+	_, err := sctx.Txn(true)
+	require.NoError(t, err)
+	sctx.Store = savedStore
+
+	baseID := int64(1001)
+	mvID := int64(1002)
+
+	baseTbl := &model.TableInfo{
+		ID:    baseID,
+		Name:  pmodel.NewCIStr("t"),
+		State: model.StatePublic,
+		Columns: []*model.ColumnInfo{
+			mkTestCol(1, "a", 0, mysql.TypeLong),
+			mkTestCol(2, "b", 1, mysql.TypeLong),
+		},
+	}
+	baseTbl.Columns[0].FieldType.AddFlag(mysql.NotNullFlag)
+
+	mvTbl := &model.TableInfo{
+		ID:    mvID,
+		Name:  pmodel.NewCIStr("mv_tbl_complete_diff"),
+		State: model.StatePublic,
+		Columns: []*model.ColumnInfo{
+			mkTestCol(1, "a", 0, mysql.TypeLong),
+			mkTestCol(2, "cnt", 1, mysql.TypeLonglong),
+		},
+		PKIsHandle: true,
+		MaterializedView: &model.MaterializedViewInfo{
+			BaseTableIDs: []int64{baseID},
+			SQLContent:   "select a, count(1) from t group by a",
+		},
+	}
+	mvTbl.Columns[0].FieldType.AddFlag(mysql.NotNullFlag | mysql.PriKeyFlag)
+
+	is := infoschema.MockInfoSchema([]*model.TableInfo{baseTbl, mvTbl})
+	domain.GetDomain(sctx).MockInfoCacheAndLoadInfoSchema(is)
+
+	implementStmt := &ast.RefreshMaterializedViewImplementStmt{
+		RefreshStmt: &ast.RefreshMaterializedViewStmt{
+			ViewName:     &ast.TableName{Name: mvTbl.Name},
+			Type:         ast.RefreshMaterializedViewTypeComplete,
+			CompleteType: ast.RefreshMaterializedViewCompleteTypeIncrementalUpdate,
+		},
+		LastSuccessfulRefreshReadTSO: 0,
+	}
+
+	builder, _ := plannercore.NewPlanBuilder().Init(sctx.GetPlanCtx(), is, hint.NewQBHintHandler(nil))
+	p, err := builder.Build(context.Background(), resolve.NewNodeW(implementStmt))
+	require.NoError(t, err)
+
+	savedIgnoreExplainIDSuffix := sctx.GetSessionVars().StmtCtx.IgnoreExplainIDSuffix
+	sctx.GetSessionVars().StmtCtx.IgnoreExplainIDSuffix = true
+	defer func() {
+		sctx.GetSessionVars().StmtCtx.IgnoreExplainIDSuffix = savedIgnoreExplainIDSuffix
+	}()
+
+	explain := &plannercore.Explain{
+		TargetPlan: p,
+		Format:     types.ExplainFormatBrief,
+		Analyze:    false,
+	}
+	explain.SetSCtx(p.SCtx())
+	require.NoError(t, explain.RenderResult())
+	require.NotEmpty(t, explain.Rows)
+
+	var hasProjection, hasSelection, hasFullOuterJoin bool
+	for _, row := range explain.Rows {
+		switch {
+		case strings.HasSuffix(row[0], "Projection"):
+			hasProjection = true
+		case strings.HasSuffix(row[0], "Selection"):
+			hasSelection = true
+		case strings.HasSuffix(row[0], "HashJoin"):
+			if strings.Contains(row[4], "full outer join") {
+				hasFullOuterJoin = true
+			}
+		}
+	}
+	require.True(t, hasProjection)
+	require.True(t, hasSelection)
+	require.True(t, hasFullOuterJoin)
 }
 
 func TestBuildRefreshMVFastSumNotNullNoCountExpr(t *testing.T) {
