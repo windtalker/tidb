@@ -590,9 +590,11 @@ Recommended root sink-plan contract (`MVCompleteIncrementalApply` style):
 
 1. `OpColID`: child column index of `diff_op`.
 2. `MarkerMVOffset`: which MV column is used as the side-missing marker.
-3. `MHandleCols`: physical locator columns built from `M` side (used by `DELETE` and `UPDATE`,
+3. `GroupKeyMVOffsets`: GROUP BY key offsets in MV column order; sink uses them to skip
+   redundant update comparisons on join-equal key columns.
+4. `MHandleCols`: physical locator columns built from `M` side (used by `DELETE` and `UPDATE`,
    and intentionally separate from the diff-join key).
-4. `MRowInputColIDs` / `QRowInputColIDs`: full old/new row-image mappings in MV column order.
+5. `MRowInputColIDs` / `QRowInputColIDs`: full old/new row-image mappings in MV column order.
 
 Writable input mappings should be derived in executor from `TargetTable.WritableCols()` plus
 `MRowInputColIDs` / `QRowInputColIDs`, instead of being persisted in planner contract. This keeps
@@ -638,8 +640,8 @@ Done criteria:
 M3. Planner sink-contract milestone
 
 1. Add new root sink plan node for complete-incremental apply.
-2. Finalize planner-side sink mapping contract (`OpColID`, `MarkerMVOffset`, `MHandleCols`,
-   `MRowInputColIDs`, `QRowInputColIDs`).
+2. Finalize planner-side sink mapping contract (`OpColID`, `MarkerMVOffset`, `GroupKeyMVOffsets`,
+   `MHandleCols`, `MRowInputColIDs`, `QRowInputColIDs`).
 3. Cover explain/contract tests for the new root plan shape and diff-source layout expectations.
 
 Done criteria:
@@ -652,11 +654,11 @@ M4. Executor hookup and correctness-first write milestone
 
 1. Add executor builder/runtime for `MVCompleteIncrementalApply`.
 2. Derive writable-column mappings from `TargetTable.WritableCols()` and row-image mappings.
-3. Implement row writes in sink runtime:
+3. For `UPDATE`, compare old/new non-group-key writable columns in chunk batches and derive precise touched sets.
+4. Implement row writes in sink runtime:
    - `diff_op=1` -> `AddRecord`
    - `diff_op=2` -> `RemoveRecord`
    - `diff_op=3` -> `UpdateRecord`
-4. For `UPDATE`, use conservative touched strategy first.
 5. Keep all writes inside existing refresh transaction framework.
 
 Done criteria:

@@ -133,6 +133,7 @@ type CompleteDiffBuildResult struct {
 
 	OpColOffset    int
 	MarkerMVOffset int
+	GroupKeyMVOffsets []int
 	MHandleCols    plannerutil.HandleCols
 	MRowOffsets    []int
 	QRowOffsets    []int
@@ -182,6 +183,14 @@ func (r *CompleteDiffBuildResult) ValidateSourceLayout(schemaLen int) error {
 	}
 	if r.MarkerMVOffset < 0 || r.MarkerMVOffset >= r.MVColumnCount {
 		return errors.Errorf("complete diff build result: invalid MarkerMVOffset %d", r.MarkerMVOffset)
+	}
+	if len(r.GroupKeyMVOffsets) == 0 {
+		return errors.New("complete diff build result: GroupKeyMVOffsets is empty")
+	}
+	for i, off := range r.GroupKeyMVOffsets {
+		if off < 0 || off >= r.MVColumnCount {
+			return errors.Errorf("complete diff build result: invalid GroupKeyMVOffsets[%d]=%d", i, off)
+		}
 	}
 	if len(r.MRowOffsets) != r.MVColumnCount {
 		return errors.Errorf(
@@ -2121,6 +2130,7 @@ func BuildCompleteDiffSource(
 		MVColumnCount:     len(mv.Columns),
 		OpColOffset:       0,
 		MarkerMVOffset:    markerOffset,
+		GroupKeyMVOffsets: append([]int(nil), groupKeyOffsets...),
 		MHandleCols:       handleColsMeta,
 		MRowOffsets:       mRowOffsets,
 		QRowOffsets:       qRowOffsets,
