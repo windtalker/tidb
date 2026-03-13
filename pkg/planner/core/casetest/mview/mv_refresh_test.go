@@ -685,6 +685,7 @@ func TestBuildRefreshMVCompleteIncrementalApplyPlan(t *testing.T) {
 	require.Equal(t, len(mvTbl.Columns), applyPlan.MVColumnCount)
 	require.Equal(t, 0, applyPlan.OpColID)
 	require.Equal(t, 0, applyPlan.MarkerMVOffset)
+	require.Equal(t, []int{0}, applyPlan.GroupKeyMVOffsets)
 	require.Equal(t, []int{1, 2}, applyPlan.MRowInputColIDs)
 	require.Equal(t, []int{3, 4}, applyPlan.QRowInputColIDs)
 	require.Equal(t, 1, applyPlan.MHandleCols.NumCols())

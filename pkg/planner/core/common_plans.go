@@ -720,6 +720,8 @@ type MVCompleteIncrementalApply struct {
 	OpColID int
 	// MarkerMVOffset identifies which MV column is used as the side-missing marker.
 	MarkerMVOffset int
+	// GroupKeyMVOffsets stores GROUP BY key offsets in MV column order.
+	GroupKeyMVOffsets []int `plan-cache-clone:"shallow"`
 	// MHandleCols contains physical locator columns from the current-MV side.
 	MHandleCols util.HandleCols `plan-cache-clone:"shallow"`
 	// MRowInputColIDs and QRowInputColIDs store the full old/new row-image input layout in MV column order.
@@ -730,9 +732,10 @@ type MVCompleteIncrementalApply struct {
 // ExplainInfo returns the key sink mapping metadata for complete-incremental MV apply.
 func (p *MVCompleteIncrementalApply) ExplainInfo() string {
 	return fmt.Sprintf(
-		"op:%d, marker_mv:%d, m_handle:%s, m_row:%s, q_row:%s",
+		"op:%d, marker_mv:%d, group_keys:%s, m_handle:%s, m_row:%s, q_row:%s",
 		p.OpColID,
 		p.MarkerMVOffset,
+		formatMVDeltaMergeOffsets(p.GroupKeyMVOffsets),
 		formatHandleColsInputOffsets(p.MHandleCols),
 		formatMVDeltaMergeOffsets(p.MRowInputColIDs),
 		formatMVDeltaMergeOffsets(p.QRowInputColIDs),
@@ -760,7 +763,8 @@ func (p *MVCompleteIncrementalApply) MemoryUsage() (sum int64) {
 		return
 	}
 
-	sum = p.baseSchemaProducer.MemoryUsage() + size.SizeOfInterface*2 + size.SizeOfInt64 + size.SizeOfInt*3 + size.SizeOfSlice*2
+	sum = p.baseSchemaProducer.MemoryUsage() + size.SizeOfInterface*2 + size.SizeOfInt64 + size.SizeOfInt*3 + size.SizeOfSlice*3
+	sum += int64(cap(p.GroupKeyMVOffsets)) * size.SizeOfInt
 	sum += int64(cap(p.MRowInputColIDs)) * size.SizeOfInt
 	sum += int64(cap(p.QRowInputColIDs)) * size.SizeOfInt
 	if p.Source != nil {
