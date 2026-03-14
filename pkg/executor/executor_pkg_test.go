@@ -137,6 +137,60 @@ func TestMarkMVCompleteDeltaTouchedRowsByColumnStringUsesCollation(t *testing.T)
 	}
 }
 
+func TestMVCompleteDeltaApplyRuntimeStatsString(t *testing.T) {
+	stats := &mvCompleteDeltaApplyRuntimeStats{
+		writerTime: 12 * time.Millisecond,
+		writerDetail: mvCompleteDeltaApplyWriterStats{
+			chunks:     2,
+			rowOps:     7,
+			insertRows: 1,
+			updateRows: 3,
+			deleteRows: 2,
+		},
+	}
+	s := stats.String()
+	require.Contains(t, s, "mv_complete_delta_apply")
+	require.Contains(t, s, "writer:{time:12ms")
+	require.Contains(t, s, "chunks:2")
+	require.Contains(t, s, "row_ops:7")
+	require.Contains(t, s, "rows:{insert:1, update:3, delete:2}")
+}
+
+func TestMVCompleteDeltaApplyRuntimeStatsMergeAndClone(t *testing.T) {
+	left := &mvCompleteDeltaApplyRuntimeStats{
+		writerTime: 5 * time.Millisecond,
+		writerDetail: mvCompleteDeltaApplyWriterStats{
+			chunks:     1,
+			rowOps:     4,
+			insertRows: 1,
+			updateRows: 2,
+			deleteRows: 1,
+		},
+	}
+	right := &mvCompleteDeltaApplyRuntimeStats{
+		writerTime: 7 * time.Millisecond,
+		writerDetail: mvCompleteDeltaApplyWriterStats{
+			chunks:     2,
+			rowOps:     5,
+			updateRows: 1,
+			deleteRows: 1,
+		},
+	}
+
+	left.Merge(right)
+	require.Equal(t, 12*time.Millisecond, left.writerTime)
+	require.Equal(t, int64(3), left.writerDetail.chunks)
+	require.Equal(t, int64(9), left.writerDetail.rowOps)
+	require.Equal(t, int64(1), left.writerDetail.insertRows)
+	require.Equal(t, int64(3), left.writerDetail.updateRows)
+	require.Equal(t, int64(2), left.writerDetail.deleteRows)
+
+	cloned, ok := left.Clone().(*mvCompleteDeltaApplyRuntimeStats)
+	require.True(t, ok)
+	require.Equal(t, left.writerTime, cloned.writerTime)
+	require.Equal(t, left.writerDetail, cloned.writerDetail)
+}
+
 func TestBuildKvRangesForIndexJoinWithoutCwcAndWithMemoryTracker(t *testing.T) {
 	indexRanges := make([]*ranger.Range, 0, 6)
 	indexRanges = append(indexRanges, generateIndexRange(1, 1, 1, 1, 1))
