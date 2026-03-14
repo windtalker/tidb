@@ -882,6 +882,16 @@ func TestBuildCompleteDiffSourceLayout(t *testing.T) {
 	join := res.DiffSourceSelect.From.TableRefs
 	require.NotNil(t, join)
 	require.Equal(t, ast.FullJoin, join.Tp)
+	require.NotNil(t, join.On)
+	joinPredicates := collectAndPredicates(t, join.On.Expr)
+	require.Len(t, joinPredicates, 1)
+	leftTable, leftCol := columnNameRef(t, joinPredicates[0].L)
+	rightTable, rightCol := columnNameRef(t, joinPredicates[0].R)
+	require.Equal(t, diffQAlias, leftTable)
+	require.Equal(t, diffMAlias, rightTable)
+	require.Equal(t, leftCol, rightCol)
+	require.Equal(t, "a", rightCol)
+	require.Equal(t, opcode.EQ, joinPredicates[0].Op)
 	require.NotNil(t, res.DiffSourceSelect.Where)
 	payloadCmpOps := collectPayloadComparisonOps(t, res.DiffSourceSelect.Where)
 	require.Equal(t, map[string]opcode.Op{
@@ -890,7 +900,7 @@ func TestBuildCompleteDiffSourceLayout(t *testing.T) {
 	}, payloadCmpOps)
 }
 
-func TestBuildCompleteDiffSourceRejectsNullableGroupKey(t *testing.T) {
+func TestBuildCompleteDiffSourceNullableGroupKeyUsesNullEQ(t *testing.T) {
 	sctx := core.MockContext()
 
 	baseID := int64(21)
@@ -919,13 +929,30 @@ func TestBuildCompleteDiffSourceRejectsNullableGroupKey(t *testing.T) {
 			SQLContent:   "select a, count(1) from t group by a",
 		},
 	}
+	mv.Columns[1].FieldType.AddFlag(mysql.NotNullFlag)
 
 	is := infoschema.MockInfoSchema([]*model.TableInfo{base, mv})
 	domain.GetDomain(sctx).MockInfoCacheAndLoadInfoSchema(is)
 
 	res, err := mvmerge.BuildCompleteDiffSource(sctx.GetPlanCtx(), is, mv)
-	require.Nil(t, res)
-	require.ErrorContains(t, err, "group key column a must be NOT NULL")
+	require.NoError(t, err)
+	require.NotNil(t, res)
+	require.Equal(t, 1, res.MarkerMVOffset)
+	require.Equal(t, 1, res.MHandleCols.NumCols())
+	require.Equal(t, 1, res.MHandleCols.GetCol(0).Index)
+	require.Equal(t, 1+1+2*len(mv.Columns), res.SourceColumnCount)
+	require.NotNil(t, res.DiffSourceSelect.From)
+	require.NotNil(t, res.DiffSourceSelect.From.TableRefs)
+	require.NotNil(t, res.DiffSourceSelect.From.TableRefs.On)
+	joinPredicates := collectAndPredicates(t, res.DiffSourceSelect.From.TableRefs.On.Expr)
+	require.Len(t, joinPredicates, 1)
+	leftTable, leftCol := columnNameRef(t, joinPredicates[0].L)
+	rightTable, rightCol := columnNameRef(t, joinPredicates[0].R)
+	require.Equal(t, diffQAlias, leftTable)
+	require.Equal(t, diffMAlias, rightTable)
+	require.Equal(t, leftCol, rightCol)
+	require.Equal(t, "a", rightCol)
+	require.Equal(t, opcode.NullEQ, joinPredicates[0].Op)
 }
 
 func TestBuildCompleteDiffSourceCommonHandleReusesOldRowImage(t *testing.T) {
