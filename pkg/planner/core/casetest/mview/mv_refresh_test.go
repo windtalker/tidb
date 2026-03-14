@@ -690,6 +690,11 @@ func TestBuildRefreshMVCompleteDeltaApplyPlan(t *testing.T) {
 	require.Equal(t, []int{3, 4}, applyPlan.QRowInputColIDs)
 	require.Equal(t, 1, applyPlan.MHandleCols.NumCols())
 	require.Equal(t, 1, applyPlan.MHandleCols.GetCol(0).Index)
+	require.Equal(
+		t,
+		"op_offset:0, m_marker_offset:1, q_marker_offset:3, m_group_keys_offset:[1], q_group_keys_offset:[3], m_handle_offset:[1], m_row_offset:[1,2], q_row_offset:[3,4]",
+		applyPlan.ExplainInfo(),
+	)
 }
 
 func TestBuildRefreshMVFastSumNotNullNoCountExpr(t *testing.T) {

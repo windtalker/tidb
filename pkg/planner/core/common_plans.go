@@ -732,14 +732,34 @@ type MVCompleteDeltaApply struct {
 // ExplainInfo returns the key sink mapping metadata for complete delta MV apply.
 func (p *MVCompleteDeltaApply) ExplainInfo() string {
 	return fmt.Sprintf(
-		"op:%d, marker_mv:%d, group_keys:%s, m_handle:%s, m_row:%s, q_row:%s",
+		"op_offset:%d, m_marker_offset:%d, q_marker_offset:%d, m_group_keys_offset:%s, q_group_keys_offset:%s, m_handle_offset:%s, m_row_offset:%s, q_row_offset:%s",
 		p.OpColID,
-		p.MarkerMVOffset,
-		formatMVDeltaMergeOffsets(p.GroupKeyMVOffsets),
+		inputOffsetAtMVOffset(p.MRowInputColIDs, p.MarkerMVOffset),
+		inputOffsetAtMVOffset(p.QRowInputColIDs, p.MarkerMVOffset),
+		formatMVDeltaMergeOffsets(inputOffsetsAtMVOffsets(p.MRowInputColIDs, p.GroupKeyMVOffsets)),
+		formatMVDeltaMergeOffsets(inputOffsetsAtMVOffsets(p.QRowInputColIDs, p.GroupKeyMVOffsets)),
 		formatHandleColsInputOffsets(p.MHandleCols),
 		formatMVDeltaMergeOffsets(p.MRowInputColIDs),
 		formatMVDeltaMergeOffsets(p.QRowInputColIDs),
 	)
+}
+
+func inputOffsetAtMVOffset(inputColIDs []int, mvOffset int) int {
+	if mvOffset < 0 || mvOffset >= len(inputColIDs) {
+		return -1
+	}
+	return inputColIDs[mvOffset]
+}
+
+func inputOffsetsAtMVOffsets(inputColIDs, mvOffsets []int) []int {
+	if len(mvOffsets) == 0 {
+		return nil
+	}
+	offsets := make([]int, 0, len(mvOffsets))
+	for _, mvOffset := range mvOffsets {
+		offsets = append(offsets, inputOffsetAtMVOffset(inputColIDs, mvOffset))
+	}
+	return offsets
 }
 
 func formatHandleColsInputOffsets(handleCols util.HandleCols) string {
