@@ -181,6 +181,8 @@ func TestProfileMaterializedViewRefreshStepRuntime(t *testing.T) {
 	deltaApplyProfileRows := tk.MustQuery("refresh materialized view mv_mv_explain_analyze complete delta apply with profile").Rows()
 	requireRowsContainPrefix(t, deltaApplyProfileRows, "[S04 DATA_CHANGE_COMPLETE_DELTA_APPLY]")
 	requireRowsContainPrefix(t, deltaApplyProfileRows, "  MVCompleteDeltaApply")
+	require.Contains(t, joinRowsAsText(deltaApplyProfileRows), "mv_complete_delta_apply:{writer:{")
+	require.Contains(t, joinRowsAsText(deltaApplyProfileRows), "rows:{insert:")
 	requireRowsContainPrefix(t, deltaApplyProfileRows, "[S07 FINALIZE_HIST]")
 }
 
