@@ -85,8 +85,8 @@ const (
 	TypeDelete = "Delete"
 	// TypeMVDeltaMerge is the type of MVDeltaMerge.
 	TypeMVDeltaMerge = "MVDeltaMerge"
-	// TypeMVCompleteIncrementalApply is the type of complete-incremental MV apply sink.
-	TypeMVCompleteIncrementalApply = "MVCompleteIncrementalApply"
+	// TypeMVCompleteDeltaApply is the type of complete delta MV apply sink.
+	TypeMVCompleteDeltaApply = "MVCompleteDeltaApply"
 	// TypeIndexLookUp is the type of IndexLookUp.
 	TypeIndexLookUp = "IndexLookUp"
 	// TypeTableReader is the type of TableReader.
@@ -277,7 +277,7 @@ func TypeStringToPhysicalID(tp string) int {
 		return typeDeleteID
 	case TypeMVDeltaMerge:
 		return typeMVDeltaMergeID
-	case TypeMVCompleteIncrementalApply:
+	case TypeMVCompleteDeltaApply:
 		return typeMVCompleteIncApplyID
 	case TypeIndexLookUp:
 		return typeIndexLookUpID
@@ -410,7 +410,7 @@ func PhysicalIDToTypeString(id int) string {
 	case typeMVDeltaMergeID:
 		return TypeMVDeltaMerge
 	case typeMVCompleteIncApplyID:
-		return TypeMVCompleteIncrementalApply
+		return TypeMVCompleteDeltaApply
 	case typeIndexLookUpID:
 		return TypeIndexLookUp
 	case typeTableReaderID:

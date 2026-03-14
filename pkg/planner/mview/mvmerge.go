@@ -113,7 +113,7 @@ type BuildResult struct {
 	AggInfos []AggInfo
 }
 
-// CompleteDiffBuildResult is the diff-source output for COMPLETE INCREMENTAL UPDATE.
+// CompleteDiffBuildResult is the diff-source output for COMPLETE DELTA APPLY.
 // Row layout of DiffSourceSelect output is fixed:
 //  1. diff_op
 //  2. optional _tidb_rowid handle column when MV uses extra row-id handle
@@ -1962,7 +1962,7 @@ func ifExpr(cond, trueExpr, falseExpr ast.ExprNode) *ast.FuncCallExpr {
 }
 
 // BuildCompleteDiffSource builds the diff-source SELECT statement and layout metadata for
-// COMPLETE INCREMENTAL UPDATE refresh.
+// COMPLETE DELTA APPLY refresh.
 func BuildCompleteDiffSource(
 	sctx planctx.PlanContext,
 	is infoschema.InfoSchema,
@@ -2015,7 +2015,7 @@ func BuildCompleteDiffSource(
 		}
 		if !mysql.HasNotNullFlag(col.GetFlag()) {
 			return nil, errors.Errorf(
-				"materialized view %s group key column %s must be NOT NULL for COMPLETE INCREMENTAL UPDATE",
+				"materialized view %s group key column %s must be NOT NULL for COMPLETE DELTA APPLY",
 				mv.Name.O,
 				col.Name.O,
 			)

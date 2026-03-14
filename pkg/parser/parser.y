@@ -395,6 +395,7 @@ import (
 	current               "CURRENT"
 	cycle                 "CYCLE"
 	data                  "DATA"
+	delta                 "DELTA"
 	dateType              "DATE"
 	datetimeType          "DATETIME"
 	day                   "DAY"
@@ -5678,9 +5679,9 @@ RefreshCompleteModeOpt:
 	{
 		$$ = ast.RefreshMaterializedViewCompleteTypeOutOfPlace
 	}
-|	"INCREMENTAL" "UPDATE"
+|	"DELTA" "APPLY"
 	{
-		$$ = ast.RefreshMaterializedViewCompleteTypeIncrementalUpdate
+		$$ = ast.RefreshMaterializedViewCompleteTypeDeltaApply
 	}
 
 /******************************************************************
