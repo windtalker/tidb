@@ -49,6 +49,7 @@ import (
 	"github.com/pingcap/tidb/pkg/util/collate"
 	"github.com/pingcap/tidb/pkg/util/dbterror"
 	plannererrors "github.com/pingcap/tidb/pkg/util/dbterror/plannererrors"
+	"github.com/pingcap/tidb/pkg/util/execdetails"
 	"github.com/pingcap/tidb/pkg/util/generatedexpr"
 	"github.com/pingcap/tidb/pkg/util/logutil"
 	"github.com/pingcap/tidb/pkg/util/sqlescape"
@@ -121,6 +122,7 @@ type MVCompleteDeltaApplyExec struct {
 	updateTouchedBitmap []uint8
 	updateTouchedStride int
 	executed            bool
+	runtimeStats        *mvCompleteDeltaApplyRuntimeStats
 }
 
 type mvCompleteDeltaCompareColumn struct {
@@ -132,6 +134,80 @@ type mvCompleteDeltaCompareColumn struct {
 	notNull          bool
 	touchedBitMask   uint8
 	touchedByteIndex int
+}
+
+type mvCompleteDeltaApplyWriterStats struct {
+	chunks int64
+	rowOps int64
+
+	insertRows int64
+	updateRows int64
+	deleteRows int64
+}
+
+func (s *mvCompleteDeltaApplyWriterStats) merge(other mvCompleteDeltaApplyWriterStats) {
+	s.chunks += other.chunks
+	s.rowOps += other.rowOps
+	s.insertRows += other.insertRows
+	s.updateRows += other.updateRows
+	s.deleteRows += other.deleteRows
+}
+
+type mvCompleteDeltaApplyRuntimeStats struct {
+	writerTime   time.Duration
+	writerDetail mvCompleteDeltaApplyWriterStats
+}
+
+func (s *mvCompleteDeltaApplyRuntimeStats) reset() {
+	if s == nil {
+		return
+	}
+	s.writerTime = 0
+	s.writerDetail = mvCompleteDeltaApplyWriterStats{}
+}
+
+func (s *mvCompleteDeltaApplyRuntimeStats) String() string {
+	if s == nil {
+		return ""
+	}
+	var buf bytes.Buffer
+	buf.WriteString("mv_complete_delta_apply:{writer:{time:")
+	buf.WriteString(execdetails.FormatDuration(s.writerTime))
+	buf.WriteString(", chunks:")
+	buf.WriteString(strconv.FormatInt(s.writerDetail.chunks, 10))
+	buf.WriteString(", row_ops:")
+	buf.WriteString(strconv.FormatInt(s.writerDetail.rowOps, 10))
+	buf.WriteString(", rows:{insert:")
+	buf.WriteString(strconv.FormatInt(s.writerDetail.insertRows, 10))
+	buf.WriteString(", update:")
+	buf.WriteString(strconv.FormatInt(s.writerDetail.updateRows, 10))
+	buf.WriteString(", delete:")
+	buf.WriteString(strconv.FormatInt(s.writerDetail.deleteRows, 10))
+	buf.WriteString("}}}")
+	return buf.String()
+}
+
+func (s *mvCompleteDeltaApplyRuntimeStats) Clone() execdetails.RuntimeStats {
+	if s == nil {
+		return &mvCompleteDeltaApplyRuntimeStats{}
+	}
+	return &mvCompleteDeltaApplyRuntimeStats{
+		writerTime:   s.writerTime,
+		writerDetail: s.writerDetail,
+	}
+}
+
+func (s *mvCompleteDeltaApplyRuntimeStats) Merge(other execdetails.RuntimeStats) {
+	tmp, ok := other.(*mvCompleteDeltaApplyRuntimeStats)
+	if !ok || tmp == nil {
+		return
+	}
+	s.writerTime += tmp.writerTime
+	s.writerDetail.merge(tmp.writerDetail)
+}
+
+func (*mvCompleteDeltaApplyRuntimeStats) Tp() int {
+	return execdetails.TpMVCompleteDeltaApplyRuntimeStats
 }
 
 // Open implements the Executor interface.
@@ -185,6 +261,14 @@ func (e *MVCompleteDeltaApplyExec) Next(ctx context.Context, req *chunk.Chunk) e
 		return nil
 	}
 	e.executed = true
+	if e.BaseExecutor.RuntimeStats() != nil {
+		if e.runtimeStats == nil {
+			e.runtimeStats = &mvCompleteDeltaApplyRuntimeStats{}
+		} else {
+			e.runtimeStats.reset()
+		}
+		defer e.Ctx().GetSessionVars().StmtCtx.RuntimeStatsColl.RegisterStats(e.ID(), e.runtimeStats)
+	}
 
 	child := e.Children(0)
 	if child == nil {
@@ -209,8 +293,15 @@ func (e *MVCompleteDeltaApplyExec) Next(ctx context.Context, req *chunk.Chunk) e
 		if e.childChunk.NumRows() == 0 {
 			return nil
 		}
+		writeStart := time.Time{}
+		if e.runtimeStats != nil {
+			writeStart = time.Now()
+		}
 		if err := e.applyChunk(txn, tableCtx, stmtCtx, insertSizeHintStep, e.childChunk); err != nil {
 			return err
+		}
+		if e.runtimeStats != nil {
+			e.runtimeStats.writerTime += time.Since(writeStart)
 		}
 	}
 }
@@ -229,6 +320,7 @@ func (e *MVCompleteDeltaApplyExec) Close() error {
 	e.updateTouchedStride = 0
 	e.updateTouchedSingleByte = false
 	e.executed = false
+	e.runtimeStats = nil
 	return e.BaseExecutor.Close()
 }
 
@@ -247,6 +339,16 @@ func (e *MVCompleteDeltaApplyExec) applyChunk(
 	if err := e.markChunkUpdateTouchedColumns(input); err != nil {
 		return err
 	}
+	var writerStats *mvCompleteDeltaApplyWriterStats
+	var writerStatsDelta mvCompleteDeltaApplyWriterStats
+	if e.runtimeStats != nil {
+		writerStats = &e.runtimeStats.writerDetail
+		writerStatsDelta.chunks = 1
+		writerStatsDelta.rowOps = int64(input.NumRows())
+		defer func() {
+			writerStats.merge(writerStatsDelta)
+		}()
+	}
 
 	insertOrdinal := 0
 	updateOrdinal := 0
@@ -255,6 +357,7 @@ func (e *MVCompleteDeltaApplyExec) applyChunk(
 		op := ops[rowIdx]
 		switch op {
 		case mvCompleteDeltaDiffOpInsert:
+			writerStatsDelta.insertRows++
 			e.buildInsertRow(row)
 
 			sizeHint := 0
@@ -278,6 +381,7 @@ func (e *MVCompleteDeltaApplyExec) applyChunk(
 				return err
 			}
 		case mvCompleteDeltaDiffOpDelete:
+			writerStatsDelta.deleteRows++
 			e.buildDeleteRow(row)
 			handle, err := e.TargetHandleCols.BuildHandle(stmtCtx, row)
 			if err != nil {
@@ -292,6 +396,7 @@ func (e *MVCompleteDeltaApplyExec) applyChunk(
 				return err
 			}
 			if changed {
+				writerStatsDelta.updateRows++
 				e.buildUpdateRows(row)
 				handle, err := e.TargetHandleCols.BuildHandle(stmtCtx, row)
 				if err != nil {
