@@ -138,20 +138,20 @@ func TestRefreshMaterializedViewStmtRestoreOutOfPlace(t *testing.T) {
 	require.Equal(t, "REFRESH MATERIALIZED VIEW `test`.`mv` WITH SYNC MODE COMPLETE OUT OF PLACE", sb.String())
 }
 
-func TestRefreshMaterializedViewStmtRestoreIncrementalUpdate(t *testing.T) {
+func TestRefreshMaterializedViewStmtRestoreDeltaApply(t *testing.T) {
 	stmt := &ast.RefreshMaterializedViewStmt{
 		ViewName: &ast.TableName{
 			Schema: model.NewCIStr("test"),
 			Name:   model.NewCIStr("mv"),
 		},
 		Type:         ast.RefreshMaterializedViewTypeComplete,
-		CompleteType: ast.RefreshMaterializedViewCompleteTypeIncrementalUpdate,
+		CompleteType: ast.RefreshMaterializedViewCompleteTypeDeltaApply,
 	}
 
 	var sb strings.Builder
 	rctx := format.NewRestoreCtx(format.DefaultRestoreFlags, &sb)
 	require.NoError(t, stmt.Restore(rctx))
-	require.Equal(t, "REFRESH MATERIALIZED VIEW `test`.`mv` COMPLETE INCREMENTAL UPDATE", sb.String())
+	require.Equal(t, "REFRESH MATERIALIZED VIEW `test`.`mv` COMPLETE DELTA APPLY", sb.String())
 }
 
 func TestRefreshMaterializedViewStmtRestoreFastIgnoresOutOfPlaceCompleteType(t *testing.T) {
@@ -170,14 +170,14 @@ func TestRefreshMaterializedViewStmtRestoreFastIgnoresOutOfPlaceCompleteType(t *
 	require.Equal(t, "REFRESH MATERIALIZED VIEW `test`.`mv` FAST", sb.String())
 }
 
-func TestRefreshMaterializedViewStmtRestoreFastIgnoresIncrementalCompleteType(t *testing.T) {
+func TestRefreshMaterializedViewStmtRestoreFastIgnoresDeltaApplyCompleteType(t *testing.T) {
 	stmt := &ast.RefreshMaterializedViewStmt{
 		ViewName: &ast.TableName{
 			Schema: model.NewCIStr("test"),
 			Name:   model.NewCIStr("mv"),
 		},
 		Type:         ast.RefreshMaterializedViewTypeFast,
-		CompleteType: ast.RefreshMaterializedViewCompleteTypeIncrementalUpdate,
+		CompleteType: ast.RefreshMaterializedViewCompleteTypeDeltaApply,
 	}
 
 	var sb strings.Builder
@@ -217,12 +217,12 @@ func TestRefreshMaterializedViewStmtMode(t *testing.T) {
 			expectedMode: ast.RefreshMaterializedViewModeCompleteOutOfPlace,
 		},
 		{
-			name: "complete incremental update",
+			name: "complete delta apply",
 			stmt: &ast.RefreshMaterializedViewStmt{
 				Type:         ast.RefreshMaterializedViewTypeComplete,
-				CompleteType: ast.RefreshMaterializedViewCompleteTypeIncrementalUpdate,
+				CompleteType: ast.RefreshMaterializedViewCompleteTypeDeltaApply,
 			},
-			expectedMode: ast.RefreshMaterializedViewModeCompleteIncrementalUpdate,
+			expectedMode: ast.RefreshMaterializedViewModeCompleteDeltaApply,
 		},
 		{
 			name: "unknown type",

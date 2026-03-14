@@ -376,11 +376,11 @@ Detailed development plan (recommended implementation order):
    - DDL cutover action and tests;
    - final doc adjustment if behavior changed during implementation.
 
-### Support COMPLETE INCREMENTAL UPDATE (full compute, incremental apply)
+### Support COMPLETE DELTA APPLY (full compute, delta apply)
 
 After `COMPLETE OUT OF PLACE`, the next refresh mode is:
 
-- `COMPLETE INCREMENTAL UPDATE`: still compute full MV definition result, but apply only changed rows to MV.
+- `COMPLETE DELTA APPLY`: still compute full MV definition result, but apply only changed rows to MV.
 
 #### Syntax contract (V1)
 
@@ -388,16 +388,16 @@ Refresh mode matrix should be:
 
 - `REFRESH MATERIALIZED VIEW ... COMPLETE`
 - `REFRESH MATERIALIZED VIEW ... COMPLETE OUT OF PLACE`
-- `REFRESH MATERIALIZED VIEW ... COMPLETE INCREMENTAL UPDATE`
+- `REFRESH MATERIALIZED VIEW ... COMPLETE DELTA APPLY`
 - `REFRESH MATERIALIZED VIEW ... FAST`
 
 and reject these combinations:
 
 - `FAST OUT OF PLACE`
-- `FAST INCREMENTAL UPDATE`
-- `COMPLETE OUT OF PLACE INCREMENTAL UPDATE` (not in V1)
+- `FAST DELTA APPLY`
+- `COMPLETE OUT OF PLACE DELTA APPLY` (not in V1)
 
-`OUT OF PLACE` and `INCREMENTAL UPDATE` should be treated as `COMPLETE`-only options.
+`OUT OF PLACE` and `DELTA APPLY` should be treated as `COMPLETE`-only options.
 Parser should enforce that they can only appear after `COMPLETE`.
 
 #### Scope and assumptions (V1)
@@ -410,7 +410,7 @@ V1 is correctness-first and keeps implementation scope tight:
    - preferred locators are table handles (`PRIMARY KEY` / common handle);
    - `_tidb_rowid` may still be carried from the current MV side as a physical locator,
      but it is not used as the diff-join key.
-4. If these requirements are not met, reject `COMPLETE INCREMENTAL UPDATE` directly
+4. If these requirements are not met, reject `COMPLETE DELTA APPLY` directly
    (do not silently fallback to `COMPLETE` replace mode).
 5. Keep existing outer advisory lock for refresh mutex semantics.
 6. Keep existing in-place refresh transaction framework (`BEGIN PESSIMISTIC`, history lifecycle, success-only refresh-info persistence).
@@ -504,7 +504,7 @@ to any specific aggregate output column.
 
 #### Write-path architecture (align with FAST refresh)
 
-`COMPLETE INCREMENTAL UPDATE` write stage should follow `FAST` refresh architecture:
+`COMPLETE DELTA APPLY` write stage should follow `FAST` refresh architecture:
 
 1. Use an internal implementation statement path, not ad-hoc SQL text concatenation for write phase.
 2. Let optimizer build one physical diff-source plan (`FOJ + Selection`) first.
@@ -516,7 +516,7 @@ Expected end-to-end shape:
 ```text
 RefreshMaterializedViewExec
   -> executeRefreshMaterializedViewDataChanges(...)
-    -> ExecuteInternalStmt(RefreshMaterializedViewImplementStmt for COMPLETE INCREMENTAL UPDATE)
+    -> ExecuteInternalStmt(RefreshMaterializedViewImplementStmt for COMPLETE DELTA APPLY)
       -> PlanBuilder.buildRefreshMaterializedViewImplement(...)
         -> optimize diff-source SELECT (FOJ + Selection)
         -> wrap by new sink plan node (for example MVCompleteDiffApply)
@@ -570,7 +570,7 @@ Note on diff filtering:
 
 Write mapping contract for sink executor should be explicit:
 
-Recommended root sink-plan contract (`MVCompleteIncrementalApply` style):
+Recommended root sink-plan contract (`MVCompleteDeltaApply` style):
 
 1. `OpColID`: child column index of `diff_op`.
 2. `MarkerMVOffset`: which MV column is used as the side-missing marker.
@@ -582,7 +582,7 @@ Recommended root sink-plan contract (`MVCompleteIncrementalApply` style):
 
 Writable input mappings should be derived in executor from `TargetTable.WritableCols()` plus
 `MRowInputColIDs` / `QRowInputColIDs`, instead of being persisted in planner contract. This keeps
-complete-incremental apply aligned with fast-refresh writer ownership.
+complete delta apply aligned with fast-refresh writer ownership.
 
 Per-row operation behavior in sink executor:
 
@@ -600,8 +600,8 @@ V1 write strategy:
 
 M1. Syntax/AST contract milestone
 
-1. Extend grammar to support `COMPLETE INCREMENTAL UPDATE`.
-2. Enforce mode matrix in parser/validator (`OUT OF PLACE` and `INCREMENTAL UPDATE` are `COMPLETE`-only options).
+1. Extend grammar to support `COMPLETE DELTA APPLY`.
+2. Enforce mode matrix in parser/validator (`OUT OF PLACE` and `DELTA APPLY` are `COMPLETE`-only options).
 3. Keep restore output stable for all accepted/rejected combinations.
 
 Done criteria:
@@ -623,20 +623,20 @@ Done criteria:
 
 M3. Planner sink-contract milestone
 
-1. Add new root sink plan node for complete-incremental apply.
+1. Add new root sink plan node for complete delta apply.
 2. Finalize planner-side sink mapping contract (`OpColID`, `MarkerMVOffset`, `GroupKeyMVOffsets`,
    `MHandleCols`, `MRowInputColIDs`, `QRowInputColIDs`).
 3. Cover explain/contract tests for the new root plan shape and diff-source layout expectations.
 
 Done criteria:
 
-1. Planner builds `MVCompleteIncrementalApply` with explicit sink metadata.
+1. Planner builds `MVCompleteDeltaApply` with explicit sink metadata.
 2. Planner-side invalid mapping/layout fails early with clear errors.
 3. Executor integration is intentionally deferred to M4.
 
 M4. Executor hookup and correctness-first write milestone
 
-1. Add executor builder/runtime for `MVCompleteIncrementalApply`.
+1. Add executor builder/runtime for `MVCompleteDeltaApply`.
 2. Derive writable-column mappings from `TargetTable.WritableCols()` and row-image mappings.
 3. For `UPDATE`, compare old/new non-group-key writable columns in chunk batches and derive precise touched sets.
 4. Implement row writes in sink runtime:
@@ -647,19 +647,19 @@ M4. Executor hookup and correctness-first write milestone
 
 Done criteria:
 
-1. `MVCompleteIncrementalApply` can be built into an executor and consume diff rows end-to-end.
+1. `MVCompleteDeltaApply` can be built into an executor and consume diff rows end-to-end.
 2. Correctness tests pass for insert-only/delete-only/update-only/mixed/no-op cases.
 3. Failure path rolls back MV data and keeps refresh-info watermark unchanged.
 
 M5. Refresh framework integration milestone
 
-1. Route `COMPLETE INCREMENTAL UPDATE` through data-change dispatch path.
+1. Route `COMPLETE DELTA APPLY` through data-change dispatch path.
 2. Keep existing advisory lock / history lifecycle / CAS watermark semantics unchanged.
-3. Add observability step for incremental apply.
+3. Add observability step for delta apply.
 
 Done criteria:
 
-1. `WITH PROFILE`/`DRY RUN` can distinguish incremental-apply step.
+1. `WITH PROFILE`/`DRY RUN` can distinguish delta-apply step.
 2. Concurrency behavior remains compatible with current refresh mutex semantics.
 
 M6. Hardening/performance milestone (post-V1)

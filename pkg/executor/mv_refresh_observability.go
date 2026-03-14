@@ -42,6 +42,7 @@ const (
 	mvRefreshObserveStepFastMerge
 	mvRefreshObserveStepCompleteDelete
 	mvRefreshObserveStepCompleteInsert
+	mvRefreshObserveStepCompleteDeltaApply
 	mvRefreshObserveStepOutOfPlaceCreateShadow
 	mvRefreshObserveStepOutOfPlaceLoadShadow
 	mvRefreshObserveStepOutOfPlaceCutover
@@ -130,6 +131,10 @@ var (
 		Name: "DATA_CHANGE_COMPLETE_INSERT",
 		Kind: mvRefreshObserveStepCompleteInsert,
 	}
+	mvRefreshObserveStepDataChangeCompleteDeltaApply = mvRefreshObserveStep{
+		Name: "DATA_CHANGE_COMPLETE_DELTA_APPLY",
+		Kind: mvRefreshObserveStepCompleteDeltaApply,
+	}
 	mvRefreshObserveStepDataChangeOutOfPlaceCreateShadow = mvRefreshObserveStep{
 		Name: "OUT_OF_PLACE_CREATE_SHADOW",
 		Kind: mvRefreshObserveStepOutOfPlaceCreateShadow,
@@ -163,6 +168,7 @@ type mvRefreshStepSet struct {
 	dataChangeFastMerge              mvRefreshObserveStep
 	dataChangeCompleteDelete         mvRefreshObserveStep
 	dataChangeCompleteInsert         mvRefreshObserveStep
+	dataChangeCompleteDeltaApply     mvRefreshObserveStep
 	dataChangeOutOfPlaceCreateShadow mvRefreshObserveStep
 	dataChangeOutOfPlaceLoadShadow   mvRefreshObserveStep
 	dataChangeOutOfPlaceCutover      mvRefreshObserveStep
@@ -198,10 +204,9 @@ func newMVRefreshStepSet(mode ast.RefreshMaterializedViewMode) (mvRefreshStepSet
 		return set, nil
 	}
 
-	if mode == ast.RefreshMaterializedViewModeCompleteIncrementalUpdate {
-		return mvRefreshStepSet{}, errors.New("refresh materialized view observe: COMPLETE INCREMENTAL UPDATE is not supported yet")
-	}
-	if mode != ast.RefreshMaterializedViewModeCompleteInPlace && mode != ast.RefreshMaterializedViewModeFast {
+	if mode != ast.RefreshMaterializedViewModeCompleteInPlace &&
+		mode != ast.RefreshMaterializedViewModeFast &&
+		mode != ast.RefreshMaterializedViewModeCompleteDeltaApply {
 		return mvRefreshStepSet{}, errors.New("refresh materialized view observe: unknown mode")
 	}
 
@@ -211,6 +216,8 @@ func newMVRefreshStepSet(mode ast.RefreshMaterializedViewMode) (mvRefreshStepSet
 
 	if mode == ast.RefreshMaterializedViewModeFast {
 		set.dataChangeFastMerge = appendStep(mvRefreshObserveStepDataChangeFastMerge)
+	} else if mode == ast.RefreshMaterializedViewModeCompleteDeltaApply {
+		set.dataChangeCompleteDeltaApply = appendStep(mvRefreshObserveStepDataChangeCompleteDeltaApply)
 	} else {
 		set.dataChangeCompleteDelete = appendStep(mvRefreshObserveStepDataChangeCompleteDelete)
 		set.dataChangeCompleteInsert = appendStep(mvRefreshObserveStepDataChangeCompleteInsert)
@@ -277,6 +284,7 @@ func (e *RefreshMaterializedViewDryRunExec) generateRows(ctx context.Context) ([
 
 	var completeDeleteRows [][]string
 	var completeInsertRows [][]string
+	var completeDeltaRows [][]string
 	var outOfPlaceLoadRows [][]string
 	switch mode {
 	case ast.RefreshMaterializedViewModeCompleteOutOfPlace:
@@ -286,6 +294,11 @@ func (e *RefreshMaterializedViewDryRunExec) generateRows(ctx context.Context) ([
 		}
 	case ast.RefreshMaterializedViewModeCompleteInPlace:
 		completeDeleteRows, completeInsertRows, err = e.buildCompleteRefreshPlanRows(ctx)
+		if err != nil {
+			return nil, err
+		}
+	case ast.RefreshMaterializedViewModeCompleteDeltaApply:
+		completeDeltaRows, err = e.buildCompleteDeltaRefreshPlanRows(ctx)
 		if err != nil {
 			return nil, err
 		}
@@ -303,6 +316,8 @@ func (e *RefreshMaterializedViewDryRunExec) generateRows(ctx context.Context) ([
 			stepRows = completeDeleteRows
 		case mvRefreshObserveStepCompleteInsert:
 			stepRows = completeInsertRows
+		case mvRefreshObserveStepCompleteDeltaApply:
+			stepRows = completeDeltaRows
 		case mvRefreshObserveStepOutOfPlaceLoadShadow:
 			stepRows = outOfPlaceLoadRows
 		default:
@@ -320,11 +335,19 @@ func (e *RefreshMaterializedViewDryRunExec) generateRows(ctx context.Context) ([
 }
 
 func (e *RefreshMaterializedViewDryRunExec) buildFastMergePlanRows(ctx context.Context) ([][]string, error) {
+	return e.buildImplementRefreshPlanRows(ctx, 0)
+}
+
+func (e *RefreshMaterializedViewDryRunExec) buildCompleteDeltaRefreshPlanRows(ctx context.Context) ([][]string, error) {
+	return e.buildImplementRefreshPlanRows(ctx, 0)
+}
+
+func (e *RefreshMaterializedViewDryRunExec) buildImplementRefreshPlanRows(ctx context.Context, lastSuccessfulRefreshReadTSO uint64) ([][]string, error) {
 	refreshStmt := cloneRefreshMaterializedViewStmt(e.stmt)
 	refreshStmt.ObserveType = ast.RefreshMaterializedViewObserveNone
 	implementStmt := &ast.RefreshMaterializedViewImplementStmt{
 		RefreshStmt:                  refreshStmt,
-		LastSuccessfulRefreshReadTSO: 0,
+		LastSuccessfulRefreshReadTSO: lastSuccessfulRefreshReadTSO,
 	}
 	return e.renderPlanRowsForInternalStmt(ctx, implementStmt)
 }

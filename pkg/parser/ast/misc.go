@@ -591,7 +591,7 @@ type RefreshMaterializedViewCompleteType int
 const (
 	RefreshMaterializedViewCompleteTypeInPlace RefreshMaterializedViewCompleteType = iota
 	RefreshMaterializedViewCompleteTypeOutOfPlace
-	RefreshMaterializedViewCompleteTypeIncrementalUpdate
+	RefreshMaterializedViewCompleteTypeDeltaApply
 )
 
 func (t RefreshMaterializedViewCompleteType) String() string {
@@ -600,8 +600,8 @@ func (t RefreshMaterializedViewCompleteType) String() string {
 		return "IN PLACE"
 	case RefreshMaterializedViewCompleteTypeOutOfPlace:
 		return "OUT OF PLACE"
-	case RefreshMaterializedViewCompleteTypeIncrementalUpdate:
-		return "INCREMENTAL UPDATE"
+	case RefreshMaterializedViewCompleteTypeDeltaApply:
+		return "DELTA APPLY"
 	default:
 		return "UNKNOWN"
 	}
@@ -613,7 +613,7 @@ const (
 	RefreshMaterializedViewModeFast RefreshMaterializedViewMode = iota
 	RefreshMaterializedViewModeCompleteInPlace
 	RefreshMaterializedViewModeCompleteOutOfPlace
-	RefreshMaterializedViewModeCompleteIncrementalUpdate
+	RefreshMaterializedViewModeCompleteDeltaApply
 )
 
 func (m RefreshMaterializedViewMode) String() string {
@@ -624,8 +624,8 @@ func (m RefreshMaterializedViewMode) String() string {
 		return "COMPLETE IN PLACE"
 	case RefreshMaterializedViewModeCompleteOutOfPlace:
 		return "COMPLETE OUT OF PLACE"
-	case RefreshMaterializedViewModeCompleteIncrementalUpdate:
-		return "COMPLETE INCREMENTAL UPDATE"
+	case RefreshMaterializedViewModeCompleteDeltaApply:
+		return "COMPLETE DELTA APPLY"
 	default:
 		return "UNKNOWN"
 	}
@@ -645,8 +645,8 @@ func (n *RefreshMaterializedViewStmt) Mode() (RefreshMaterializedViewMode, error
 			return RefreshMaterializedViewModeCompleteInPlace, nil
 		case RefreshMaterializedViewCompleteTypeOutOfPlace:
 			return RefreshMaterializedViewModeCompleteOutOfPlace, nil
-		case RefreshMaterializedViewCompleteTypeIncrementalUpdate:
-			return RefreshMaterializedViewModeCompleteIncrementalUpdate, nil
+		case RefreshMaterializedViewCompleteTypeDeltaApply:
+			return RefreshMaterializedViewModeCompleteDeltaApply, nil
 		default:
 			return 0, errors.New("RefreshMaterializedViewStmt: unknown COMPLETE mode")
 		}
@@ -679,8 +679,8 @@ func (n *RefreshMaterializedViewStmt) Restore(ctx *format.RestoreCtx) error {
 		case RefreshMaterializedViewCompleteTypeInPlace:
 		case RefreshMaterializedViewCompleteTypeOutOfPlace:
 			ctx.WriteKeyWord(" OUT OF PLACE")
-		case RefreshMaterializedViewCompleteTypeIncrementalUpdate:
-			ctx.WriteKeyWord(" INCREMENTAL UPDATE")
+		case RefreshMaterializedViewCompleteTypeDeltaApply:
+			ctx.WriteKeyWord(" DELTA APPLY")
 		default:
 			return errors.New("RefreshMaterializedViewStmt: unknown COMPLETE mode")
 		}

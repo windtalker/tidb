@@ -84,14 +84,14 @@ type PurgeMaterializedViewLogExec struct {
 }
 
 const (
-	mvCompleteIncrementalDiffOpInsert = int64(1)
-	mvCompleteIncrementalDiffOpDelete = int64(2)
-	mvCompleteIncrementalDiffOpUpdate = int64(3)
+	mvCompleteDeltaDiffOpInsert = int64(1)
+	mvCompleteDeltaDiffOpDelete = int64(2)
+	mvCompleteDeltaDiffOpUpdate = int64(3)
 )
 
-// MVCompleteIncrementalApplyExec applies COMPLETE INCREMENTAL UPDATE diff rows to the target MV table.
+// MVCompleteDeltaApplyExec applies COMPLETE DELTA APPLY diff rows to the target MV table.
 // It keeps the runtime single-threaded and only batches the UPDATE old/new comparison at chunk granularity.
-type MVCompleteIncrementalApplyExec struct {
+type MVCompleteDeltaApplyExec struct {
 	exec.BaseExecutor
 
 	TargetTable      table.Table
@@ -106,7 +106,7 @@ type MVCompleteIncrementalApplyExec struct {
 	QCompareInputColIDs  []int
 
 	writableFieldTypes []*types.FieldType
-	compareColumns     []mvCompleteIncrementalCompareColumn
+	compareColumns     []mvCompleteDeltaCompareColumn
 	oldRow             []types.Datum
 	newRow             []types.Datum
 	touched            []bool
@@ -122,7 +122,7 @@ type MVCompleteIncrementalApplyExec struct {
 	executed            bool
 }
 
-type mvCompleteIncrementalCompareColumn struct {
+type mvCompleteDeltaCompareColumn struct {
 	writableIdx      int
 	mInputColID      int
 	qInputColID      int
@@ -134,7 +134,7 @@ type mvCompleteIncrementalCompareColumn struct {
 }
 
 // Open implements the Executor interface.
-func (e *MVCompleteIncrementalApplyExec) Open(ctx context.Context) error {
+func (e *MVCompleteDeltaApplyExec) Open(ctx context.Context) error {
 	e.executed = false
 	e.childChunk = nil
 	e.updateRows = e.updateRows[:0]
@@ -149,14 +149,14 @@ func (e *MVCompleteIncrementalApplyExec) Open(ctx context.Context) error {
 	}
 
 	if e.TargetTable == nil {
-		return errors.New("MVCompleteIncrementalApply target table is nil")
+		return errors.New("MVCompleteDeltaApply target table is nil")
 	}
 	if e.TargetHandleCols == nil {
-		return errors.New("MVCompleteIncrementalApply target handle cols is nil")
+		return errors.New("MVCompleteDeltaApply target handle cols is nil")
 	}
 	child := e.Children(0)
 	if child == nil {
-		return errors.New("MVCompleteIncrementalApply child executor is nil")
+		return errors.New("MVCompleteDeltaApply child executor is nil")
 	}
 
 	writableCols := e.TargetTable.WritableCols()
@@ -178,7 +178,7 @@ func (e *MVCompleteIncrementalApplyExec) Open(ctx context.Context) error {
 }
 
 // Next implements the Executor interface.
-func (e *MVCompleteIncrementalApplyExec) Next(ctx context.Context, req *chunk.Chunk) error {
+func (e *MVCompleteDeltaApplyExec) Next(ctx context.Context, req *chunk.Chunk) error {
 	req.GrowAndReset(e.MaxChunkSize())
 	if e.executed {
 		return nil
@@ -187,7 +187,7 @@ func (e *MVCompleteIncrementalApplyExec) Next(ctx context.Context, req *chunk.Ch
 
 	child := e.Children(0)
 	if child == nil {
-		return errors.New("MVCompleteIncrementalApply child executor is nil")
+		return errors.New("MVCompleteDeltaApply child executor is nil")
 	}
 	txn, err := e.Ctx().Txn(true)
 	if err != nil {
@@ -215,7 +215,7 @@ func (e *MVCompleteIncrementalApplyExec) Next(ctx context.Context, req *chunk.Ch
 }
 
 // Close implements the Executor interface.
-func (e *MVCompleteIncrementalApplyExec) Close() error {
+func (e *MVCompleteDeltaApplyExec) Close() error {
 	e.writableFieldTypes = nil
 	e.compareColumns = nil
 	e.oldRow = nil
@@ -231,7 +231,7 @@ func (e *MVCompleteIncrementalApplyExec) Close() error {
 	return e.BaseExecutor.Close()
 }
 
-func (e *MVCompleteIncrementalApplyExec) applyChunk(
+func (e *MVCompleteDeltaApplyExec) applyChunk(
 	txn kv.Transaction,
 	tableCtx table.MutateContext,
 	stmtCtx *stmtctx.StatementContext,
@@ -253,7 +253,7 @@ func (e *MVCompleteIncrementalApplyExec) applyChunk(
 		row := input.GetRow(rowIdx)
 		op := ops[rowIdx]
 		switch op {
-		case mvCompleteIncrementalDiffOpInsert:
+		case mvCompleteDeltaDiffOpInsert:
 			e.buildInsertRow(row)
 
 			sizeHint := 0
@@ -276,7 +276,7 @@ func (e *MVCompleteIncrementalApplyExec) applyChunk(
 			if err != nil {
 				return err
 			}
-		case mvCompleteIncrementalDiffOpDelete:
+		case mvCompleteDeltaDiffOpDelete:
 			e.buildDeleteRow(row)
 			handle, err := e.TargetHandleCols.BuildHandle(stmtCtx, row)
 			if err != nil {
@@ -285,7 +285,7 @@ func (e *MVCompleteIncrementalApplyExec) applyChunk(
 			if err := e.TargetTable.RemoveRecord(tableCtx, txn, handle, e.oldRow); err != nil {
 				return err
 			}
-		case mvCompleteIncrementalDiffOpUpdate:
+		case mvCompleteDeltaDiffOpUpdate:
 			changed, err := e.buildTouchedFromBitmap(updateOrdinal)
 			if err != nil {
 				return err
@@ -302,13 +302,13 @@ func (e *MVCompleteIncrementalApplyExec) applyChunk(
 			}
 			updateOrdinal++
 		default:
-			return errors.Errorf("MVCompleteIncrementalApply invalid diff op %d at row %d", op, rowIdx)
+			return errors.Errorf("MVCompleteDeltaApply invalid diff op %d at row %d", op, rowIdx)
 		}
 	}
 	return nil
 }
 
-func (e *MVCompleteIncrementalApplyExec) collectChunkUpdateRows(ops []int64) (int, error) {
+func (e *MVCompleteDeltaApplyExec) collectChunkUpdateRows(ops []int64) (int, error) {
 	if cap(e.updateRows) >= len(ops) {
 		e.updateRows = e.updateRows[:0]
 	} else {
@@ -317,22 +317,22 @@ func (e *MVCompleteIncrementalApplyExec) collectChunkUpdateRows(ops []int64) (in
 	insertRemain := 0
 	for rowIdx, op := range ops {
 		switch op {
-		case mvCompleteIncrementalDiffOpInsert:
+		case mvCompleteDeltaDiffOpInsert:
 			insertRemain++
-		case mvCompleteIncrementalDiffOpDelete:
-		case mvCompleteIncrementalDiffOpUpdate:
+		case mvCompleteDeltaDiffOpDelete:
+		case mvCompleteDeltaDiffOpUpdate:
 			e.updateRows = append(e.updateRows, rowIdx)
 		default:
-			return 0, errors.Errorf("MVCompleteIncrementalApply invalid diff op %d at row %d", op, rowIdx)
+			return 0, errors.Errorf("MVCompleteDeltaApply invalid diff op %d at row %d", op, rowIdx)
 		}
 	}
 	return insertRemain, nil
 }
 
-func (e *MVCompleteIncrementalApplyExec) initCompareColumns(inputColCount int) error {
+func (e *MVCompleteDeltaApplyExec) initCompareColumns(inputColCount int) error {
 	if len(e.MCompareInputColIDs) != len(e.CompareWritableIdxes) || len(e.QCompareInputColIDs) != len(e.CompareWritableIdxes) {
 		return errors.Errorf(
-			"MVCompleteIncrementalApply compare mapping length mismatch (compare=%d, M=%d, Q=%d)",
+			"MVCompleteDeltaApply compare mapping length mismatch (compare=%d, M=%d, Q=%d)",
 			len(e.CompareWritableIdxes),
 			len(e.MCompareInputColIDs),
 			len(e.QCompareInputColIDs),
@@ -341,12 +341,12 @@ func (e *MVCompleteIncrementalApplyExec) initCompareColumns(inputColCount int) e
 	if cap(e.compareColumns) >= len(e.CompareWritableIdxes) {
 		e.compareColumns = e.compareColumns[:len(e.CompareWritableIdxes)]
 	} else {
-		e.compareColumns = make([]mvCompleteIncrementalCompareColumn, len(e.CompareWritableIdxes))
+		e.compareColumns = make([]mvCompleteDeltaCompareColumn, len(e.CompareWritableIdxes))
 	}
 	for compareIdx, writableIdx := range e.CompareWritableIdxes {
 		if writableIdx < 0 || writableIdx >= len(e.writableFieldTypes) {
 			return errors.Errorf(
-				"MVCompleteIncrementalApply writable compare index %d out of field type range [0,%d)",
+				"MVCompleteDeltaApply writable compare index %d out of field type range [0,%d)",
 				writableIdx,
 				len(e.writableFieldTypes),
 			)
@@ -354,7 +354,7 @@ func (e *MVCompleteIncrementalApplyExec) initCompareColumns(inputColCount int) e
 		mInputColID := e.MCompareInputColIDs[compareIdx]
 		if mInputColID < 0 || mInputColID >= inputColCount {
 			return errors.Errorf(
-				"MVCompleteIncrementalApply M compare input col id %d out of source range [0,%d)",
+				"MVCompleteDeltaApply M compare input col id %d out of source range [0,%d)",
 				mInputColID,
 				inputColCount,
 			)
@@ -362,7 +362,7 @@ func (e *MVCompleteIncrementalApplyExec) initCompareColumns(inputColCount int) e
 		qInputColID := e.QCompareInputColIDs[compareIdx]
 		if qInputColID < 0 || qInputColID >= inputColCount {
 			return errors.Errorf(
-				"MVCompleteIncrementalApply Q compare input col id %d out of source range [0,%d)",
+				"MVCompleteDeltaApply Q compare input col id %d out of source range [0,%d)",
 				qInputColID,
 				inputColCount,
 			)
@@ -372,7 +372,7 @@ func (e *MVCompleteIncrementalApplyExec) initCompareColumns(inputColCount int) e
 		if fieldType.EvalType() == types.ETString {
 			stringCollator = collate.GetCollator(fieldType.GetCollate())
 		}
-		e.compareColumns[compareIdx] = mvCompleteIncrementalCompareColumn{
+		e.compareColumns[compareIdx] = mvCompleteDeltaCompareColumn{
 			writableIdx:      writableIdx,
 			mInputColID:      mInputColID,
 			qInputColID:      qInputColID,
@@ -386,7 +386,7 @@ func (e *MVCompleteIncrementalApplyExec) initCompareColumns(inputColCount int) e
 	return nil
 }
 
-func (e *MVCompleteIncrementalApplyExec) markChunkUpdateTouchedColumns(input *chunk.Chunk) error {
+func (e *MVCompleteDeltaApplyExec) markChunkUpdateTouchedColumns(input *chunk.Chunk) error {
 	updateCnt := len(e.updateRows)
 	if updateCnt == 0 || e.updateTouchedStride == 0 {
 		e.updateTouchedBitmap = e.updateTouchedBitmap[:0]
@@ -402,7 +402,7 @@ func (e *MVCompleteIncrementalApplyExec) markChunkUpdateTouchedColumns(input *ch
 	}
 
 	for _, compareCol := range e.compareColumns {
-		if err := markMVCompleteIncrementalTouchedRowsByColumn(
+		if err := markMVCompleteDeltaTouchedRowsByColumn(
 			e.updateRows,
 			e.updateTouchedBitmap,
 			e.updateTouchedStride,
@@ -417,19 +417,19 @@ func (e *MVCompleteIncrementalApplyExec) markChunkUpdateTouchedColumns(input *ch
 	return nil
 }
 
-func (e *MVCompleteIncrementalApplyExec) buildDeleteRow(row chunk.Row) {
+func (e *MVCompleteDeltaApplyExec) buildDeleteRow(row chunk.Row) {
 	for writableIdx, colID := range e.MWritableInputColIDs {
 		row.DatumWithBuffer(colID, e.writableFieldTypes[writableIdx], &e.oldRow[writableIdx])
 	}
 }
 
-func (e *MVCompleteIncrementalApplyExec) buildInsertRow(row chunk.Row) {
+func (e *MVCompleteDeltaApplyExec) buildInsertRow(row chunk.Row) {
 	for writableIdx, colID := range e.QWritableInputColIDs {
 		row.DatumWithBuffer(colID, e.writableFieldTypes[writableIdx], &e.newRow[writableIdx])
 	}
 }
 
-func (e *MVCompleteIncrementalApplyExec) buildUpdateRows(row chunk.Row) {
+func (e *MVCompleteDeltaApplyExec) buildUpdateRows(row chunk.Row) {
 	for writableIdx, colID := range e.MWritableInputColIDs {
 		row.DatumWithBuffer(colID, e.writableFieldTypes[writableIdx], &e.oldRow[writableIdx])
 	}
@@ -440,7 +440,7 @@ func (e *MVCompleteIncrementalApplyExec) buildUpdateRows(row chunk.Row) {
 	}
 }
 
-func (e *MVCompleteIncrementalApplyExec) buildTouchedFromBitmap(updateOrdinal int) (bool, error) {
+func (e *MVCompleteDeltaApplyExec) buildTouchedFromBitmap(updateOrdinal int) (bool, error) {
 	if e.updateTouchedStride == 0 {
 		return false, nil
 	}
@@ -466,12 +466,12 @@ func (e *MVCompleteIncrementalApplyExec) buildTouchedFromBitmap(updateOrdinal in
 	return changed, nil
 }
 
-func markMVCompleteIncrementalTouchedRowsByColumn(
+func markMVCompleteDeltaTouchedRowsByColumn(
 	updateRows []int,
 	updateTouchedBitmap []uint8,
 	updateTouchedStride int,
 	updateTouchedSingleByte bool,
-	compareCol mvCompleteIncrementalCompareColumn,
+	compareCol mvCompleteDeltaCompareColumn,
 	oldCol *chunk.Column,
 	newCol *chunk.Column,
 ) error {
@@ -756,7 +756,7 @@ func markMVCompleteIncrementalTouchedRowsByColumn(
 		}
 		return nil
 	default:
-		return errors.Errorf("unsupported eval type %d in COMPLETE INCREMENTAL UPDATE comparison", compareCol.fieldType.EvalType())
+		return errors.Errorf("unsupported eval type %d in COMPLETE DELTA APPLY comparison", compareCol.fieldType.EvalType())
 	}
 }
 
@@ -1348,9 +1348,9 @@ func validatePurgeMaterializedViewLogStmt(s *ast.PurgeMaterializedViewLogStmt, i
 		return "", errors.New("purge materialized view log: missing table name")
 	}
 	if isInternalSQL {
-		return "automatically", nil
+		return "auto", nil
 	}
-	return "manually", nil
+	return "manual", nil
 }
 
 func insertMLogPurgeHistRunning(
@@ -2243,23 +2243,23 @@ func validateRefreshMaterializedViewStmt(s *ast.RefreshMaterializedViewStmt, isI
 	if err != nil {
 		return 0, "", errors.Trace(err)
 	}
-	if mode == ast.RefreshMaterializedViewModeCompleteIncrementalUpdate {
-		return 0, "", errors.New("refresh materialized view: COMPLETE INCREMENTAL UPDATE is not supported yet")
-	}
 	methodType := ""
 	switch mode {
 	case ast.RefreshMaterializedViewModeFast:
 		// Framework is supported; actual execution happens via RefreshMaterializedViewImplementStmt.
 		methodType = "fast"
-	case ast.RefreshMaterializedViewModeCompleteInPlace,
-		ast.RefreshMaterializedViewModeCompleteOutOfPlace:
+	case ast.RefreshMaterializedViewModeCompleteDeltaApply:
+		methodType = "complete delta apply"
+	case ast.RefreshMaterializedViewModeCompleteInPlace:
 		methodType = "complete"
+	case ast.RefreshMaterializedViewModeCompleteOutOfPlace:
+		methodType = "complete out of place"
 	default:
 		return 0, "", errors.New("refresh materialized view: unknown mode")
 	}
-	methodOrigin := "manually"
+	methodOrigin := "manual"
 	if isInternalSQL {
-		methodOrigin = "automatically"
+		methodOrigin = "auto"
 	}
 	// In MVP, refresh is synchronous by nature. `WITH SYNC MODE` is accepted and behaves the same.
 	return mode, methodType + " " + methodOrigin, nil
@@ -2456,8 +2456,16 @@ func executeRefreshMaterializedViewDataChanges(
 		)
 	case ast.RefreshMaterializedViewModeCompleteOutOfPlace:
 		return errors.New("refresh materialized view: complete OUT OF PLACE should use dedicated execution path")
-	case ast.RefreshMaterializedViewModeCompleteIncrementalUpdate:
-		return errors.New("refresh materialized view: COMPLETE INCREMENTAL UPDATE is not supported yet")
+	case ast.RefreshMaterializedViewModeCompleteDeltaApply:
+		return executeRefreshMaterializedViewCompleteDeltaApply(
+			kctx,
+			sqlExec,
+			sessVars,
+			s,
+			stepSet,
+			stepObserver,
+			explainFormat,
+		)
 	default:
 		return errors.New("refresh materialized view: unknown mode")
 	}
@@ -2507,7 +2515,13 @@ func executeRefreshMaterializedViewFast(
 	explainFormat string,
 ) error {
 	if err := observeMVRefreshStep(stepObserver, stepSet.dataChangeFastMerge, func() error {
-		return executeRefreshMaterializedViewFastImpl(kctx, sqlExec, sessVars, s, lastSuccessfulRefreshReadTSO)
+		return executeRefreshMaterializedViewImplement(
+			kctx,
+			sqlExec,
+			sessVars,
+			s,
+			lastSuccessfulRefreshReadTSO,
+		)
 	}); err != nil {
 		return err
 	}
@@ -2515,7 +2529,25 @@ func executeRefreshMaterializedViewFast(
 	return nil
 }
 
-func executeRefreshMaterializedViewFastImpl(
+func executeRefreshMaterializedViewCompleteDeltaApply(
+	kctx context.Context,
+	sqlExec sqlexec.SQLExecutor,
+	sessVars *variable.SessionVars,
+	s *ast.RefreshMaterializedViewStmt,
+	stepSet mvRefreshStepSet,
+	stepObserver mvRefreshStepObserver,
+	explainFormat string,
+) error {
+	if err := observeMVRefreshStep(stepObserver, stepSet.dataChangeCompleteDeltaApply, func() error {
+		return executeRefreshMaterializedViewImplement(kctx, sqlExec, sessVars, s, 0)
+	}); err != nil {
+		return err
+	}
+	emitMVRefreshStepPlanRows(stepObserver, stepSet.dataChangeCompleteDeltaApply, sessVars, explainFormat)
+	return nil
+}
+
+func executeRefreshMaterializedViewImplement(
 	kctx context.Context,
 	sqlExec sqlexec.SQLExecutor,
 	sessVars *variable.SessionVars,
