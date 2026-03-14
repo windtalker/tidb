@@ -2023,13 +2023,6 @@ func BuildCompleteDiffSource(
 		if col == nil {
 			return nil, errors.Errorf("materialized view %s group key column at offset %d is nil", mv.Name.O, off)
 		}
-		if !mysql.HasNotNullFlag(col.GetFlag()) {
-			return nil, errors.Errorf(
-				"materialized view %s group key column %s must be NOT NULL for COMPLETE DELTA APPLY",
-				mv.Name.O,
-				col.Name.O,
-			)
-		}
 	}
 
 	markerOffset, markerCol, err := pickCompleteDiffMarkerColumn(mv)
@@ -2052,11 +2045,16 @@ func BuildCompleteDiffSource(
 
 	var joinCond ast.ExprNode
 	for _, off := range groupKeyOffsets {
-		colName := mv.Columns[off].Name.O
+		col := mv.Columns[off]
+		colName := col.Name.O
+		op := opcode.NullEQ
+		if mysql.HasNotNullFlag(col.GetFlag()) {
+			op = opcode.EQ
+		}
 		joinCond = andExpr(
 			joinCond,
 			binary(
-				opcode.EQ,
+				op,
 				qualColExpr(diffQueryAlias, colName),
 				qualColExpr(diffMVTableAlias, colName),
 			),
