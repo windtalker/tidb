@@ -3848,10 +3848,10 @@ func (b *PlanBuilder) buildRefreshMaterializedViewImplement(ctx context.Context,
 		return nil, errors.Trace(err)
 	}
 	switch mode {
-	case ast.RefreshMaterializedViewModeFast, ast.RefreshMaterializedViewModeCompleteIncrementalUpdate:
+	case ast.RefreshMaterializedViewModeFast, ast.RefreshMaterializedViewModeCompleteDeltaApply:
 	default:
 		return nil, errors.Errorf(
-			"RefreshMaterializedViewImplementStmt: only FAST or COMPLETE INCREMENTAL UPDATE is supported, got %s",
+			"RefreshMaterializedViewImplementStmt: only FAST or COMPLETE DELTA APPLY is supported, got %s",
 			mode.String(),
 		)
 	}
@@ -3994,7 +3994,7 @@ func (b *PlanBuilder) buildRefreshMaterializedViewImplement(ctx context.Context,
 			AggInfos:                    res.AggInfos,
 		}.Init(b.ctx)
 		return plan, nil
-	case ast.RefreshMaterializedViewModeCompleteIncrementalUpdate:
+	case ast.RefreshMaterializedViewModeCompleteDeltaApply:
 		diffRes, err := mvmerge.BuildCompleteDiffSource(b.ctx, b.is, mvInfo)
 		if err != nil {
 			return nil, err
@@ -4012,7 +4012,7 @@ func (b *PlanBuilder) buildRefreshMaterializedViewImplement(ctx context.Context,
 		if err := diffRes.ValidateSourceLayout(sourcePlan.Schema().Len()); err != nil {
 			return nil, err
 		}
-		return MVCompleteIncrementalApply{
+		return MVCompleteDeltaApply{
 			Source:            sourcePlan,
 			MVTableID:         mvInfo.ID,
 			MVColumnCount:     diffRes.MVColumnCount,

@@ -705,12 +705,12 @@ func (p *MVDeltaMerge) MemoryUsage() (sum int64) {
 	return
 }
 
-// MVCompleteIncrementalApply represents the apply sink contract for COMPLETE INCREMENTAL UPDATE.
+// MVCompleteDeltaApply represents the apply sink contract for COMPLETE DELTA APPLY.
 // It consumes one diff-source stream and carries explicit row-image metadata for later sink execution.
-type MVCompleteIncrementalApply struct {
+type MVCompleteDeltaApply struct {
 	baseSchemaProducer
 
-	// Source is the diff-source physical plan for COMPLETE INCREMENTAL UPDATE.
+	// Source is the diff-source physical plan for COMPLETE DELTA APPLY.
 	Source base.PhysicalPlan
 
 	MVTableID     int64
@@ -729,8 +729,8 @@ type MVCompleteIncrementalApply struct {
 	QRowInputColIDs []int `plan-cache-clone:"shallow"`
 }
 
-// ExplainInfo returns the key sink mapping metadata for complete-incremental MV apply.
-func (p *MVCompleteIncrementalApply) ExplainInfo() string {
+// ExplainInfo returns the key sink mapping metadata for complete delta MV apply.
+func (p *MVCompleteDeltaApply) ExplainInfo() string {
 	return fmt.Sprintf(
 		"op:%d, marker_mv:%d, group_keys:%s, m_handle:%s, m_row:%s, q_row:%s",
 		p.OpColID,
@@ -757,8 +757,8 @@ func formatHandleColsInputOffsets(handleCols util.HandleCols) string {
 	return formatMVDeltaMergeOffsets(offsets)
 }
 
-// MemoryUsage returns the memory usage of MVCompleteIncrementalApply.
-func (p *MVCompleteIncrementalApply) MemoryUsage() (sum int64) {
+// MemoryUsage returns the memory usage of MVCompleteDeltaApply.
+func (p *MVCompleteDeltaApply) MemoryUsage() (sum int64) {
 	if p == nil {
 		return
 	}

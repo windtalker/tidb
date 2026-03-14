@@ -85,7 +85,7 @@ func TestShouldUseImportIntoForMVRefreshOutOfPlace(t *testing.T) {
 	require.False(t, shouldUseImportIntoForMVRefreshOutOfPlace("mock-storage"))
 }
 
-func TestMarkMVCompleteIncrementalTouchedRowsByColumnStringUsesCollation(t *testing.T) {
+func TestMarkMVCompleteDeltaTouchedRowsByColumnStringUsesCollation(t *testing.T) {
 	testCases := []struct {
 		name      string
 		collation string
@@ -117,12 +117,12 @@ func TestMarkMVCompleteIncrementalTouchedRowsByColumnStringUsesCollation(t *test
 			input.AppendString(1, tc.newVal)
 
 			updateTouchedBitmap := make([]uint8, 1)
-			err := markMVCompleteIncrementalTouchedRowsByColumn(
+			err := markMVCompleteDeltaTouchedRowsByColumn(
 				[]int{0},
 				updateTouchedBitmap,
 				1,
 				true,
-				mvCompleteIncrementalCompareColumn{
+				mvCompleteDeltaCompareColumn{
 					fieldType:      ft,
 					collator:       collate.GetCollator(tc.collation),
 					notNull:        true,

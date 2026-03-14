@@ -532,7 +532,7 @@ func TestExplainRefreshMVFastPlanTreeMinMax(t *testing.T) {
 	}, explain.Rows)
 }
 
-func TestExplainRefreshMVCompleteIncrementalPlanTree(t *testing.T) {
+func TestExplainRefreshMVCompleteDeltaPlanTree(t *testing.T) {
 	sctx := plannercore.MockContext()
 	// Ensure we have a non-zero StartTS; mock.Store.Begin returns nil, so create a fake txn first.
 	savedStore := sctx.Store
@@ -578,7 +578,7 @@ func TestExplainRefreshMVCompleteIncrementalPlanTree(t *testing.T) {
 		RefreshStmt: &ast.RefreshMaterializedViewStmt{
 			ViewName:     &ast.TableName{Name: mvTbl.Name},
 			Type:         ast.RefreshMaterializedViewTypeComplete,
-			CompleteType: ast.RefreshMaterializedViewCompleteTypeIncrementalUpdate,
+			CompleteType: ast.RefreshMaterializedViewCompleteTypeDeltaApply,
 		},
 		LastSuccessfulRefreshReadTSO: 0,
 	}
@@ -605,7 +605,7 @@ func TestExplainRefreshMVCompleteIncrementalPlanTree(t *testing.T) {
 	var hasApply, hasProjection, hasSelection, hasFullOuterJoin bool
 	for _, row := range explain.Rows {
 		switch {
-		case strings.HasSuffix(row[0], "MVCompleteIncrementalApply"):
+		case strings.HasSuffix(row[0], "MVCompleteDeltaApply"):
 			hasApply = true
 		case strings.HasSuffix(row[0], "Projection"):
 			hasProjection = true
@@ -623,7 +623,7 @@ func TestExplainRefreshMVCompleteIncrementalPlanTree(t *testing.T) {
 	require.True(t, hasFullOuterJoin)
 }
 
-func TestBuildRefreshMVCompleteIncrementalApplyPlan(t *testing.T) {
+func TestBuildRefreshMVCompleteDeltaApplyPlan(t *testing.T) {
 	sctx := plannercore.MockContext()
 	savedStore := sctx.Store
 	sctx.Store = nil
@@ -669,7 +669,7 @@ func TestBuildRefreshMVCompleteIncrementalApplyPlan(t *testing.T) {
 		RefreshStmt: &ast.RefreshMaterializedViewStmt{
 			ViewName:     &ast.TableName{Name: mvTbl.Name},
 			Type:         ast.RefreshMaterializedViewTypeComplete,
-			CompleteType: ast.RefreshMaterializedViewCompleteTypeIncrementalUpdate,
+			CompleteType: ast.RefreshMaterializedViewCompleteTypeDeltaApply,
 		},
 		LastSuccessfulRefreshReadTSO: 0,
 	}
@@ -678,7 +678,7 @@ func TestBuildRefreshMVCompleteIncrementalApplyPlan(t *testing.T) {
 	p, err := builder.Build(context.Background(), resolve.NewNodeW(implementStmt))
 	require.NoError(t, err)
 
-	applyPlan, ok := p.(*plannercore.MVCompleteIncrementalApply)
+	applyPlan, ok := p.(*plannercore.MVCompleteDeltaApply)
 	require.True(t, ok)
 	require.NotNil(t, applyPlan.Source)
 	require.Equal(t, mvID, applyPlan.MVTableID)
