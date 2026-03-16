@@ -392,6 +392,207 @@ Recommended implementation shape:
    - Verify cutover keeps `mysql.tidb_mview_refresh_info`, `LAST_SUCCESS_READ_TSO`, `NEXT_TIME`,
      and refresh history behavior unchanged from the current out-of-place contract.
 
+### Support FAST refresh upper bound with `AS OF TIMESTAMP`
+
+Another planned evolution for `FAST` refresh is to allow users to specify a refresh upper bound
+with `AS OF TIMESTAMP`, so one large backlog can be applied in smaller windows instead of forcing
+one refresh to catch up all the way to "now".
+
+This section records the intended semantics and implementation constraints before code changes.
+
+#### Scope
+
+1. Only `FAST` refresh should support this feature.
+2. `COMPLETE` / `COMPLETE OUT OF PLACE` / `COMPLETE DELTA APPLY` do not need this option.
+3. `AS OF TIMESTAMP` here should be treated as the refresh apply upper bound, not as generic
+   statement stale-read semantics for the whole refresh statement.
+
+#### Problem statement
+
+When `FAST` refresh falls behind for a long time, applying all changes in one refresh may create
+an overly large transaction and fail.
+
+Desired user-facing behavior:
+
+1. lower bound remains the previous successful watermark:
+   `FROM_TS = LAST_SUCCESS_READ_TSO`
+2. user specifies one target upper bound:
+   `TARGET_TS = tso(parsed from AS OF TIMESTAMP)`
+3. this refresh applies only changes in `(FROM_TS, TARGET_TS]`
+4. after success, the persisted refresh watermark advances to `TARGET_TS`
+
+This allows users to manually move the watermark forward in multiple smaller steps.
+
+#### Timestamp model
+
+With this feature, one `FAST` refresh must distinguish three timestamps:
+
+1. `fromTS`:
+   - previous successful refresh watermark
+   - loaded from `mysql.tidb_mview_refresh_info.LAST_SUCCESS_READ_TSO`
+2. `targetTSO`:
+   - user-specified apply upper bound from `AS OF TIMESTAMP`
+   - this is the logical "refresh up to here" watermark
+3. `writeTxnTSO`:
+   - the refresh transaction's current `for_update_tso`
+   - used by the outer refresh statement and MV/MV-log readers in the existing refresh txn
+
+Required invariants:
+
+1. `targetTSO >= fromTS`
+   - if `targetTSO < fromTS`, refresh should fail
+   - if `targetTSO == fromTS`, implementation may treat refresh as a no-op success
+2. `targetTSO <= writeTxnTSO`
+   - refresh must not claim to apply beyond the current transaction read horizon
+3. `targetTSO` must pass normal snapshot/gc-safe-point validation before execution starts
+
+Most importantly, after success the persisted watermark must become `targetTSO`, not `writeTxnTSO`.
+
+Reason:
+
+- `writeTxnTSO` and `targetTSO` diverge with this feature;
+- if success still persists `writeTxnTSO`, then `(targetTSO, writeTxnTSO]` would be skipped forever
+  by the next `FAST` refresh.
+
+#### Read snapshot split inside one refresh
+
+The intended read-snapshot split is:
+
+1. MV table:
+   - read at current refresh transaction `writeTxnTSO`
+2. MV log table:
+   - read at current refresh transaction `writeTxnTSO`
+   - but delta extraction must explicitly filter `_tidb_commit_ts > fromTS AND _tidb_commit_ts <= targetTSO`
+3. base table:
+   - full-update / min-max recompute paths must read at `targetTSO`
+
+Why this split is correct:
+
+1. MV table:
+   - MV does not contain rows beyond the previous successful watermark
+   - refresh execution is serialized by existing refresh mutex semantics
+   - so reading MV at current `writeTxnTSO` is acceptable
+2. MV log:
+   - log visibility can use current transaction snapshot, as long as logical delta window is
+     restricted by explicit commit-ts predicates
+3. base table:
+   - recomputation logic must see the base-table state exactly at `targetTSO`
+   - otherwise rows committed in `(targetTSO, writeTxnTSO]` may leak into group recomputation and
+     make refresh results "too new"
+
+This mixed-snapshot model is intentional and specific to MV refresh maintenance.
+
+#### Why not use generic statement/table stale read directly
+
+Current TiDB stale-read processing rejects `AS OF TIMESTAMP` inside an already opened transaction.
+
+That means this feature should not be implemented by turning the entire refresh statement into one
+generic stale-read statement, nor by directly attaching SQL-layer `AS OF TIMESTAMP` to base-table
+references inside the existing refresh write transaction.
+
+Instead, the design should keep:
+
+1. the outer refresh statement and transaction model unchanged
+2. `targetTSO` as a dedicated MV-refresh internal concept
+3. special handling only for the base-table reader(s) inside `mvmerge`
+
+In other words, this feature is "bounded fast refresh", not "refresh statement stale read".
+
+#### Base-table read path
+
+The cleanest execution model is:
+
+1. `mvmerge` as a whole still runs under the current refresh transaction and uses `writeTxnTSO`
+   for its normal child plan
+2. the base-table full-update / min-max recompute sub-plan uses a dedicated inner reader that reads
+   at `targetTSO`
+3. this snapshot override should happen below SQL syntax level, inside planner/executor wiring,
+   rather than by injecting generic SQL `AS OF TIMESTAMP`
+
+Implementation notes:
+
+1. planner/executor contract should carry `targetTSO` explicitly for `FAST` refresh
+2. `mvmerge.BuildOptions` should grow from only `FromTS` to `FromTS + ToTS`
+3. mlog delta SQL generation must really emit both bounds:
+   `_tidb_commit_ts > FromTS AND _tidb_commit_ts <= ToTS`
+4. full-update/min-max recompute readers should get a dedicated read-ts override equal to `targetTSO`
+5. that inner reader should also be treated as stale read at request level, even if the outer refresh
+   statement itself is not a generic stale-read statement
+
+#### Metadata and schema assumptions
+
+This design relies on two existing MV constraints:
+
+1. refresh execution for one MV is serialized by the existing mutex path
+2. base tables with MV dependencies already block relevant DDL operations
+
+Because of these constraints, planning base-table recompute with the current InfoSchema and reading
+data at `targetTSO` is acceptable for this feature.
+
+#### GC-safe-point protection
+
+If users want to refresh an old backlog in many small windows, ordinary snapshot validation alone is
+not sufficient. GC may already have advanced beyond the desired historical target, or may advance
+during a long-running refresh.
+
+The recommended protection model has two layers.
+
+##### 1. Persistent backlog protection (opt-in per MV)
+
+Introduce one MV-level option, for example a `block gc` style flag.
+
+Semantics:
+
+1. default should be disabled
+2. only MVs with this option enabled participate in GC blocking
+3. the owner/service side periodically computes:
+   `MIN(LAST_SUCCESS_READ_TSO)` across opted-in MVs
+4. TiDB then publishes that value through PD service safe point
+
+Rationale:
+
+1. if an MV falls far behind and the user still wants to recover by repeated bounded fast refresh,
+   GC must not pass below that MV's current watermark
+2. making this behavior opt-in avoids pinning cluster GC unexpectedly for all MVs
+
+Operational notes:
+
+1. if no MV opts in, the MV service safe point should be removed
+2. documentation should make the trade-off explicit: a stalled opted-in MV can hold back cluster GC
+
+##### 2. Per-refresh execution protection
+
+A second, temporary protection is still needed for each bounded fast refresh execution.
+
+Semantics:
+
+1. before running one `FAST ... AS OF TIMESTAMP ...` refresh, publish a temporary service safe point
+   at `targetTSO`
+2. keep it for the whole refresh execution
+3. remove it after the refresh finishes (success or failure)
+
+Rationale:
+
+1. even if `targetTSO` is valid when refresh starts, GC may advance during a long refresh
+2. the outer refresh transaction's own `startTS` / `for_update_tso` does not protect this older
+   historical snapshot automatically
+
+#### Recommended implementation shape
+
+1. Extend parser/AST for `FAST` refresh to carry an optional `AS OF TIMESTAMP` expression.
+2. Parse/evaluate that expression into `targetTSO` during refresh preparation.
+3. Keep current outer refresh transaction framework unchanged.
+4. Carry both `fromTS` and `targetTSO` into `mvmerge` build/execution.
+5. Read MV at `writeTxnTSO`.
+6. Read MV log at `writeTxnTSO`, but explicitly filter `_tidb_commit_ts` into `(fromTS, targetTSO]`.
+7. Read base-table recompute paths at `targetTSO` through dedicated inner reader wiring.
+8. Persist `LAST_SUCCESS_READ_TSO = targetTSO` on success.
+9. If enabled for the MV, maintain persistent GC protection from the minimum opted-in watermark.
+10. For every bounded fast refresh execution, hold one temporary service safe point at `targetTSO`.
+
+This feature should be implemented as an MV-refresh-specific extension of `FAST` refresh,
+not as generic in-transaction stale-read SQL.
+
 ### Support COMPLETE DELTA APPLY (full compute, delta apply)
 
 After `COMPLETE OUT OF PLACE`, the next refresh mode is:
