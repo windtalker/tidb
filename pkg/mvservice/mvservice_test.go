@@ -714,41 +714,92 @@ func TestMVServiceRefreshAlertScanInterval(t *testing.T) {
 }
 
 func TestMVServiceCollectOverdueRefreshTasksDedupByLastSuccessReadTSO(t *testing.T) {
-	svc := NewMVService(context.Background(), mockSessionPool{}, &mockMVServiceHelper{}, DefaultMVServiceConfig())
-	defer svc.executor.Close()
+	type step struct {
+		atOffset         time.Duration
+		beforeCollect    func(task *mv, now time.Time)
+		expectedCount    int
+		expectedID       int64
+		expectedCritical bool
+	}
+	type testCase struct {
+		name  string
+		task  *mv
+		steps []step
+	}
 
 	now := mvsNow()
-
-	svc.mvRefreshMu.Lock()
-	if svc.mvRefreshMu.pending == nil {
-		svc.mvRefreshMu.pending = make(map[int64]mvItem)
+	testCases := []testCase{
+		{
+			name: "dedup_on_same_tso",
+			task: &mv{
+				ID:                 201,
+				nextRefresh:        now.Add(-2 * time.Minute),
+				lastSuccessReadTSO: 123456,
+				lastSuccessTime:    now.Add(-2 * time.Minute),
+				alertWarningSec:    30,
+			},
+			steps: []step{
+				{atOffset: 0, expectedCount: 1, expectedID: 201, expectedCritical: false},
+				{atOffset: 10 * time.Second, expectedCount: 0},
+				{
+					atOffset: 20 * time.Second,
+					beforeCollect: func(task *mv, now time.Time) {
+						task.lastSuccessReadTSO = 223456
+						task.lastSuccessTime = now.Add(-2 * time.Minute)
+					},
+					expectedCount: 1, expectedID: 201, expectedCritical: false,
+				},
+			},
+		},
+		{
+			name: "dedup_by_alert_level",
+			task: &mv{
+				ID:                 202,
+				nextRefresh:        now.Add(-2 * time.Minute),
+				lastSuccessReadTSO: 123456,
+				lastSuccessTime:    now.Add(-40 * time.Second),
+				alertWarningSec:    30,
+				alertCriticalSec:   60,
+			},
+			steps: []step{
+				{atOffset: 0, expectedCount: 1, expectedID: 202, expectedCritical: false},
+				{atOffset: 10 * time.Second, expectedCount: 0},
+				{atOffset: 30 * time.Second, expectedCount: 1, expectedID: 202, expectedCritical: true},
+				{atOffset: 40 * time.Second, expectedCount: 0},
+			},
+		},
 	}
-	task := &mv{
-		ID:                 201,
-		nextRefresh:        now.Add(-2 * time.Minute),
-		lastSuccessReadTSO: 123456,
-		lastSuccessTime:    now.Add(-2 * time.Minute),
-		alertWarningSec:    30,
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			svc := NewMVService(context.Background(), mockSessionPool{}, &mockMVServiceHelper{}, DefaultMVServiceConfig())
+			defer svc.executor.Close()
+
+			task := tc.task
+			task.orderTs = task.nextRefresh.UnixMilli()
+			svc.mvRefreshMu.Lock()
+			if svc.mvRefreshMu.pending == nil {
+				svc.mvRefreshMu.pending = make(map[int64]mvItem)
+			}
+			svc.mvRefreshMu.pending[task.ID] = svc.mvRefreshMu.prio.Push(task)
+			svc.mvRefreshMu.Unlock()
+
+			for _, s := range tc.steps {
+				at := now.Add(s.atOffset)
+				if s.beforeCollect != nil {
+					svc.mvRefreshMu.Lock()
+					s.beforeCollect(task, at)
+					svc.mvRefreshMu.Unlock()
+				}
+				got := svc.collectOverdueRefreshTasks(at)
+				require.Len(t, got, s.expectedCount)
+				if s.expectedCount > 0 {
+					require.Equal(t, s.expectedID, got[0].mviewID)
+					require.Equal(t, s.expectedCritical, got[0].critical)
+				}
+			}
+		})
 	}
-	task.orderTs = task.nextRefresh.UnixMilli()
-	svc.mvRefreshMu.pending[task.ID] = svc.mvRefreshMu.prio.Push(task)
-	svc.mvRefreshMu.Unlock()
-
-	first := svc.collectOverdueRefreshTasks(now)
-	require.Len(t, first, 1)
-	require.Equal(t, int64(201), first[0].mviewID)
-
-	second := svc.collectOverdueRefreshTasks(now.Add(10 * time.Second))
-	require.Len(t, second, 0)
-
-	svc.mvRefreshMu.Lock()
-	task.lastSuccessReadTSO = 223456
-	task.lastSuccessTime = now.Add(-2 * time.Minute)
-	svc.mvRefreshMu.Unlock()
-
-	third := svc.collectOverdueRefreshTasks(now.Add(20 * time.Second))
-	require.Len(t, third, 1)
-	require.Equal(t, int64(201), third[0].mviewID)
 }
 
 func TestTaskQueueRingBufferFIFO(t *testing.T) {

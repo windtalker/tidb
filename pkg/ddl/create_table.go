@@ -1241,7 +1241,6 @@ func setCreateMaterializedViewScheduleEvalSession(sctx sessionctx.Context, sqlMo
 	originalSQLMode := sessVars.SQLMode
 	originalTypeFlags := sessVars.StmtCtx.TypeFlags()
 	originalErrLevels := sessVars.StmtCtx.ErrLevels()
-	originalQuery := sctx.Value(sessionctx.QueryString)
 
 	var originalTZ *time.Location
 	if sessVars.TimeZone != nil {
@@ -1261,7 +1260,6 @@ func setCreateMaterializedViewScheduleEvalSession(sctx sessionctx.Context, sqlMo
 		sessVars.SQLMode = originalSQLMode
 		sessVars.StmtCtx.SetErrLevels(originalErrLevels)
 		sessVars.StmtCtx.SetTypeFlags(originalTypeFlags)
-		sctx.SetValue(sessionctx.QueryString, originalQuery)
 
 		sessVars.TimeZone = originalTZ
 		if originalStmtTZ != nil {

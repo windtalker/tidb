@@ -132,17 +132,18 @@ const (
 )
 
 type mv struct {
-	ID              int64
-	nextRefresh     time.Time
-	schemaName      string
-	mviewName       string
+	ID          int64
+	nextRefresh time.Time
+	schemaName  string
+	mviewName   string
 
 	lastSuccessReadTSO uint64
 	lastSuccessTime    time.Time
 	alertWarningSec    int64
 	alertCriticalSec   int64
 	// Suppress repeated overdue logs for the same lastSuccessReadTSO.
-	lastLoggedOverdueTSO uint64
+	lastLoggedWarningTSO  uint64
+	lastLoggedCriticalTSO uint64
 
 	orderTs    int64 // unix timestamp in milliseconds
 	retryCount atomic.Int64
@@ -281,11 +282,19 @@ func (t *MVService) collectOverdueRefreshTasks(now time.Time) []overdueRefreshTa
 		} else {
 			continue
 		}
-		if item.Value.lastSuccessReadTSO > 0 && item.Value.lastLoggedOverdueTSO == item.Value.lastSuccessReadTSO {
-			continue
-		}
-		if item.Value.lastSuccessReadTSO > 0 {
-			item.Value.lastLoggedOverdueTSO = item.Value.lastSuccessReadTSO
+		if tso := item.Value.lastSuccessReadTSO; tso > 0 {
+			if critical {
+				if item.Value.lastLoggedCriticalTSO == tso {
+					continue
+				}
+				item.Value.lastLoggedCriticalTSO = tso
+			} else {
+				// If critical has already been logged for this tso, skip warning downgrade logs.
+				if item.Value.lastLoggedWarningTSO == tso || item.Value.lastLoggedCriticalTSO == tso {
+					continue
+				}
+				item.Value.lastLoggedWarningTSO = tso
+			}
 		}
 		taskState := "queued"
 		if item.Value.orderTs == maxNextScheduleTs {
