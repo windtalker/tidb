@@ -428,9 +428,8 @@ func TestNewMVServiceConfig(t *testing.T) {
 		}
 
 		svc := NewMVService(context.Background(), mockSessionPool{}, &mockMVServiceHelper{}, cfg)
-		maxConcurrency, timeout := svc.executor.GetConfig()
-		require.Equal(t, cfg.TaskMaxConcurrency, maxConcurrency)
-		require.Equal(t, cfg.TaskTimeout, timeout)
+		require.Equal(t, cfg.TaskMaxConcurrency, int(svc.executor.maxConcurrency.Load()))
+		require.Equal(t, cfg.TaskTimeout, time.Duration(svc.executor.timeoutNanos.Load()))
 
 		baseDelay, maxDelay := svc.retryDelayConfig()
 		require.Equal(t, cfg.RetryBaseDelay, baseDelay)
@@ -625,6 +624,133 @@ func TestMVServiceUpdateConfigs(t *testing.T) {
 	})
 }
 
+func TestMVServiceCollectOverdueRefreshTasksByAlertLevel(t *testing.T) {
+	svc := NewMVService(context.Background(), mockSessionPool{}, &mockMVServiceHelper{}, DefaultMVServiceConfig())
+	defer svc.executor.Close()
+
+	now := mvsNow()
+
+	svc.mvRefreshMu.Lock()
+	if svc.mvRefreshMu.pending == nil {
+		svc.mvRefreshMu.pending = make(map[int64]mvItem)
+	}
+	warnTask := &mv{
+		ID:               101,
+		nextRefresh:      now.Add(-2 * time.Minute),
+		lastSuccessTime:  now.Add(-40 * time.Second),
+		alertWarningSec:  30,
+		alertCriticalSec: 120,
+	}
+	warnTask.orderTs = warnTask.nextRefresh.UnixMilli()
+	svc.mvRefreshMu.pending[warnTask.ID] = svc.mvRefreshMu.prio.Push(warnTask)
+
+	criticalTask := &mv{
+		ID:               102,
+		nextRefresh:      now.Add(-2 * time.Minute),
+		lastSuccessTime:  now.Add(-70 * time.Second),
+		alertWarningSec:  30,
+		alertCriticalSec: 60,
+	}
+	criticalTask.orderTs = maxNextScheduleTs // simulate running task
+	svc.mvRefreshMu.pending[criticalTask.ID] = svc.mvRefreshMu.prio.Push(criticalTask)
+
+	disabledTask := &mv{
+		ID:              103,
+		nextRefresh:     now.Add(-2 * time.Minute),
+		lastSuccessTime: now.Add(-5 * time.Minute),
+	}
+	disabledTask.orderTs = disabledTask.nextRefresh.UnixMilli()
+	svc.mvRefreshMu.pending[disabledTask.ID] = svc.mvRefreshMu.prio.Push(disabledTask)
+	svc.mvRefreshMu.Unlock()
+
+	got := svc.collectOverdueRefreshTasks(now)
+	require.Len(t, got, 2)
+
+	byID := make(map[int64]overdueRefreshTask, len(got))
+	for _, task := range got {
+		byID[task.mviewID] = task
+	}
+	require.False(t, byID[101].critical)
+	require.Equal(t, "queued", byID[101].taskState)
+	require.Equal(t, int64(30), byID[101].alertWarningSec)
+	require.Equal(t, int64(120), byID[101].alertCriticalSec)
+	require.True(t, byID[102].critical)
+	require.Equal(t, "running", byID[102].taskState)
+	require.Equal(t, int64(30), byID[102].alertWarningSec)
+	require.Equal(t, int64(60), byID[102].alertCriticalSec)
+}
+
+func TestMVServiceRefreshAlertScanInterval(t *testing.T) {
+	svc := NewMVService(context.Background(), mockSessionPool{}, &mockMVServiceHelper{}, DefaultMVServiceConfig())
+	defer svc.executor.Close()
+
+	now := mvsNow()
+
+	svc.mvRefreshMu.Lock()
+	if svc.mvRefreshMu.pending == nil {
+		svc.mvRefreshMu.pending = make(map[int64]mvItem)
+	}
+	task := &mv{
+		ID:              1,
+		nextRefresh:     now.Add(-2 * time.Minute),
+		lastSuccessTime: now.Add(-2 * time.Minute),
+		alertWarningSec: 30,
+	}
+	task.orderTs = task.nextRefresh.UnixMilli()
+	svc.mvRefreshMu.pending[task.ID] = svc.mvRefreshMu.prio.Push(task)
+	svc.mvRefreshMu.Unlock()
+
+	svc.nextTimeoutScanMillis.Store(0)
+	svc.maybeLogOverdueRefreshTasks(now)
+	require.Equal(t, now.Add(mvRefreshAlertScanInterval).UnixMilli(), svc.nextTimeoutScanMillis.Load())
+
+	// Within scan interval: should not trigger another scan.
+	svc.maybeLogOverdueRefreshTasks(now.Add(mvRefreshAlertScanInterval / 2))
+	require.Equal(t, now.Add(mvRefreshAlertScanInterval).UnixMilli(), svc.nextTimeoutScanMillis.Load())
+
+	// After interval: one more full scan and next scan time moves forward.
+	svc.maybeLogOverdueRefreshTasks(now.Add(mvRefreshAlertScanInterval))
+	require.Equal(t, now.Add(2*mvRefreshAlertScanInterval).UnixMilli(), svc.nextTimeoutScanMillis.Load())
+}
+
+func TestMVServiceCollectOverdueRefreshTasksDedupByLastSuccessReadTSO(t *testing.T) {
+	svc := NewMVService(context.Background(), mockSessionPool{}, &mockMVServiceHelper{}, DefaultMVServiceConfig())
+	defer svc.executor.Close()
+
+	now := mvsNow()
+
+	svc.mvRefreshMu.Lock()
+	if svc.mvRefreshMu.pending == nil {
+		svc.mvRefreshMu.pending = make(map[int64]mvItem)
+	}
+	task := &mv{
+		ID:                 201,
+		nextRefresh:        now.Add(-2 * time.Minute),
+		lastSuccessReadTSO: 123456,
+		lastSuccessTime:    now.Add(-2 * time.Minute),
+		alertWarningSec:    30,
+	}
+	task.orderTs = task.nextRefresh.UnixMilli()
+	svc.mvRefreshMu.pending[task.ID] = svc.mvRefreshMu.prio.Push(task)
+	svc.mvRefreshMu.Unlock()
+
+	first := svc.collectOverdueRefreshTasks(now)
+	require.Len(t, first, 1)
+	require.Equal(t, int64(201), first[0].mviewID)
+
+	second := svc.collectOverdueRefreshTasks(now.Add(10 * time.Second))
+	require.Len(t, second, 0)
+
+	svc.mvRefreshMu.Lock()
+	task.lastSuccessReadTSO = 223456
+	task.lastSuccessTime = now.Add(-2 * time.Minute)
+	svc.mvRefreshMu.Unlock()
+
+	third := svc.collectOverdueRefreshTasks(now.Add(20 * time.Second))
+	require.Len(t, third, 1)
+	require.Equal(t, int64(201), third[0].mviewID)
+}
+
 func TestTaskQueueRingBufferFIFO(t *testing.T) {
 	var q taskQueue
 	mkReq := func(i int) taskRequest {
@@ -723,7 +849,7 @@ func (h *fullChainMVServiceHelper) setPending(logs map[int64]time.Time, mvs map[
 	}
 }
 
-func (h *fullChainMVServiceHelper) fetchAllTiDBMVLogPurge(context.Context, basic.SessionPool) (map[int64]*mvLog, error) {
+func (h *fullChainMVServiceHelper) loadAllTiDBMVLogPurge(context.Context, basic.SessionPool) (map[int64]*mvLog, error) {
 	h.fetchLogsCalls.Add(1)
 	if h.fetchLogsErr != nil {
 		return nil, h.fetchLogsErr
@@ -743,7 +869,7 @@ func (h *fullChainMVServiceHelper) fetchAllTiDBMVLogPurge(context.Context, basic
 	return ret, nil
 }
 
-func (h *fullChainMVServiceHelper) fetchAllTiDBMVRefresh(context.Context, basic.SessionPool) (map[int64]*mv, error) {
+func (h *fullChainMVServiceHelper) loadAllTiDBMVRefresh(context.Context, basic.SessionPool) (map[int64]*mv, error) {
 	h.fetchViewCalls.Add(1)
 	if h.fetchViewsErr != nil {
 		return nil, h.fetchViewsErr
