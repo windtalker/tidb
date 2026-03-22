@@ -589,13 +589,16 @@ func (t RefreshMaterializedViewType) String() string {
 type RefreshMaterializedViewCompleteType int
 
 const (
-	RefreshMaterializedViewCompleteTypeInPlace RefreshMaterializedViewCompleteType = iota
+	RefreshMaterializedViewCompleteTypeDefault RefreshMaterializedViewCompleteType = iota
+	RefreshMaterializedViewCompleteTypeInPlace
 	RefreshMaterializedViewCompleteTypeOutOfPlace
 	RefreshMaterializedViewCompleteTypeDeltaApply
 )
 
 func (t RefreshMaterializedViewCompleteType) String() string {
 	switch t {
+	case RefreshMaterializedViewCompleteTypeDefault:
+		return "DEFAULT"
 	case RefreshMaterializedViewCompleteTypeInPlace:
 		return "IN PLACE"
 	case RefreshMaterializedViewCompleteTypeOutOfPlace:
@@ -641,6 +644,8 @@ func (n *RefreshMaterializedViewStmt) Mode() (RefreshMaterializedViewMode, error
 		return RefreshMaterializedViewModeFast, nil
 	case RefreshMaterializedViewTypeComplete:
 		switch n.CompleteType {
+		case RefreshMaterializedViewCompleteTypeDefault:
+			return RefreshMaterializedViewModeCompleteDeltaApply, nil
 		case RefreshMaterializedViewCompleteTypeInPlace:
 			return RefreshMaterializedViewModeCompleteInPlace, nil
 		case RefreshMaterializedViewCompleteTypeOutOfPlace:
@@ -676,7 +681,9 @@ func (n *RefreshMaterializedViewStmt) Restore(ctx *format.RestoreCtx) error {
 	ctx.WriteKeyWord(n.Type.String())
 	if n.Type == RefreshMaterializedViewTypeComplete {
 		switch n.CompleteType {
+		case RefreshMaterializedViewCompleteTypeDefault:
 		case RefreshMaterializedViewCompleteTypeInPlace:
+			ctx.WriteKeyWord(" IN PLACE")
 		case RefreshMaterializedViewCompleteTypeOutOfPlace:
 			ctx.WriteKeyWord(" OUT OF PLACE")
 		case RefreshMaterializedViewCompleteTypeDeltaApply:

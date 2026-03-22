@@ -5668,6 +5668,10 @@ RefreshWithSyncModeOpt:
 RefreshCompleteModeOpt:
 	/* EMPTY */
 	{
+		$$ = ast.RefreshMaterializedViewCompleteTypeDefault
+	}
+|	"IN" "PLACE"
+	{
 		$$ = ast.RefreshMaterializedViewCompleteTypeInPlace
 	}
 |	"OUT" "OF" "PLACE"

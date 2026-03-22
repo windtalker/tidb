@@ -2356,7 +2356,7 @@ func validateRefreshMaterializedViewStmt(s *ast.RefreshMaterializedViewStmt, isI
 	case ast.RefreshMaterializedViewModeCompleteDeltaApply:
 		methodType = "complete delta apply"
 	case ast.RefreshMaterializedViewModeCompleteInPlace:
-		methodType = "complete"
+		methodType = "complete in place"
 	case ast.RefreshMaterializedViewModeCompleteOutOfPlace:
 		methodType = "complete out of place"
 	default:
