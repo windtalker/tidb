@@ -44,12 +44,12 @@ const (
 	deltaCntStarName = "__mvmerge_delta_cnt_star"
 	mvRowIDName      = "__mvmerge_mv_rowid"
 
-	diffQueryAlias   = "q"
-	diffMVTableAlias = "m"
-	diffOpColName    = "diff_op"
-	diffHandlePrefix = "m_handle_"
-	diffOldRowPrefix = "m_"
-	diffNewRowPrefix = "q_"
+	diffQueryAlias   = "__mvd_q"
+	diffMVTableAlias = "__mvd_m"
+	diffOpColName    = "__mvd_op"
+	diffHandlePrefix = "__mvd_h_"
+	diffOldRowPrefix = "__mvd_o_"
+	diffNewRowPrefix = "__mvd_n_"
 )
 
 // SQL construction overview:
@@ -1390,24 +1390,12 @@ func buildMLogDeltaSelect(
 	if err != nil {
 		return nil, err
 	}
-	tableHints := []*ast.TableOptimizerHint{
-		{
-			HintName: pmodel.NewCIStr(utilhint.HintReadFromStorage),
-			HintData: pmodel.NewCIStr(utilhint.HintTiFlash),
-			Tables: []ast.HintTable{
-				{
-					DBName:    dbName,
-					TableName: mlogTable.Name,
-				},
-			},
-		},
-	}
 	return &ast.SelectStmt{
 		Fields:     &ast.FieldList{Fields: phase1Fields},
 		From:       mlogFrom,
 		Where:      phase1Where,
 		GroupBy:    groupBy,
-		TableHints: tableHints,
+		TableHints: []*ast.TableOptimizerHint{buildReadFromStorageTiFlashHint(dbName, mlogTable.Name)},
 	}, nil
 }
 
@@ -1953,6 +1941,31 @@ func aggFirstRow(arg ast.ExprNode) *ast.AggregateFuncExpr {
 	return &ast.AggregateFuncExpr{F: ast.AggFuncFirstRow, Args: []ast.ExprNode{arg}}
 }
 
+func buildReadFromStorageTiFlashHint(dbName, tableName pmodel.CIStr) *ast.TableOptimizerHint {
+	return &ast.TableOptimizerHint{
+		HintName: pmodel.NewCIStr(utilhint.HintReadFromStorage),
+		HintData: pmodel.NewCIStr(utilhint.HintTiFlash),
+		Tables: []ast.HintTable{
+			{
+				DBName:    dbName,
+				TableName: tableName,
+			},
+		},
+	}
+}
+
+func buildHashJoinProbeHint(dbName, tableName pmodel.CIStr) *ast.TableOptimizerHint {
+	return &ast.TableOptimizerHint{
+		HintName: pmodel.NewCIStr(utilhint.HintHashJoinProbe),
+		Tables: []ast.HintTable{
+			{
+				DBName:    dbName,
+				TableName: tableName,
+			},
+		},
+	}
+}
+
 func ifExpr(cond, trueExpr, falseExpr ast.ExprNode) *ast.FuncCallExpr {
 	return &ast.FuncCallExpr{
 		Tp:     ast.FuncCallExprTypeGeneric,
@@ -2119,6 +2132,10 @@ func BuildCompleteDiffSource(
 		Fields: &ast.FieldList{Fields: fields},
 		From:   &ast.TableRefsClause{TableRefs: join},
 		Where:  whereExpr,
+		TableHints: []*ast.TableOptimizerHint{
+			buildReadFromStorageTiFlashHint(dbName, pmodel.NewCIStr(diffMVTableAlias)),
+			buildHashJoinProbeHint(dbName, pmodel.NewCIStr(diffMVTableAlias)),
+		},
 	}
 
 	res := &CompleteDiffBuildResult{
