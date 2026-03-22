@@ -1,11 +1,16 @@
 # Materialized View Refresh (Implementation and Design Notes)
 
-This document describes the current implementation and the next evolution steps for TiDB `REFRESH MATERIALIZED VIEW` (`COMPLETE` / `FAST`).
+This document describes the current implementation and the next evolution steps for TiDB
+`REFRESH MATERIALIZED VIEW`
+(`COMPLETE IN PLACE` / `COMPLETE OUT OF PLACE` / `COMPLETE DELTA APPLY` / `FAST`).
 
 At the moment:
 
-- `COMPLETE` refresh is implemented with transactional semantics.
-- `FAST` refresh is implemented and uses the same transactional framework as `COMPLETE`.
+- `COMPLETE IN PLACE` refresh is implemented with transactional `DELETE + INSERT`.
+- `COMPLETE OUT OF PLACE` refresh is implemented with shadow-table build plus DDL cutover.
+- `COMPLETE DELTA APPLY` refresh is implemented with a `FULL OUTER JOIN` diff source plus a dedicated apply sink executor.
+- `FAST` refresh is implemented and uses the same outer transactional refresh framework as
+  `COMPLETE IN PLACE` / `COMPLETE DELTA APPLY`.
 
 ## Runtime `NEXT_TIME` Update (Internal SQL Success Path)
 
@@ -34,16 +39,18 @@ At the moment:
 4. **Refresh lifecycle history**: after lock acquisition, insert a `running` row into `mysql.tidb_mview_refresh_hist` using an independent session.
    - `REFRESH_JOB_ID` uses this refresh's `start_tso`.
 5. **Finalize history after refresh commit**: after refresh transaction commit outcome is known, update the same history row to `success` or `failed`.
-6. **Usable COMPLETE refresh**: do full data replacement with transactional `DELETE + INSERT`.
-7. **Usable FAST refresh**: run fast refresh through an internal statement path and incremental merge execution.
-8. **Privilege semantics scoped to MVP**: for outer SQL semantics, only check `ALTER` on MV; run refresh with internal sessions so system-table privileges on `mysql.tidb_mview_refresh_info` / `mysql.tidb_mview_refresh_hist` do not leak to business users.
+6. **Usable COMPLETE IN PLACE refresh**: do full data replacement with transactional `DELETE + INSERT`.
+7. **Usable COMPLETE OUT OF PLACE refresh**: build shadow data outside the refresh transaction and cut over atomically in DDL.
+8. **Usable COMPLETE DELTA APPLY refresh**: compute one full diff stream and apply only changed rows inside the refresh transaction.
+9. **Usable FAST refresh**: run fast refresh through an internal statement path and incremental merge execution.
+10. **Privilege semantics scoped to MVP**: for outer SQL semantics, only check `ALTER` on MV; run refresh with internal sessions so system-table privileges on `mysql.tidb_mview_refresh_info` / `mysql.tidb_mview_refresh_hist` do not leak to business users.
 
 ## Non-goals (not included yet)
 
 - Async execution semantics for `WITH ASYNC MODE`.
   The syntax is reserved by spec, but async refresh is not implemented yet.
   `REFRESH MATERIALIZED VIEW ... WITH ASYNC MODE ...` is parsed and rejected by executor.
-- Performance optimization for large MVs (for example large-transaction mitigation, delete cost reduction, swap table strategies).
+- Further performance optimization for large MVs (for example path selection, large-diff memory tuning, TiFlash/MPP validation, and additional spill/perf work).
 - Long-term retention/cleanup strategy for `mysql.tidb_mview_refresh_hist` (TTL/archival policy).
 
 ## Data and metadata sources
@@ -82,18 +89,23 @@ This create-time rule set is intentionally different from runtime internal-refre
 
 ## SQL behavior (user view)
 
-Supported syntax (all use one common transactional framework today):
+Supported syntax (current implemented modes):
 
 ```sql
 REFRESH MATERIALIZED VIEW db.mv COMPLETE;
 REFRESH MATERIALIZED VIEW mv COMPLETE; -- uses current DB
 REFRESH MATERIALIZED VIEW mv WITH ASYNC MODE COMPLETE; -- parsed, but rejected: async refresh is not supported yet
+REFRESH MATERIALIZED VIEW mv COMPLETE OUT OF PLACE;
+REFRESH MATERIALIZED VIEW mv COMPLETE DELTA APPLY;
 
 REFRESH MATERIALIZED VIEW mv FAST;
 REFRESH MATERIALIZED VIEW mv WITH ASYNC MODE FAST; -- parsed, but rejected: async refresh is not supported yet
 ```
 
 Current note: `FAST` requires `mysql.tidb_mview_refresh_info.LAST_SUCCESS_READ_TSO` to be non-`NULL`; otherwise refresh fails.
+
+Current note: `COMPLETE DELTA APPLY` currently requires a grouped MV definition and at least one visible
+`NOT NULL` MV column that can be used as the side-missing marker.
 
 Current privilege semantics (MVP):
 
@@ -105,14 +117,17 @@ Current privilege semantics (MVP):
 
 The most direct implementation is: transaction + row-lock mutex + history lifecycle + data refresh + success-metadata update.
 
-`COMPLETE` and `FAST` share the same outer framework; only the "refresh implementation" step differs.
+`COMPLETE IN PLACE`, `COMPLETE DELTA APPLY`, and `FAST` share the same outer transactional framework;
+only the data-change implementation differs.
+`COMPLETE OUT OF PLACE` reuses the outer advisory lock / history lifecycle but has a dedicated build + cutover path.
 
 1. Get an internal session from session pool and start a transaction on it (recommended **pessimistic**, so `FOR UPDATE NOWAIT` works immediately).
 2. In transaction, lock refresh-info row by `SELECT ... FOR UPDATE NOWAIT` on `mysql.tidb_mview_refresh_info` (used as refresh mutex), and remember the locked row's `LAST_SUCCESS_READ_TSO` value (nullable).
 3. Record refresh `start_tso` as `REFRESH_JOB_ID`.
 4. Use an independent session to insert one `mysql.tidb_mview_refresh_hist` row with `REFRESH_STATUS='running'` and `REFRESH_JOB_ID=<start_tso>`.
 5. Run refresh implementation by refresh type:
-   - `COMPLETE`: `DELETE FROM <mv_table>` + `INSERT INTO <mv_table> <mv_select_sql>`.
+   - `COMPLETE IN PLACE`: `DELETE FROM <mv_table>` + `INSERT INTO <mv_table> <mv_select_sql>`.
+   - `COMPLETE DELTA APPLY`: construct internal implementation statement and run one diff-source + apply-sink plan via `ExecuteInternalStmt`.
    - `FAST`: construct internal statement and run via `ExecuteInternalStmt` to apply incremental changes.
 6. Success path: read `refresh_read_tso` from transaction context (`TxnCtx.GetForUpdateTS()`).
 7. Before commit, persist success metadata with CAS-style SQL:
@@ -226,16 +241,19 @@ Explicit `BEGIN PESSIMISTIC` ensures lock acquisition and conflict behavior matc
 
 ### Refresh read tso (`for_update_ts`)
 
-Requirement: on successful COMPLETE refresh, `LAST_SUCCESS_READ_TSO` must store the transaction `for_update_ts` used for refresh read.
+Requirement: on successful transactional refresh
+(`COMPLETE IN PLACE` / `COMPLETE DELTA APPLY` / `FAST`),
+`LAST_SUCCESS_READ_TSO` must store the transaction `for_update_ts` used for refresh read.
 
 Reason: in `BEGIN PESSIMISTIC`, DML reads (such as `INSERT INTO ... SELECT ...`) use `for_update_ts`.
 So MV data snapshot corresponds to `for_update_ts`.
 If only `start_ts` is stored, users may observe that MV data includes rows newer than `LAST_SUCCESS_READ_TSO`,
 which also misleads later incremental-refresh/check logic.
 
-The same success-path read-tso persistence rule is used for both `COMPLETE` and `FAST`.
+The same success-path read-tso persistence rule is used for
+`COMPLETE IN PLACE` / `COMPLETE DELTA APPLY` / `FAST`.
 
-Current code path (in-place COMPLETE / FAST) reads refresh success tso from transaction context:
+Current code path (`COMPLETE IN PLACE` / `COMPLETE DELTA APPLY` / `FAST`) reads refresh success tso from transaction context:
 
 1. after refresh data changes, call `sctx.GetSessionVars().TxnCtx.GetForUpdateTS()`
 2. if the value is `0`, fail refresh
@@ -257,124 +275,49 @@ Execution path:
 
 Core execution semantics:
 
-- Refresh uses internal session, not caller session transaction/variables.
+- Refresh data changes and refresh-metadata writes run on internal sessions; the outer statement remains a standalone autocommit utility statement and does not join caller explicit transactions.
 - Refresh path uses dedicated internal source type (`kv.InternalTxnMVMaintenance`).
-- For in-place COMPLETE / FAST, uses `BEGIN PESSIMISTIC` + `SELECT ... FOR UPDATE NOWAIT` on `mysql.tidb_mview_refresh_info` for mutex.
-- For in-place COMPLETE / FAST success path, updates `LAST_SUCCESS_READ_TSO` with CAS condition (`LAST_SUCCESS_READ_TSO <=> <locked_tso>`) and verifies readback equals `TxnCtx.GetForUpdateTS()`.
-- For in-place COMPLETE / FAST execution failure, rolls back the whole refresh transaction to guarantee all-or-nothing MV data replacement.
-- `COMPLETE` rebuilds data with `DELETE FROM mv` + `INSERT INTO mv SELECT ...`.
-- `FAST` uses internal-only statement `RefreshMaterializedViewImplementStmt` and a dedicated incremental merge plan.
+- For `COMPLETE IN PLACE` / `COMPLETE DELTA APPLY` / `FAST`, uses `BEGIN PESSIMISTIC` + `SELECT ... FOR UPDATE NOWAIT` on `mysql.tidb_mview_refresh_info` for mutex.
+- For `COMPLETE IN PLACE` / `COMPLETE DELTA APPLY` / `FAST` success path, updates `LAST_SUCCESS_READ_TSO` with CAS condition (`LAST_SUCCESS_READ_TSO <=> <locked_tso>`) and verifies readback equals `TxnCtx.GetForUpdateTS()`.
+- For `COMPLETE IN PLACE` / `COMPLETE DELTA APPLY` / `FAST` execution failure, rolls back the whole refresh transaction to guarantee all-or-nothing MV data replacement.
+- `COMPLETE IN PLACE` rebuilds data with `DELETE FROM mv` + `INSERT INTO mv SELECT ...`.
+- `COMPLETE DELTA APPLY` uses internal-only statement `RefreshMaterializedViewImplementStmt`, a `FULL OUTER JOIN` diff-source plan, and a dedicated `MVCompleteDeltaApply` sink plan.
 - `COMPLETE OUT OF PLACE` uses a dedicated execution path (not the above refresh transaction):
   - build stage runs in independent internal session(s) outside explicit refresh transaction;
   - cutover and `mysql.tidb_mview_refresh_info` migration/update are done atomically in DDL worker transaction.
-- For `FAST`, executor constructs `RefreshMaterializedViewImplementStmt` with:
-  - original `RefreshMaterializedViewStmt` (must be `Type=FAST`)
-  - `LAST_SUCCESS_READ_TSO` value (must be non-`NULL` uint64 / `BIGINT UNSIGNED`)
-- `FAST` execution goes through `ExecuteInternalStmt(ctx, stmtNode)`.
+- For `FAST` / `COMPLETE DELTA APPLY`, executor constructs `RefreshMaterializedViewImplementStmt` and executes it through `ExecuteInternalStmt(ctx, stmtNode)`.
+- For `FAST`, `RefreshMaterializedViewImplementStmt` carries `LAST_SUCCESS_READ_TSO` (must be non-`NULL` uint64 / `BIGINT UNSIGNED`).
 - If `ExecuteInternalStmt` returns non-nil `RecordSet`, refresh drains it before `Close()` to guarantee full executor-tree execution.
 - `RefreshMaterializedViewStmt` is a normal `StmtNode` with no DDL-statement semantics
   (for example it does not set `LastExecuteDDL` flag).
 - Statement is forbidden inside explicit user transactions (`BEGIN` / `START TRANSACTION`),
   and must run as standalone autocommit statement.
 
-## Next phases
+## Implemented extensions and next phases
 
-### Support out-of-place COMPLETE refresh (decouple build and cutover)
+### COMPLETE OUT OF PLACE (implemented)
 
-For out-of-place COMPLETE refresh, the recommended model is "utility main flow + DDL sub-steps":
+Current execution model:
 
-1. Utility stage: build shadow data (new table or temporary physical object).
-2. Cutover stage: run dedicated DDL sub-step for atomic switch (metadata/schema-level operation).
-3. Utility stage: clean old objects and update refresh metadata.
-
-1. Parse and validate refresh mode:
-   - accept `REFRESH MATERIALIZED VIEW ... COMPLETE OUT OF PLACE`;
-   - reject `FAST OUT OF PLACE`;
-   - keep existing `COMPLETE` (without `OUT OF PLACE`) and `FAST` paths unchanged.
-2. Entry lock and history initialization:
-   - reuse unified advisory lock in `executeRefreshMaterializedView` as outer mutex for the whole out-of-place flow;
-   - insert `running` row into `mysql.tidb_mview_refresh_hist` before heavy work.
-   - do not reuse the current in-place refresh transaction (`BEGIN PESSIMISTIC` + row-lock + CAS) for build stage.
-3. Build shadow table from current MV physical table:
-   - out-of-place build runs in dedicated internal session with autocommit semantics;
-   - create shadow by `CREATE TABLE <shadow> LIKE <mv>`;
-   - shadow table must remain a normal table during build (`MaterializedView == nil`);
-   - rely on existing `CREATE TABLE ... LIKE` behavior (copy physical schema/index/table options; follow TiFlash replica-state handling of LIKE path).
-   - do not run this step inside refresh transaction:
-     - DDL (`CREATE TABLE`) has implicit transaction-commit semantics;
-     - `IMPORT INTO` is rejected in explicit transaction.
-4. Populate shadow table and capture build tso:
-   - load data into shadow (prefer `IMPORT INTO ... FROM (<mv_select_sql>)`, fallback path only when required by environment limits);
-   - capture the build read tso from build session `@@tidb_last_query_info.start_ts`.
-5. Submit dedicated cutover DDL job/action:
-   - add a new DDL action dedicated to out-of-place COMPLETE cutover;
-   - job args should include at least `old_mv_id`, `shadow_table_id`, `build_read_tso` (and required schema/name context).
-6. Execute cutover atomically in DDL worker:
-   - keep MV logical name unchanged for users: cutover action is responsible for table-name handover
-     (shadow takes original MV name; old physical table is renamed/drop-handled internally);
-   - move MV definition metadata to shadow target;
-   - update base-table reverse references (`MaterializedViewBase.MViewIDs`) from old ID to shadow ID;
-   - lock and update `mysql.tidb_mview_refresh_info` in the same DDL transaction:
-     - migrate ownership from old `MVIEW_ID` to shadow ID;
-     - set `LAST_SUCCESS_READ_TSO = build_read_tso`;
-     - preserve `NEXT_TIME` semantics;
-   - convert old MV table metadata to normal table form before final drop if required by current metadata constraints.
-7. Finalization and cleanup:
-   - on successful cutover, finalize history row to `success`;
-   - on failure, finalize history row to `failed`, keep old MV serving path unchanged, and do best-effort shadow cleanup;
-   - release advisory lock in deferred cleanup before returning pooled internal session.
-
-Detailed development plan (recommended implementation order):
-
-1. Freeze behavior contract before code changes:
-   - keep semantic matrix stable: `COMPLETE` (in-place), `COMPLETE OUT OF PLACE`, `FAST` (existing), and reject `FAST OUT OF PLACE`;
-   - align user-visible error messages for unsupported mode combinations and cutover failures.
-2. Extend parser and AST for mode expression:
-   - add optional `OUT OF PLACE` clause to `REFRESH MATERIALIZED VIEW`;
-   - carry mode in `RefreshMaterializedViewStmt` (for example `OutOfPlace` flag);
-   - update parser tokens/keywords (`PLACE` token is required);
-   - update parser/AST restore tests.
-3. Add early mode validation in executor entry:
-   - in `validateRefreshMaterializedViewStmt`, reject invalid combinations (for example `FAST + OUT OF PLACE`);
-   - keep privilege and transaction-boundary checks unchanged.
-4. Introduce out-of-place COMPLETE executor path:
-   - branch from existing refresh execution flow using `(Type == COMPLETE && OutOfPlace)`;
-   - reuse existing outer advisory-lock lifecycle and refresh-history lifecycle;
-   - bypass current in-place/fast refresh transaction flow (`BEGIN PESSIMISTIC` + row-lock + CAS).
-5. Implement shadow-table build stage:
-   - use dedicated internal build session with autocommit semantics;
-   - create shadow table via `CREATE TABLE <shadow> LIKE <mv>`;
-   - ensure shadow remains a normal table during build (`MaterializedView == nil`);
-   - use deterministic unique shadow naming and keep cleanup hooks for failures.
-6. Implement shadow data load and build tso capture:
-   - load `mv_select_sql` results into shadow (prefer `IMPORT INTO ... FROM (<mv_select_sql>)`);
-   - capture `build_read_tso` from build session `@@tidb_last_query_info.start_ts` for cutover metadata update.
-7. Add dedicated DDL action/job for cutover:
-   - create new DDL action type and job args (at least `old_mv_id`, `shadow_table_id`, `build_read_tso`);
-   - add DDL API submission/wait helper used by refresh executor.
-8. Implement DDL worker cutover logic (single atomic action):
-   - keep MV logical name unchanged for users (shadow table takes original MV name);
-   - move MV definition metadata to shadow target;
-   - rewrite base-table reverse references (`MaterializedViewBase.MViewIDs`) from old ID to shadow ID;
-   - lock/migrate `mysql.tidb_mview_refresh_info` row ownership (`MVIEW_ID` old to new), set `LAST_SUCCESS_READ_TSO = build_read_tso`, and preserve `NEXT_TIME` in the same DDL transaction;
-   - drop/cleanup old physical table after metadata handover.
-9. Integrate finalization and failure semantics:
-   - finalize refresh history as `success` only after cutover success;
-   - on build/cutover failure, finalize as `failed`, keep old MV serving path unchanged, and do best-effort shadow cleanup;
-   - ensure advisory lock is released before internal session returns to pool.
-10. Add targeted tests for each layer:
-   - parser tests for `COMPLETE OUT OF PLACE` and reject cases;
-   - executor tests for success/failure/concurrency behavior;
-   - DDL tests for cutover metadata correctness, logical name continuity, old-table cleanup, and refresh-info migration.
-11. Run required validation and repo checks:
-   - run failpoint-aware targeted tests in affected packages;
-   - if Go files are added/moved/renamed, run `make bazel_prepare`;
-   - run `make bazel_lint_changed` before final submission.
-12. Submit in small reviewable commits:
-   - parser/AST and tests;
-   - executor build path and tests;
-   - DDL cutover action and tests;
-   - final doc adjustment if behavior changed during implementation.
+1. Outer refresh path acquires the MV advisory lock and inserts a `running` history row before heavy work.
+2. Build stage runs in a dedicated internal autocommit session:
+   - create a deterministic shadow table via `CREATE TABLE <shadow> LIKE <mv>`;
+   - keep the shadow as a normal table during build (`MaterializedView == nil`);
+   - load shadow data with `IMPORT INTO ... FROM (<mv_select_sql>) WITH disable_precheck` on TiKV storage,
+     otherwise fallback to `INSERT INTO <shadow> <mv_select_sql>`;
+   - capture build read tso from build session `@@tidb_last_query_info.start_ts`.
+3. Executor submits a dedicated DDL cutover action carrying at least:
+   - old MV id;
+   - shadow table id;
+   - build read tso;
+   - expected pre-cutover refresh-info watermark / nullness for CAS-style migration.
+4. DDL worker atomically:
+   - transfers the logical MV name to the shadow table;
+   - moves MV definition metadata to the new physical table;
+   - rewrites base-table reverse references (`MaterializedViewBase.MViewIDs`);
+   - migrates `mysql.tidb_mview_refresh_info` ownership from old `MVIEW_ID` to shadow ID;
+   - sets `LAST_SUCCESS_READ_TSO = build_read_tso` and preserves `NEXT_TIME`.
+5. On success, finalize history as `success`; on failure, keep the old MV serving path unchanged and do best-effort shadow cleanup.
 
 ### Support FAST refresh upper bound with `AS OF TIMESTAMP`
 
@@ -387,7 +330,7 @@ This section records the intended semantics and implementation constraints befor
 #### Scope
 
 1. Only `FAST` refresh should support this feature.
-2. `COMPLETE` / `COMPLETE OUT OF PLACE` / `COMPLETE DELTA APPLY` do not need this option.
+2. `COMPLETE IN PLACE` / `COMPLETE OUT OF PLACE` / `COMPLETE DELTA APPLY` do not need this option.
 3. `AS OF TIMESTAMP` here should be treated as the refresh apply upper bound, not as generic
    statement stale-read semantics for the whole refresh statement.
 
@@ -577,15 +520,14 @@ Rationale:
 This feature should be implemented as an MV-refresh-specific extension of `FAST` refresh,
 not as generic in-transaction stale-read SQL.
 
-### Support COMPLETE DELTA APPLY (full compute, delta apply)
+### COMPLETE DELTA APPLY (implemented)
 
-After `COMPLETE OUT OF PLACE`, the next refresh mode is:
+`COMPLETE DELTA APPLY` computes the full MV definition result, shapes one diff stream, and applies only
+changed rows to the target MV inside the existing refresh transaction framework.
 
-- `COMPLETE DELTA APPLY`: still compute full MV definition result, but apply only changed rows to MV.
+#### Syntax contract (current implementation)
 
-#### Syntax contract (V1)
-
-Refresh mode matrix should be:
+Refresh mode matrix is:
 
 - `REFRESH MATERIALIZED VIEW ... COMPLETE`
 - `REFRESH MATERIALIZED VIEW ... COMPLETE OUT OF PLACE`
@@ -596,25 +538,27 @@ and reject these combinations:
 
 - `FAST OUT OF PLACE`
 - `FAST DELTA APPLY`
-- `COMPLETE OUT OF PLACE DELTA APPLY` (not in V1)
+- `COMPLETE OUT OF PLACE DELTA APPLY`
 
 `OUT OF PLACE` and `DELTA APPLY` should be treated as `COMPLETE`-only options.
-Parser should enforce that they can only appear after `COMPLETE`.
+Parser enforces that they can only appear after `COMPLETE`.
 
-#### Scope and assumptions (V1)
+#### Current scope and assumptions
 
-V1 is correctness-first and keeps implementation scope tight:
+Current implementation is correctness-first and keeps scope tight:
 
-1. V1 targets grouped MVs; for diff computation, the logical row identity is the `GROUP BY` key.
-2. All `GROUP BY` key columns used by the diff join must map to MV columns that are `NOT NULL`.
-3. Physical row locators used later by `UPDATE` / `DELETE` are a separate concern from diff-join identity:
+1. Implementation targets grouped MVs; for diff computation, the logical row identity is the `GROUP BY` key.
+2. MV definition must have `GROUP BY`; each `GROUP BY` item must be a column name and must appear in the `SELECT` list.
+3. Diff join uses `=` for `NOT NULL` group-key columns and `<=>` for nullable group-key columns.
+4. Physical row locators used later by `UPDATE` / `DELETE` are a separate concern from diff-join identity:
    - preferred locators are table handles (`PRIMARY KEY` / common handle);
    - `_tidb_rowid` may still be carried from the current MV side as a physical locator,
      but it is not used as the diff-join key.
-4. If these requirements are not met, reject `COMPLETE DELTA APPLY` directly
-   (do not silently fallback to `COMPLETE` replace mode).
-5. Keep existing outer advisory lock for refresh mutex semantics.
-6. Keep existing in-place refresh transaction framework (`BEGIN PESSIMISTIC`, history lifecycle, success-only refresh-info persistence).
+5. Side-missing detection requires one visible `NOT NULL` MV column as marker; current code picks the first visible `NOT NULL` column from MV schema.
+6. If these requirements are not met, reject `COMPLETE DELTA APPLY` directly
+   (do not silently fallback to `COMPLETE IN PLACE`).
+7. Keep existing outer advisory lock for refresh mutex semantics.
+8. Keep existing in-place refresh transaction framework (`BEGIN PESSIMISTIC`, history lifecycle, success-only refresh-info persistence).
 
 #### Why not split into three independent re-compute SQLs in one txn
 
@@ -628,9 +572,9 @@ Also, stale-read SQL (`... AS OF TIMESTAMP ...`) is not a practical fix here bec
 - it is rejected when used inside an explicit transaction;
 - `tidb_snapshot` mode blocks write statements.
 
-So V1 should avoid "recompute-per-DML-step" design.
+So current implementation avoids "recompute-per-DML-step" design.
 
-#### Diff computation approach (V1)
+#### Diff computation approach
 
 Use one `FULL OUTER JOIN`-based diff source query, then let one dedicated sink operator apply row changes.
 
@@ -690,7 +634,7 @@ the `Q` / `M` row image via explicit metadata.
 
 1. Join predicate:
    - use the `GROUP BY` key columns as the diff-join key;
-   - in V1 these key columns are required to be `NOT NULL`, so `=` can be used;
+   - use `=` for `NOT NULL` key columns and `<=>` for nullable key columns;
    - physical locators such as `PRIMARY KEY` handle columns or `_tidb_rowid` are not suitable
      diff-join keys; they are carried only for later `UPDATE` / `DELETE` locate.
 2. Payload equality check should use null-safe comparison (`<=>`) per column.
@@ -791,124 +735,59 @@ Per-row operation behavior in sink executor:
 2. `diff_op = 2` (`DELETE`): build handle from `MHandleCols`, remove `M` old row via `RemoveRecord`.
 3. `diff_op = 3` (`UPDATE`): build handle from `MHandleCols`, update from `M` old row to `Q` new row via `UpdateRecord`.
 
-V1 write strategy:
+Current write strategy:
 
 1. Prioritize correctness first: keep sink writer simple and deterministic.
-2. For `UPDATE`, V1 may set touched columns conservatively (all aggregate/writable payload columns).
-3. Column-level touched optimization (bitmap/minimal-set update) can be added later as a performance phase.
+2. `UPDATE` derives precise touched-column sets for non-group-key writable columns in chunk batches.
+3. Remaining performance work is about larger-diff memory/spill behavior and broader execution-path validation, not basic writer correctness.
 
-#### Milestones (recommended implementation order)
+#### Implementation status
 
-M1. Syntax/AST contract milestone
+Implemented today:
 
-1. Extend grammar to support `COMPLETE DELTA APPLY`.
-2. Enforce mode matrix in parser/validator (`OUT OF PLACE` and `DELTA APPLY` are `COMPLETE`-only options).
-3. Keep restore output stable for all accepted/rejected combinations.
+1. Parser/AST support for `COMPLETE DELTA APPLY`, including reject cases for invalid mode combinations.
+2. Planner diff-source build with `FULL OUTER JOIN`, diff filter, stable output layout, and explicit sink metadata (`MVCompleteDeltaApply`).
+3. Executor builder/runtime that derives writable mappings from target table metadata and applies diff rows via `AddRecord` / `RemoveRecord` / `UpdateRecord`.
+4. Refresh framework integration, including advisory lock, history lifecycle, CAS watermark update, rollback-on-error semantics, and observability for `DRY RUN` / `WITH PROFILE`.
 
-Done criteria:
+Still future work:
 
-1. Parser accepts supported syntax and rejects unsupported combinations.
-2. AST can round-trip restore for new syntax.
-
-M2. Planner diff-source milestone
-
-1. Build FOJ-based diff-source AST (`Q` vs `M`) in planner mview builder.
-2. Produce stable output layout including `diff_op`, optional extra handle, old/new row images,
-   with explicit metadata for marker selection and `M`-side physical locators.
-3. Keep `WHERE` diff-filter semantics stable (`side-missing OR payload-changed`).
-
-Done criteria:
-
-1. Planner case tests show expected `FULL OUTER JOIN + Selection + projection(diff_op)` shape.
-2. Output layout metadata is explicit and validated in planner.
-
-M3. Planner sink-contract milestone
-
-1. Add new root sink plan node for complete delta apply.
-2. Finalize planner-side sink mapping contract (`OpColID`, `MarkerMVOffset`, `GroupKeyMVOffsets`,
-   `MHandleCols`, `MRowInputColIDs`, `QRowInputColIDs`).
-3. Cover explain/contract tests for the new root plan shape and diff-source layout expectations.
-
-Done criteria:
-
-1. Planner builds `MVCompleteDeltaApply` with explicit sink metadata.
-2. Planner-side invalid mapping/layout fails early with clear errors.
-3. Executor integration is intentionally deferred to M4.
-
-M4. Executor hookup and correctness-first write milestone
-
-1. Add executor builder/runtime for `MVCompleteDeltaApply`.
-2. Derive writable-column mappings from `TargetTable.WritableCols()` and row-image mappings.
-3. For `UPDATE`, compare old/new non-group-key writable columns in chunk batches and derive precise touched sets.
-4. Implement row writes in sink runtime:
-   - `diff_op=1` -> `AddRecord`
-   - `diff_op=2` -> `RemoveRecord`
-   - `diff_op=3` -> `UpdateRecord`
-5. Keep all writes inside existing refresh transaction framework.
-
-Done criteria:
-
-1. `MVCompleteDeltaApply` can be built into an executor and consume diff rows end-to-end.
-2. Correctness tests pass for insert-only/delete-only/update-only/mixed/no-op cases.
-3. Failure path rolls back MV data and keeps refresh-info watermark unchanged.
-
-M5. Refresh framework integration milestone
-
-1. Route `COMPLETE DELTA APPLY` through data-change dispatch path.
-2. Keep existing advisory lock / history lifecycle / CAS watermark semantics unchanged.
-3. Add observability step for delta apply.
-
-Done criteria:
-
-1. `WITH PROFILE`/`DRY RUN` can distinguish delta-apply step.
-2. Concurrency behavior remains compatible with current refresh mutex semantics.
-
-M6. Hardening/performance milestone (post-V1)
-
-1. Add touched-column minimization for `UPDATE`.
-2. Evaluate/optimize large-diff memory behavior (projection trimming, spill behavior checks).
-3. Add TiFlash/FOJ path validation when feature switches permit.
-
-Done criteria:
-
-1. No correctness regression versus M4/M5.
-2. Performance improvements are measurable and guarded by tests.
+1. Larger-diff memory/performance tuning (projection trimming, spill validation, and similar work).
+2. TiFlash/MPP path validation when feature switches and pushdown capability allow it.
+3. Possible path-selection or cost-based choice among `COMPLETE IN PLACE` / `COMPLETE OUT OF PLACE` / `COMPLETE DELTA APPLY`.
 
 #### Performance notes
 
-- `FULL OUTER JOIN` is chosen for V1 because it keeps one-pass diff semantics and simple correctness model.
+- `FULL OUTER JOIN` is chosen because it keeps one-pass diff semantics and a simple correctness model.
 - Filtering unchanged rows reduces output/write volume, but does not remove full-join compute cost itself.
 - For large tables, memory/spill pressure is expected; keep projection minimal in diff query and rely on spill path correctness.
 - If future TiFlash full-join pushdown/MPP is available, this diff-query shape can reuse that capability without changing SQL semantics.
 
-## Test suggestions (for future implementation)
+## Test coverage (current implementation)
 
-Add executor UT coverage in `pkg/executor/test/executor/` (refresh-focused) and `pkg/executor/test/ddl/` (MV DDL-related):
+Current targeted coverage lives mainly in `pkg/executor/test/executor/`, `pkg/planner/core/casetest/mview/`,
+and `pkg/planner/mview/`, including:
 
-1. **Basic correctness**:
-   - create base table + mlog + mv
-   - insert base data
-   - execute `REFRESH MATERIALIZED VIEW mv COMPLETE`
-   - verify MV content equals `SELECT ... GROUP BY ...`
-   - verify `mysql.tidb_mview_refresh_info.LAST_SUCCESS_READ_TSO > 0`
-   - verify one row in `mysql.tidb_mview_refresh_hist` has `REFRESH_STATUS='success'` and `REFRESH_JOB_ID=<start_tso>`
-2. **Concurrency mutex**:
-   - session A starts refresh and pauses after lock acquisition (`FOR UPDATE`) via failpoint or manual lock hold
-   - session B executes refresh and should get NOWAIT lock conflict
-3. **Missing metadata row**:
-   - delete row from `mysql.tidb_mview_refresh_info`
-   - execute refresh and expect "refresh info row missing" error
-4. **Failure semantics**:
-   - force COMPLETE refresh failure (for example injected `INSERT ... SELECT` error)
-   - verify `mysql.tidb_mview_refresh_info.LAST_SUCCESS_READ_TSO` is unchanged
-   - verify corresponding `mysql.tidb_mview_refresh_hist` row is finalized to `REFRESH_STATUS='failed'` with error reason
+1. Parser/AST acceptance and rejection for `COMPLETE OUT OF PLACE` / `COMPLETE DELTA APPLY`.
+2. Planner contract tests for:
+   - `FULL OUTER JOIN` diff-source layout;
+   - nullable group-key handling;
+   - PK handle / common handle / extra-rowid handle cases.
+3. Executor refresh tests for `COMPLETE DELTA APPLY`:
+   - manual and internal refresh;
+   - insert-only / delete-only / update-only / mixed / no-op cases;
+   - `for_update_ts` semantics;
+   - rollback-on-error;
+   - refresh-history and watermark updates.
+4. Out-of-place refresh tests for shadow build / cutover success, CAS mismatch, cleanup, and observability.
+
+Remaining useful additions are mostly around larger-diff performance validation and broader execution-path coverage.
 
 ## Known limitations and future direction
 
-- `DELETE FROM mv` + `INSERT INTO mv SELECT ...` in one transaction can create very large transactions for big MVs
+- `COMPLETE IN PLACE` (`DELETE FROM mv` + `INSERT INTO mv SELECT ...`) can still create very large transactions for big MVs
   (txn size limits, write amplification, GC pressure).
-  A future "build new object + atomic cutover" strategy is possible but needs careful atomicity-boundary design,
-  because it introduces DDL semantics.
+  `COMPLETE OUT OF PLACE` avoids this path, but further path selection / cost-based choice is still future work.
 - History finalization is intentionally after refresh transaction commit, because only then final status is definitive.
   If process crash happens between refresh commit and history finalize update, recovery/reconciliation for
   stale `running` rows is still a future enhancement.
