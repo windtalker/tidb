@@ -28,6 +28,7 @@ import (
 	"github.com/pingcap/tidb/pkg/parser/opcode"
 	"github.com/pingcap/tidb/pkg/planner/core"
 	corebase "github.com/pingcap/tidb/pkg/planner/core/base"
+	"github.com/pingcap/tidb/pkg/planner/core/operator/logicalop"
 	"github.com/pingcap/tidb/pkg/planner/core/resolve"
 	"github.com/pingcap/tidb/pkg/planner/mview"
 	_ "github.com/pingcap/tidb/pkg/session"
@@ -40,8 +41,8 @@ import (
 const (
 	deltaTableAlias = "delta"
 	mvTableAlias    = "mv"
-	diffQAlias      = "q"
-	diffMAlias      = "m"
+	diffQAlias      = "__mvd_q"
+	diffMAlias      = "__mvd_m"
 
 	deltaCntStarName = "__mvmerge_delta_cnt_star"
 )
@@ -868,6 +869,27 @@ func TestBuildCompleteDiffSourceLayout(t *testing.T) {
 	res, err := mvmerge.BuildCompleteDiffSource(sctx.GetPlanCtx(), is, mv)
 	require.NoError(t, err)
 	require.NotNil(t, res.DiffSourceSelect)
+	item, ok := is.TableItemByID(mv.ID)
+	require.True(t, ok)
+	require.Len(t, res.DiffSourceSelect.TableHints, 2)
+	storageHint := res.DiffSourceSelect.TableHints[0]
+	require.Equal(t, hint.HintReadFromStorage, storageHint.HintName.L)
+	require.Equal(t, hint.HintTiFlash, storageHint.HintData.(pmodel.CIStr).L)
+	require.Len(t, storageHint.Tables, 1)
+	require.Equal(t, diffMAlias, storageHint.Tables[0].TableName.L)
+	require.Equal(t, item.DBName.L, storageHint.Tables[0].DBName.L)
+	probeHint := res.DiffSourceSelect.TableHints[1]
+	require.Equal(t, hint.HintHashJoinProbe, probeHint.HintName.L)
+	require.Len(t, probeHint.Tables, 1)
+	require.Equal(t, diffMAlias, probeHint.Tables[0].TableName.L)
+	require.Equal(t, item.DBName.L, probeHint.Tables[0].DBName.L)
+	sctx.GetSessionVars().EnableFullOuterJoin = true
+	plan, _, err := optimizeForTest(sctx, is)(context.Background(), res.DiffSourceSelect)
+	require.NoError(t, err)
+	hashJoin := findHashJoinPlan(plan)
+	require.NotNil(t, hashJoin)
+	require.Equal(t, logicalop.FullOuterJoin, hashJoin.JoinType)
+	require.False(t, hashJoin.RightIsBuildSide())
 	require.Equal(t, mvID, res.MVTableID)
 	require.Equal(t, len(mv.Columns), res.MVColumnCount)
 	require.Equal(t, 0, res.OpColOffset)
@@ -1082,6 +1104,24 @@ func findIndexJoinPlan(plan corebase.PhysicalPlan) *core.PhysicalIndexJoin {
 			continue
 		}
 		if found := findIndexJoinPlan(child); found != nil {
+			return found
+		}
+	}
+	return nil
+}
+
+func findHashJoinPlan(plan corebase.PhysicalPlan) *core.PhysicalHashJoin {
+	if plan == nil {
+		return nil
+	}
+	if hashJoin, ok := plan.(*core.PhysicalHashJoin); ok {
+		return hashJoin
+	}
+	for _, child := range plan.Children() {
+		if child == nil {
+			continue
+		}
+		if found := findHashJoinPlan(child); found != nil {
 			return found
 		}
 	}
