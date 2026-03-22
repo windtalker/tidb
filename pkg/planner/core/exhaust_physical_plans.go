@@ -1801,9 +1801,6 @@ func preferMppBCJ(p *logicalop.LogicalJoin) bool {
 func canExprsInJoinPushdown(p *logicalop.LogicalJoin, storeType kv.StoreType) bool {
 	equalExprs := make([]expression.Expression, 0, len(p.EqualConditions))
 	for _, eqCondition := range p.EqualConditions {
-		if eqCondition.FuncName.L == ast.NullEQ {
-			return false
-		}
 		equalExprs = append(equalExprs, eqCondition)
 	}
 	pushDownCtx := util.GetPushDownCtx(p.SCtx())
@@ -1869,7 +1866,7 @@ func tryToGetMppHashJoin(p *logicalop.LogicalJoin, prop *property.PhysicalProper
 	if !canExprsInJoinPushdown(p, kv.TiFlash) {
 		return nil
 	}
-	lkeys, rkeys, _, _ := p.GetJoinKeys()
+	lkeys, rkeys, isNullEQ, _ := p.GetJoinKeys()
 	lNAkeys, rNAKeys := p.GetNAJoinKeys()
 	// check match property
 	baseJoin := basePhysicalJoin{
@@ -1880,6 +1877,7 @@ func tryToGetMppHashJoin(p *logicalop.LogicalJoin, prop *property.PhysicalProper
 		DefaultValues:   p.DefaultValues,
 		LeftJoinKeys:    lkeys,
 		RightJoinKeys:   rkeys,
+		IsNullEQ:        isNullEQ,
 		LeftNAJoinKeys:  lNAkeys,
 		RightNAJoinKeys: rNAKeys,
 	}
