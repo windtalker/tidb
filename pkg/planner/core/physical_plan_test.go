@@ -379,6 +379,59 @@ func TestMPPFullOuterJoinToPB(t *testing.T) {
 	require.Equal(t, tipb.JoinType_TypeFullOuterJoin, pb.Join.JoinType)
 }
 
+func TestMPPNullEQJoinToPB(t *testing.T) {
+	store := testkit.CreateMockStore(t, mockstore.WithMockTiFlash(2))
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("set tidb_cost_model_version=2")
+	tk.MustExec("set @@tidb_allow_mpp=1")
+	tk.MustExec("set @@tidb_enforce_mpp=1")
+	tk.MustExec("create table t1 (a int, b int)")
+	tk.MustExec("create table t2 (a int, b int)")
+	tk.MustExec("alter table t1 set tiflash replica 1")
+	tk.MustExec("alter table t2 set tiflash replica 1")
+	for _, tableName := range []string{"t1", "t2"} {
+		tb := external.GetTableByName(t, tk, "test", tableName)
+		err := domain.GetDomain(tk.Session()).DDLExecutor().UpdateTableReplicaInfo(tk.Session(), tb.Meta().ID, true)
+		require.NoError(t, err)
+	}
+
+	sql := "select /*+ shuffle_join(t1, t2), read_from_storage(tiflash[t1, t2]) */ * from t1 join t2 on t1.a <=> t2.a"
+	rows := tk.MustQuery("explain format = 'brief' " + sql).Rows()
+	hasMPPNullEQHashJoin := false
+	for _, row := range rows {
+		line := fmt.Sprint(row)
+		if strings.Contains(line, "HashJoin") && strings.Contains(line, "mpp[tiflash]") && strings.Contains(line, "nulleq(") {
+			hasMPPNullEQHashJoin = true
+			break
+		}
+	}
+	require.True(t, hasMPPNullEQHashJoin)
+
+	stmt, err := parser.New().ParseOneStmt(sql, "", "")
+	require.NoError(t, err)
+	nodeW := resolve.NewNodeW(stmt)
+	plan, _, err := planner.Optimize(context.Background(), tk.Session(), nodeW, domain.GetDomain(tk.Session()).InfoSchema())
+	require.NoError(t, err)
+
+	var hashJoin *core.PhysicalHashJoin
+	flat := core.FlattenPhysicalPlan(plan, true)
+	for _, op := range flat.Main {
+		hj, ok := op.Origin.(*core.PhysicalHashJoin)
+		if !ok {
+			continue
+		}
+		hashJoin = hj
+		break
+	}
+	require.NotNil(t, hashJoin)
+	require.Equal(t, []bool{true}, hashJoin.IsNullEQ)
+
+	pb, err := hashJoin.ToPB(tk.Session().GetBuildPBCtx(), kv.TiFlash)
+	require.NoError(t, err)
+	require.Equal(t, []bool{true}, pb.Join.GetIsNullEq())
+}
+
 func TestMPPFullOuterJoinWithoutShuffleHint(t *testing.T) {
 	store := testkit.CreateMockStore(t, mockstore.WithMockTiFlash(2))
 	tk := testkit.NewTestKit(t, store)
