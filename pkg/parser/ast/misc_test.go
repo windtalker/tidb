@@ -138,6 +138,22 @@ func TestRefreshMaterializedViewStmtRestoreOutOfPlace(t *testing.T) {
 	require.Equal(t, "REFRESH MATERIALIZED VIEW `test`.`mv` WITH ASYNC MODE COMPLETE OUT OF PLACE", sb.String())
 }
 
+func TestRefreshMaterializedViewStmtRestoreInPlace(t *testing.T) {
+	stmt := &ast.RefreshMaterializedViewStmt{
+		ViewName: &ast.TableName{
+			Schema: model.NewCIStr("test"),
+			Name:   model.NewCIStr("mv"),
+		},
+		Type:         ast.RefreshMaterializedViewTypeComplete,
+		CompleteType: ast.RefreshMaterializedViewCompleteTypeInPlace,
+	}
+
+	var sb strings.Builder
+	rctx := format.NewRestoreCtx(format.DefaultRestoreFlags, &sb)
+	require.NoError(t, stmt.Restore(rctx))
+	require.Equal(t, "REFRESH MATERIALIZED VIEW `test`.`mv` COMPLETE IN PLACE", sb.String())
+}
+
 func TestRefreshMaterializedViewStmtRestoreDeltaApply(t *testing.T) {
 	stmt := &ast.RefreshMaterializedViewStmt{
 		ViewName: &ast.TableName{
@@ -152,6 +168,22 @@ func TestRefreshMaterializedViewStmtRestoreDeltaApply(t *testing.T) {
 	rctx := format.NewRestoreCtx(format.DefaultRestoreFlags, &sb)
 	require.NoError(t, stmt.Restore(rctx))
 	require.Equal(t, "REFRESH MATERIALIZED VIEW `test`.`mv` COMPLETE DELTA APPLY", sb.String())
+}
+
+func TestRefreshMaterializedViewStmtRestoreDefaultCompleteType(t *testing.T) {
+	stmt := &ast.RefreshMaterializedViewStmt{
+		ViewName: &ast.TableName{
+			Schema: model.NewCIStr("test"),
+			Name:   model.NewCIStr("mv"),
+		},
+		Type:         ast.RefreshMaterializedViewTypeComplete,
+		CompleteType: ast.RefreshMaterializedViewCompleteTypeDefault,
+	}
+
+	var sb strings.Builder
+	rctx := format.NewRestoreCtx(format.DefaultRestoreFlags, &sb)
+	require.NoError(t, stmt.Restore(rctx))
+	require.Equal(t, "REFRESH MATERIALIZED VIEW `test`.`mv` COMPLETE", sb.String())
 }
 
 func TestRefreshMaterializedViewStmtRestoreFastIgnoresOutOfPlaceCompleteType(t *testing.T) {
@@ -221,6 +253,14 @@ func TestRefreshMaterializedViewStmtMode(t *testing.T) {
 			stmt: &ast.RefreshMaterializedViewStmt{
 				Type:         ast.RefreshMaterializedViewTypeComplete,
 				CompleteType: ast.RefreshMaterializedViewCompleteTypeDeltaApply,
+			},
+			expectedMode: ast.RefreshMaterializedViewModeCompleteDeltaApply,
+		},
+		{
+			name: "complete default",
+			stmt: &ast.RefreshMaterializedViewStmt{
+				Type:         ast.RefreshMaterializedViewTypeComplete,
+				CompleteType: ast.RefreshMaterializedViewCompleteTypeDefault,
 			},
 			expectedMode: ast.RefreshMaterializedViewModeCompleteDeltaApply,
 		},
