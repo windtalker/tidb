@@ -116,7 +116,7 @@ const (
 	ActionAlterMaterializedViewRefresh    ActionType = 76
 	ActionAlterMaterializedViewLogPurge   ActionType = 77
 	ActionAlterMaterializedViewAttributes ActionType = 78
-	ActionMViewRefreshOutOfPlaceCutover  ActionType = 79
+	ActionMViewRefreshOutOfPlaceCutover   ActionType = 79
 )
 
 // ActionMap is the map of DDL ActionType to string.

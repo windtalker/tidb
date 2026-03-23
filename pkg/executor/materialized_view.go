@@ -987,7 +987,7 @@ func (e *RefreshMaterializedViewExec) executeRefreshMaterializedView(kctx contex
 			stepSet,
 			expectedLastSuccessReadTSO,
 			expectedLastSuccessReadTSONull,
-			targetMaintainMemQuota,
+			refreshExecutionVars.maintainMemQuota,
 		)
 		if err != nil {
 			return finalizeFailure(err)
