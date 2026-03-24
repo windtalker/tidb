@@ -671,3 +671,17 @@ func TestBuildCreateMaterializedViewImportSQLDiskQuota(t *testing.T) {
 	require.NoError(t, err)
 	require.Contains(t, sql, "WITH disable_precheck, disk_quota='100gib'")
 }
+
+func TestNormalizeMVDefinitionHintDBNames(t *testing.T) {
+	p := parser.New()
+	stmt, err := p.ParseOneStmt("select /*+ read_from_storage(tiflash[src]) hash_join_probe(src) */ a, count(1) from t src group by a", "", "")
+	require.NoError(t, err)
+
+	selectStmt := stmt.(*ast.SelectStmt)
+	normalizeMVDefinitionHintDBNames(selectStmt, pmodel.NewCIStr("test"))
+
+	sql, err := restoreNodeToCanonicalSQL(selectStmt)
+	require.NoError(t, err)
+	require.Contains(t, sql, "READ_FROM_STORAGE(TIFLASH[`test`.`src`])")
+	require.Contains(t, sql, "HASH_JOIN_PROBE(`test`.`src`)")
+}
