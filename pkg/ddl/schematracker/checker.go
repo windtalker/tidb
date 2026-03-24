@@ -333,6 +333,8 @@ func (d *Checker) RefreshMaterializedViewCompleteOutOfPlaceCutover(
 	buildReadTSO uint64,
 	expectedLastSuccessReadTSO uint64,
 	expectedLastSuccessReadTSONull bool,
+	nextTime *string,
+	shouldUpdateNextTime bool,
 ) error {
 	return d.realExecutor.RefreshMaterializedViewCompleteOutOfPlaceCutover(
 		ctx,
@@ -344,6 +346,8 @@ func (d *Checker) RefreshMaterializedViewCompleteOutOfPlaceCutover(
 		buildReadTSO,
 		expectedLastSuccessReadTSO,
 		expectedLastSuccessReadTSONull,
+		nextTime,
+		shouldUpdateNextTime,
 	)
 }
 

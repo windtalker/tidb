@@ -982,6 +982,8 @@ func (e *RefreshMaterializedViewExec) executeRefreshMaterializedView(kctx contex
 		buildReadTSO, err := e.executeRefreshMaterializedViewCompleteOutOfPlace(
 			kctx,
 			s,
+			refreshSctx,
+			isInternalSQL,
 			schemaName,
 			tblInfo,
 			stepSet,
@@ -1223,6 +1225,8 @@ func (e *RefreshMaterializedViewExec) executeRefreshMaterializedView(kctx contex
 func (e *RefreshMaterializedViewExec) executeRefreshMaterializedViewCompleteOutOfPlace(
 	kctx context.Context,
 	s *ast.RefreshMaterializedViewStmt,
+	refreshSctx sessionctx.Context,
+	isInternalSQL bool,
 	schemaName pmodel.CIStr,
 	tblInfo *model.TableInfo,
 	stepSet mvRefreshStepSet,
@@ -1352,6 +1356,27 @@ func (e *RefreshMaterializedViewExec) executeRefreshMaterializedViewCompleteOutO
 		if lookupErr != nil {
 			return lookupErr
 		}
+		var nextTime *string
+		var shouldUpdateNextTime bool
+		if isInternalSQL {
+			scheduleEvalSctx, scheduleErr := e.GetSysSession()
+			if scheduleErr != nil {
+				return scheduleErr
+			}
+			defer e.ReleaseSysSession(kctx, scheduleEvalSctx)
+			nextTime, shouldUpdateNextTime, scheduleErr = deriveRuntimeMaterializedScheduleNextTime(
+				kctx,
+				scheduleEvalSctx,
+				refreshSctx,
+				tblInfo.MaterializedView.RefreshStartWith,
+				tblInfo.MaterializedView.RefreshNext,
+				isInternalSQL,
+				tblInfo.MaterializedView.DefinitionSQLMode,
+			)
+			if scheduleErr != nil {
+				return scheduleErr
+			}
+		}
 		return domain.GetDomain(e.Ctx()).DDLExecutor().RefreshMaterializedViewCompleteOutOfPlaceCutover(
 			e.Ctx(),
 			tblInfo.DBID,
@@ -1362,6 +1387,8 @@ func (e *RefreshMaterializedViewExec) executeRefreshMaterializedViewCompleteOutO
 			buildReadTSO,
 			expectedLastSuccessReadTSO,
 			expectedLastSuccessReadTSONull,
+			nextTime,
+			shouldUpdateNextTime,
 		)
 	}); err != nil {
 		return 0, err

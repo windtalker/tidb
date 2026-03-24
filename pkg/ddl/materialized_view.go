@@ -605,6 +605,8 @@ func (e *executor) RefreshMaterializedViewCompleteOutOfPlaceCutover(
 	buildReadTSO uint64,
 	expectedLastSuccessReadTSO uint64,
 	expectedLastSuccessReadTSONull bool,
+	nextTime *string,
+	shouldUpdateNextTime bool,
 ) error {
 	job := &model.Job{
 		Version:        model.GetJobVerInUse(),
@@ -623,6 +625,8 @@ func (e *executor) RefreshMaterializedViewCompleteOutOfPlaceCutover(
 		BuildReadTSO:                   buildReadTSO,
 		ExpectedLastSuccessReadTSO:     expectedLastSuccessReadTSO,
 		ExpectedLastSuccessReadTSONull: expectedLastSuccessReadTSONull,
+		NextTime:                       nextTime,
+		ShouldUpdateNextTime:           shouldUpdateNextTime,
 	}
 	return errors.Trace(e.doDDLJob2(ctx, job, args))
 }
