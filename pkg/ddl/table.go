@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -1265,6 +1266,10 @@ func (w *worker) onRefreshMaterializedViewCompleteOutOfPlaceCutover(jobCtx *jobC
 	if err != nil {
 		return ver, errors.Trace(err)
 	}
+	cutoverEvent := notifier.NewMViewRefreshOutOfPlaceCutoverEvent(newMViewTblInfo, oldMViewTblInfo)
+	if err := asyncNotifyEvent(jobCtx, cutoverEvent, job, noSubJob, w.sess); err != nil {
+		return ver, errors.Trace(err)
+	}
 	job.FinishTableJob(model.JobStateDone, model.StatePublic, ver, newMViewTblInfo)
 	return ver, nil
 }
@@ -1321,16 +1326,27 @@ func (w *worker) migrateMViewRefreshInfoForOutOfPlaceCutover(
 	if args.ExpectedLastSuccessReadTSONull {
 		expectedReadTSOArg = nil
 	}
+	setClauses := []string{"MVIEW_ID = %?", "LAST_SUCCESS_READ_TSO = %?"}
+	sqlArgs := []any{args.ShadowTableID, args.BuildReadTSO}
+	if args.ShouldUpdateNextTime {
+		setClauses = append(setClauses, "NEXT_TIME = %?")
+		var nextTimeArg any
+		if args.NextTime != nil {
+			nextTimeArg = *args.NextTime
+		}
+		sqlArgs = append(sqlArgs, nextTimeArg)
+	}
+	sqlArgs = append(sqlArgs, args.OldMViewID, expectedReadTSOArg)
 	_, err := w.sess.Execute(
 		ctx,
-		`UPDATE mysql.tidb_mview_refresh_info
-SET MVIEW_ID = %?, LAST_SUCCESS_READ_TSO = %?
-WHERE MVIEW_ID = %? AND LAST_SUCCESS_READ_TSO <=> %?`,
+		fmt.Sprintf(
+			`UPDATE mysql.tidb_mview_refresh_info
+SET %s
+WHERE MVIEW_ID = %%? AND LAST_SUCCESS_READ_TSO <=> %%?`,
+			strings.Join(setClauses, ", "),
+		),
 		"mview-refresh-cutover-migrate-refresh-info",
-		args.ShadowTableID,
-		args.BuildReadTSO,
-		args.OldMViewID,
-		expectedReadTSOArg,
+		sqlArgs...,
 	)
 	if err != nil {
 		return errors.Trace(convertMViewRefreshInfoTableNotExistsErrOnOutOfPlaceCutover(err))

@@ -395,6 +395,43 @@ func TestMaterializedViewRefreshInternalSQLStartWithNoNextSetsNextTimeNull(t *te
 	)).Check(testkit.Rows("complete automatically"))
 }
 
+func TestMaterializedViewRefreshInternalSQLOutOfPlaceUpdatesNextTime(t *testing.T) {
+	store, dom := testkit.CreateMockStoreAndDomain(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("create table t_internal_oop_next (a int not null, b int not null)")
+	tk.MustExec("insert into t_internal_oop_next values (1, 10), (2, 20)")
+	tk.MustExec("create materialized view log on t_internal_oop_next (a, b) purge next date_add(now(), interval 1 hour)")
+	tk.MustExec("create materialized view mv_internal_oop_next (a, s, cnt) refresh fast start with date_add(now(), interval 2 hour) next date_add(now(), interval 40 minute) as select a, sum(b), count(1) from t_internal_oop_next group by a")
+
+	is := dom.InfoSchema()
+	mvTable, err := is.TableByName(context.Background(), pmodel.NewCIStr("test"), pmodel.NewCIStr("mv_internal_oop_next"))
+	require.NoError(t, err)
+	oldMViewID := mvTable.Meta().ID
+
+	tk.MustExec(fmt.Sprintf("update mysql.tidb_mview_refresh_info set NEXT_TIME = null where MVIEW_ID = %d", oldMViewID))
+	tk.MustExec("insert into t_internal_oop_next values (3, 30)")
+
+	mustExecInternal(t, tk, "refresh materialized view mv_internal_oop_next complete out of place")
+
+	is = dom.InfoSchema()
+	mvTable, err = is.TableByName(context.Background(), pmodel.NewCIStr("test"), pmodel.NewCIStr("mv_internal_oop_next"))
+	require.NoError(t, err)
+	newMViewID := mvTable.Meta().ID
+	require.NotEqual(t, oldMViewID, newMViewID)
+
+	tk.MustQuery(fmt.Sprintf("select count(*) from mysql.tidb_mview_refresh_info where MVIEW_ID = %d", oldMViewID)).
+		Check(testkit.Rows("0"))
+	tk.MustQuery(fmt.Sprintf(
+		"select NEXT_TIME is not null, NEXT_TIME > UTC_TIMESTAMP() + interval 20 minute, NEXT_TIME < UTC_TIMESTAMP() + interval 2 hour from mysql.tidb_mview_refresh_info where MVIEW_ID = %d",
+		newMViewID,
+	)).Check(testkit.Rows("1 1 1"))
+	tk.MustQuery(fmt.Sprintf(
+		"select REFRESH_METHOD from mysql.tidb_mview_refresh_hist where MVIEW_ID = %d order by REFRESH_JOB_ID desc limit 1",
+		oldMViewID,
+	)).Check(testkit.Rows("complete out of place auto"))
+}
+
 /*
 func TestMaterializedViewRefreshFastMethodTracksManualAndAutomatic(t *testing.T) {
 	store, _ := testkit.CreateMockStoreAndDomain(t)
