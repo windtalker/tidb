@@ -110,6 +110,7 @@ func (e *executor) CreateMaterializedView(ctx sessionctx.Context, s *ast.CreateM
 	if err != nil {
 		return err
 	}
+	normalizeMVDefinitionHintDBNames(s.Select, schemaName)
 
 	selectSQL, err := restoreNodeToCanonicalSQL(s.Select)
 	if err != nil {
@@ -1267,4 +1268,32 @@ func restoreNodeToCanonicalSQL(node ast.Node) (string, error) {
 		return "", err
 	}
 	return sb.String(), nil
+}
+
+func normalizeMVDefinitionHintDBNames(node ast.Node, defaultDB pmodel.CIStr) {
+	if node == nil || defaultDB.L == "" {
+		return
+	}
+	_, _ = node.Accept(&mvDefinitionHintDBNameNormalizer{defaultDB: defaultDB})
+}
+
+type mvDefinitionHintDBNameNormalizer struct {
+	defaultDB pmodel.CIStr
+}
+
+func (v *mvDefinitionHintDBNameNormalizer) Enter(node ast.Node) (ast.Node, bool) {
+	hint, ok := node.(*ast.TableOptimizerHint)
+	if !ok {
+		return node, false
+	}
+	for i := range hint.Tables {
+		if hint.Tables[i].DBName.L == "" {
+			hint.Tables[i].DBName = v.defaultDB
+		}
+	}
+	return hint, true
+}
+
+func (*mvDefinitionHintDBNameNormalizer) Leave(node ast.Node) (ast.Node, bool) {
+	return node, true
 }
