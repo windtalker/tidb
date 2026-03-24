@@ -1215,7 +1215,19 @@ func (w *worker) onRefreshMaterializedViewCompleteOutOfPlaceCutover(jobCtx *jobC
 	if shadowTblInfo.MaterializedView != nil || shadowTblInfo.IsView() || shadowTblInfo.IsSequence() {
 		job.State = model.JobStateCancelled
 		return ver, dbterror.ErrInvalidDDLJob.GenWithStackByArgs(
-			"refresh materialized view complete OUT OF PLACE cutover: shadow table is not a normal physical table",
+			"refresh materialized view complete OUT OF PLACE cutover: shadow table is not a protected physical table",
+		)
+	}
+	if shadowTblInfo.MaterializedViewShadow == nil {
+		job.State = model.JobStateCancelled
+		return ver, dbterror.ErrInvalidDDLJob.GenWithStackByArgs(
+			"refresh materialized view complete OUT OF PLACE cutover: shadow table is missing shadow metadata",
+		)
+	}
+	if shadowTblInfo.MaterializedViewShadow.SourceMViewID != args.OldMViewID {
+		job.State = model.JobStateCancelled
+		return ver, dbterror.ErrInvalidDDLJob.GenWithStackByArgs(
+			"refresh materialized view complete OUT OF PLACE cutover: shadow table source materialized view id mismatch",
 		)
 	}
 	if shadowTblInfo.State != model.StatePublic {
@@ -1252,6 +1264,7 @@ func (w *worker) onRefreshMaterializedViewCompleteOutOfPlaceCutover(jobCtx *jobC
 	newMViewTblInfo.Name = oldMViewTblInfo.Name
 	newMViewTblInfo.Comment = oldMViewTblInfo.Comment
 	newMViewTblInfo.MaterializedView = oldMViewTblInfo.MaterializedView.Clone()
+	newMViewTblInfo.MaterializedViewShadow = nil
 	newMViewTblInfo.UpdateTS = jobCtx.metaMut.StartTS
 	if err := repairTableOrViewWithCheck(jobCtx.metaMut, job, job.SchemaID, newMViewTblInfo); err != nil {
 		return ver, errors.Trace(err)

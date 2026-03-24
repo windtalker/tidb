@@ -1113,6 +1113,55 @@ func TestMaterializedViewRefreshCompleteOutOfPlaceCutoverBasic(t *testing.T) {
 	tk.MustQuery("select ((select count(*) from mysql.gc_delete_range where job_id=" + jobID + ") + (select count(*) from mysql.gc_delete_range_done where job_id=" + jobID + ")) > 0").Check(testkit.Rows("1"))
 }
 
+func TestMaterializedViewRefreshCompleteOutOfPlaceShadowTableProtected(t *testing.T) {
+	store, _ := testkit.CreateMockStoreAndDomain(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("create table t_shadow_guard (a int not null, b int not null)")
+	tk.MustExec("insert into t_shadow_guard values (1, 10), (1, 5), (2, 7)")
+	tk.MustExec("create materialized view log on t_shadow_guard (a, b) purge next date_add(now(), interval 1 hour)")
+	tk.MustExec("create materialized view mv_shadow_guard (a, s, cnt) refresh fast next now() as select a, sum(b), count(1) from t_shadow_guard group by a")
+	tk.MustExec("insert into t_shadow_guard values (2, 3), (3, 4)")
+
+	const pauseCreateShadowFailpoint = "github.com/pingcap/tidb/pkg/executor/pauseRefreshMaterializedViewOutOfPlaceAfterCreateShadow"
+	require.NoError(t, failpoint.Enable(pauseCreateShadowFailpoint, "pause"))
+	enabled := true
+	defer func() {
+		if enabled {
+			require.NoError(t, failpoint.Disable(pauseCreateShadowFailpoint))
+		}
+	}()
+
+	refreshDone := make(chan error, 1)
+	go func() {
+		tkRefresh := testkit.NewTestKit(t, store)
+		tkRefresh.MustExec("use test")
+		refreshDone <- tkRefresh.ExecToErr("refresh materialized view mv_shadow_guard complete out of place")
+	}()
+
+	var shadowTableName string
+	require.Eventually(t, func() bool {
+		rows := tk.MustQuery("show tables like '\\_\\_mv\\_shadow\\_%'").Rows()
+		if len(rows) != 1 {
+			return false
+		}
+		shadowTableName = fmt.Sprint(rows[0][0])
+		return shadowTableName != ""
+	}, 30*time.Second, 100*time.Millisecond)
+
+	err := tk.ExecToErr(fmt.Sprintf("insert into `%s` values (9, 9, 9)", shadowTableName))
+	require.ErrorContains(t, err, "not updatable")
+	err = tk.ExecToErr(fmt.Sprintf("alter table `%s` add column x int", shadowTableName))
+	require.ErrorContains(t, err, "ALTER TABLE on materialized view shadow table")
+
+	require.NoError(t, failpoint.Disable(pauseCreateShadowFailpoint))
+	enabled = false
+	require.NoError(t, <-refreshDone)
+
+	tk.MustQuery("show tables like '\\_\\_mv\\_shadow\\_%'").Check(testkit.Rows())
+	tk.MustQuery("select a, s, cnt from mv_shadow_guard order by a").Check(testkit.Rows("1 15 2", "2 10 2", "3 4 1"))
+}
+
 func TestMaterializedViewRefreshCompleteOutOfPlaceCutoverWithUnsignedBuildReadTSO(t *testing.T) {
 	store, dom := testkit.CreateMockStoreAndDomain(t)
 	tk := testkit.NewTestKit(t, store)

@@ -23,6 +23,7 @@ import (
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/failpoint"
+	"github.com/pingcap/tidb/pkg/ddl"
 	"github.com/pingcap/tidb/pkg/domain"
 	"github.com/pingcap/tidb/pkg/errctx"
 	"github.com/pingcap/tidb/pkg/executor/internal/exec"
@@ -1284,15 +1285,17 @@ func (e *RefreshMaterializedViewExec) executeRefreshMaterializedViewCompleteOutO
 		}
 	}()
 
-	createShadowSQL := sqlescape.MustEscapeSQL(
-		"CREATE TABLE %n.%n LIKE %n.%n",
-		schemaName.O,
-		shadowTableName,
-		schemaName.O,
-		s.ViewName.Name.O,
-	)
+	shadowTableInfo, err := buildMVRefreshOutOfPlaceShadowTableInfo(schemaName, shadowTableName, tblInfo)
+	if err != nil {
+		return 0, err
+	}
 	if err := observeMVRefreshStep(e.stepObserver, stepSet.dataChangeOutOfPlaceCreateShadow, func() error {
-		if execErr := executeRefreshMaterializedViewInternalSQL(kctx, buildSQLExec, createShadowSQL); execErr != nil {
+		if execErr := domain.GetDomain(e.Ctx()).DDLExecutor().CreateMaterializedViewShadowTable(
+			refreshSctx,
+			tblInfo.DBID,
+			schemaName,
+			shadowTableInfo,
+		); execErr != nil {
 			return execErr
 		}
 		shadowCreated = true
@@ -1519,6 +1522,26 @@ func restoreRefreshExecutionSessionVars(sessVars *variable.SessionVars, origin, 
 
 func buildMVRefreshShadowTableName(mviewID int64) string {
 	return fmt.Sprintf("%s%d_%d", mvRefreshShadowTablePrefix, mviewID, time.Now().UnixNano())
+}
+
+func buildMVRefreshOutOfPlaceShadowTableInfo(
+	schemaName pmodel.CIStr,
+	shadowTableName string,
+	tblInfo *model.TableInfo,
+) (*model.TableInfo, error) {
+	if tblInfo == nil || tblInfo.MaterializedView == nil {
+		return nil, errors.New("refresh materialized view complete OUT OF PLACE: invalid materialized view metadata")
+	}
+	shadowTableInfo, err := ddl.BuildTableInfoWithLike(
+		ast.Ident{Schema: schemaName, Name: pmodel.NewCIStr(shadowTableName)},
+		tblInfo,
+		&ast.CreateTableStmt{},
+	)
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+	shadowTableInfo.MaterializedViewShadow = &model.MaterializedViewShadowInfo{SourceMViewID: tblInfo.ID}
+	return shadowTableInfo, nil
 }
 
 func buildMVRefreshOutOfPlaceBuildSQL(

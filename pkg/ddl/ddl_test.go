@@ -122,6 +122,16 @@ func TestGetJobCheckIntervalForCreateMaterializedView(t *testing.T) {
 	require.False(t, changed)
 }
 
+func TestGetJobCheckIntervalForCreateMaterializedViewShadow(t *testing.T) {
+	val, changed := getJobCheckInterval(model.ActionCreateMaterializedViewShadow, 0)
+	require.Equal(t, fastDDLIntervalPolicy[0], val)
+	require.True(t, changed)
+
+	val, changed = getJobCheckInterval(model.ActionCreateMaterializedViewShadow, len(fastDDLIntervalPolicy))
+	require.Equal(t, fastDDLIntervalPolicy[len(fastDDLIntervalPolicy)-1], val)
+	require.False(t, changed)
+}
+
 func TestBuildCreateMaterializedViewRefreshInfoUpsertSQL(t *testing.T) {
 	compactSQL := func(sql string) string {
 		return strings.Join(strings.Fields(sql), " ")
@@ -609,6 +619,7 @@ func TestCheckHistoryJobStmtType(t *testing.T) {
 	createTableStmt := parseStmt("create table t (a int)")
 	createMViewStmt := parseStmt("create materialized view mv (a, c) as select a, count(1) from t group by a")
 	createMLogStmt := parseStmt("create materialized view log on t (a)")
+	refreshMViewStmt := parseStmt("refresh materialized view mv complete out of place")
 	createDBStmt := parseStmt("create database test")
 	createPolicyStmt := parseStmt("create placement policy p followers=1")
 
@@ -621,6 +632,9 @@ func TestCheckHistoryJobStmtType(t *testing.T) {
 
 	require.True(t, checkHistoryJobStmtType(model.ActionCreateMaterializedViewLog, createMLogStmt))
 	require.False(t, checkHistoryJobStmtType(model.ActionCreateMaterializedViewLog, createTableStmt))
+
+	require.True(t, checkHistoryJobStmtType(model.ActionCreateMaterializedViewShadow, refreshMViewStmt))
+	require.False(t, checkHistoryJobStmtType(model.ActionCreateMaterializedViewShadow, createTableStmt))
 
 	require.True(t, checkHistoryJobStmtType(model.ActionCreateSchema, createDBStmt))
 	require.False(t, checkHistoryJobStmtType(model.ActionCreateSchema, createTableStmt))

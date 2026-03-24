@@ -251,7 +251,7 @@ func SetSchemaDiffForCreateTable(diff *model.SchemaDiff, job *model.Job, jobCtx 
 		diff.TableID = 0
 		return nil
 	}
-	if job.Type != model.ActionCreateTable {
+	if job.Type != model.ActionCreateTable && job.Type != model.ActionCreateMaterializedViewShadow {
 		return nil
 	}
 	tbInfo := jobCtx.jobArgs.(*model.CreateTableArgs).TableInfo
@@ -362,7 +362,7 @@ func updateSchemaVersion(jobCtx *jobContext, job *model.Job, multiInfos ...schem
 		SetSchemaDiffForReorganizePartition(diff, job, jobCtx)
 	case model.ActionRemovePartitioning, model.ActionAlterTablePartitioning:
 		SetSchemaDiffForPartitionModify(diff, job, jobCtx)
-	case model.ActionCreateTable, model.ActionCreateMaterializedView:
+	case model.ActionCreateTable, model.ActionCreateMaterializedView, model.ActionCreateMaterializedViewShadow:
 		err = SetSchemaDiffForCreateTable(diff, job, jobCtx)
 	case model.ActionMViewRefreshOutOfPlaceCutover:
 		SetSchemaDiffForMViewRefreshOutOfPlaceCutover(diff, jobCtx)

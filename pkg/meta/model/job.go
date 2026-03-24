@@ -117,6 +117,7 @@ const (
 	ActionAlterMaterializedViewLogPurge   ActionType = 77
 	ActionAlterMaterializedViewAttributes ActionType = 78
 	ActionMViewRefreshOutOfPlaceCutover   ActionType = 79
+	ActionCreateMaterializedViewShadow    ActionType = 80
 )
 
 // ActionMap is the map of DDL ActionType to string.
@@ -130,6 +131,7 @@ var ActionMap = map[ActionType]string{
 	ActionAlterMaterializedViewLogPurge:   "alter materialized view log purge",
 	ActionAlterMaterializedViewAttributes: "alter materialized view attributes",
 	ActionMViewRefreshOutOfPlaceCutover:   "refresh materialized view complete out-of-place cutover",
+	ActionCreateMaterializedViewShadow:    "create materialized view shadow table",
 	ActionCreateTables:                    "create tables",
 	ActionDropTable:                       "drop table",
 	ActionAddColumn:                       "add column",

@@ -349,6 +349,10 @@ Recommended implementation shape:
      such as `ActionCreateMaterializedViewShadow`.
    - The job should clone the physical schema and TiFlash replica metadata from the existing MV,
      assign a fresh table ID, and persist the shadow marker at create time.
+   - This does not add an extra schema-publish step compared with the current design:
+     today the shadow is already created by a normal `CREATE TABLE ... LIKE ...` DDL, which also
+     allocates a new table ID and publishes schema before build starts. The change is that the
+     published object becomes a protected shadow table instead of a normal physical table.
    - No new parser syntax is needed because this action is only submitted internally.
 
 3. Publish the shadow table before build starts.
