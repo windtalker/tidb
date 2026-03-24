@@ -218,7 +218,7 @@ type CreateTableArgs struct {
 
 func (a *CreateTableArgs) getArgsV1(job *Job) []any {
 	switch job.Type {
-	case ActionCreateTable:
+	case ActionCreateTable, ActionCreateMaterializedViewShadow:
 		return []any{a.TableInfo, a.FKCheck}
 	case ActionCreateView:
 		return []any{a.TableInfo, a.OnExistReplace, a.OldViewTblID}
@@ -231,7 +231,7 @@ func (a *CreateTableArgs) getArgsV1(job *Job) []any {
 func (a *CreateTableArgs) decodeV1(job *Job) error {
 	a.TableInfo = &TableInfo{}
 	switch job.Type {
-	case ActionCreateTable:
+	case ActionCreateTable, ActionCreateMaterializedViewShadow:
 		return errors.Trace(job.decodeArgs(a.TableInfo, &a.FKCheck))
 	case ActionCreateView:
 		return errors.Trace(job.decodeArgs(a.TableInfo, &a.OnExistReplace, &a.OldViewTblID))

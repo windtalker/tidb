@@ -38,6 +38,7 @@ import (
 	driver "github.com/pingcap/tidb/pkg/types/parser_driver"
 	"github.com/pingcap/tidb/pkg/util/dbterror"
 	plannererrors "github.com/pingcap/tidb/pkg/util/dbterror/plannererrors"
+	"github.com/pingcap/tidb/pkg/util/sqlescape"
 	"go.uber.org/zap"
 )
 
@@ -593,6 +594,67 @@ func (e *executor) alterMaterializedViewAttributes(
 		AlertOverdueSec: alertOverdueSec,
 	}
 	return errors.Trace(e.doDDLJob2(ctx, job, args))
+}
+
+func (e *executor) CreateMaterializedViewShadowTable(
+	ctx sessionctx.Context,
+	schemaID int64,
+	schemaName pmodel.CIStr,
+	shadowTableInfo *model.TableInfo,
+) error {
+	if shadowTableInfo == nil || shadowTableInfo.MaterializedViewShadow == nil {
+		return dbterror.ErrInvalidDDLJob.GenWithStackByArgs("create materialized view shadow table: invalid shadow metadata")
+	}
+	if shadowTableInfo.MaterializedViewShadow.SourceMViewID == 0 {
+		return dbterror.ErrInvalidDDLJob.GenWithStackByArgs("create materialized view shadow table: invalid source materialized view id")
+	}
+
+	involvingSchemas := []model.InvolvingSchemaInfo{{
+		Database: schemaName.L,
+		Table:    shadowTableInfo.Name.L,
+	}}
+	refreshTargetName := shadowTableInfo.Name
+	if sourceMView, ok := e.infoCache.GetLatest().TableByID(e.ctx, shadowTableInfo.MaterializedViewShadow.SourceMViewID); ok {
+		refreshTargetName = sourceMView.Meta().Name
+		involvingSchemas = append(involvingSchemas, model.InvolvingSchemaInfo{
+			Database: schemaName.L,
+			Table:    sourceMView.Meta().Name.L,
+			Mode:     model.SharedInvolving,
+		})
+	}
+
+	job := &model.Job{
+		Version:             model.GetJobVerInUse(),
+		SchemaID:            schemaID,
+		SchemaName:          schemaName.L,
+		TableName:           shadowTableInfo.Name.L,
+		Type:                model.ActionCreateMaterializedViewShadow,
+		BinlogInfo:          &model.HistoryInfo{},
+		CDCWriteSource:      ctx.GetSessionVars().CDCWriteSource,
+		InvolvingSchemaInfo: involvingSchemas,
+		SQLMode:             ctx.GetSessionVars().SQLMode,
+		SessionVars:         make(map[string]string),
+	}
+	job.AddSessionVars(variable.TiDBScatterRegion, getScatterScopeFromSessionctx(ctx))
+	jobW := NewJobWrapperWithArgs(job, &model.CreateTableArgs{
+		TableInfo: shadowTableInfo,
+		FKCheck:   ctx.GetSessionVars().ForeignKeyChecks,
+	}, false)
+	originQuery := ctx.Value(sessionctx.QueryString)
+	ctx.SetValue(
+		sessionctx.QueryString,
+		sqlescape.MustEscapeSQL("REFRESH MATERIALIZED VIEW %n.%n COMPLETE OUT OF PLACE", schemaName.O, refreshTargetName.O),
+	)
+	defer ctx.SetValue(sessionctx.QueryString, originQuery)
+	if err := e.DoDDLJobWrapper(ctx, jobW); err != nil {
+		return errors.Trace(err)
+	}
+
+	var scatterScope string
+	if val, ok := jobW.GetSessionVars(variable.TiDBScatterRegion); ok {
+		scatterScope = val
+	}
+	return errors.Trace(e.createTableWithInfoPost(ctx, shadowTableInfo, schemaID, scatterScope))
 }
 
 func (e *executor) RefreshMaterializedViewCompleteOutOfPlaceCutover(

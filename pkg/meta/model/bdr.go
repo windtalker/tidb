@@ -108,6 +108,7 @@ var BDRActionMap = map[DDLBDRType][]ActionType{
 		ActionRemovePartitioning,
 		ActionAddVectorIndex,
 		ActionMViewRefreshOutOfPlaceCutover,
+		ActionCreateMaterializedViewShadow,
 	},
 	UnmanagementDDL: {
 		ActionCreatePlacementPolicy,

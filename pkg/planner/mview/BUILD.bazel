@@ -40,7 +40,6 @@ go_test(
         "//pkg/parser/opcode",
         "//pkg/planner/core",
         "//pkg/planner/core/base",
-        "//pkg/planner/core/operator/logicalop",
         "//pkg/planner/core/resolve",
         "//pkg/session",
         "//pkg/sessionctx",
