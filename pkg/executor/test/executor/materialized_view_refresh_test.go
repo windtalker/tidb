@@ -1496,6 +1496,60 @@ func TestMaterializedViewRefreshCompleteOutOfPlaceBuildFailureCleansShadow(t *te
 	tk.MustQuery("select a, s, cnt from mv order by a").Check(testkit.Rows("1 15 2", "2 7 1"))
 }
 
+func TestMaterializedViewRefreshCompleteOutOfPlaceManualCancelStopsBeforeCreateShadow(t *testing.T) {
+	store, dom := testkit.CreateMockStoreAndDomain(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("create table t_oop_manual_cancel (a int not null, b int not null)")
+	tk.MustExec("insert into t_oop_manual_cancel values (1, 10), (1, 5), (2, 7)")
+	tk.MustExec("create materialized view log on t_oop_manual_cancel (a, b) purge next date_add(now(), interval 1 hour)")
+	tk.MustExec("create materialized view mv_oop_manual_cancel (a, s, cnt) refresh fast next date_add(now(), interval 1 hour) as select a, sum(b), count(1) from t_oop_manual_cancel group by a")
+	tk.MustExec("create user 'mv_refresh_oop_cancel_u'@'%' identified by ''")
+	defer tk.MustExec("drop user 'mv_refresh_oop_cancel_u'@'%'")
+	tk.MustExec("grant alter on test.mv_oop_manual_cancel to 'mv_refresh_oop_cancel_u'@'%'")
+
+	is := dom.InfoSchema()
+	mvTable, err := is.TableByName(context.Background(), pmodel.NewCIStr("test"), pmodel.NewCIStr("mv_oop_manual_cancel"))
+	require.NoError(t, err)
+	mviewID := mvTable.Meta().ID
+
+	tkUser := testkit.NewTestKit(t, store)
+	require.NoError(t, tkUser.Session().Auth(&auth.UserIdentity{Username: "mv_refresh_oop_cancel_u", Hostname: "%"}, nil, nil, nil))
+	tkUser.MustExec("use test")
+
+	failpointName := "github.com/pingcap/tidb/pkg/executor/mockManualCancelRefreshMaterializedViewAfterInsertRefreshHistRunning"
+	require.NoError(t, failpoint.Enable(failpointName, "return(true)"))
+	defer func() {
+		require.NoError(t, failpoint.Disable(failpointName))
+	}()
+
+	createShadowHit := false
+	testfailpoint.EnableCall(t, "github.com/pingcap/tidb/pkg/executor/refreshMaterializedViewOutOfPlaceAfterCreateShadow", func() {
+		createShadowHit = true
+	})
+
+	err = tkUser.ExecToErr("refresh materialized view mv_oop_manual_cancel complete out of place")
+	require.Error(t, err)
+	require.ErrorContains(t, err, "materialized view task canceled manually")
+	require.False(t, createShadowHit)
+
+	tk.MustQuery(fmt.Sprintf(
+		"select REFRESH_STATUS, REFRESH_METHOD, REFRESH_ENDTIME is not null from mysql.tidb_mview_refresh_hist where MVIEW_ID = %d order by REFRESH_JOB_ID desc limit 1",
+		mviewID,
+	)).Check(testkit.Rows("failed complete out of place manual 1"))
+	tk.MustQuery(fmt.Sprintf(
+		"select count(*) from mysql.tidb_mview_refresh_hist where MVIEW_ID = %d and REFRESH_STATUS = 'running'",
+		mviewID,
+	)).Check(testkit.Rows("0"))
+	reasonRows := tk.MustQuery(fmt.Sprintf(
+		"select REFRESH_FAILED_REASON from mysql.tidb_mview_refresh_hist where MVIEW_ID = %d order by REFRESH_JOB_ID desc limit 1",
+		mviewID,
+	)).Rows()
+	require.Len(t, reasonRows, 1)
+	require.Equal(t, "cancelled manually by 'mv_refresh_oop_cancel_u'@'%'", fmt.Sprint(reasonRows[0][0]))
+	tk.MustQuery("show tables like '\\_\\_mv\\_shadow\\_%'").Check(testkit.Rows())
+}
+
 func TestMaterializedViewRefreshCompleteOutOfPlaceCutoverCASMismatch(t *testing.T) {
 	store, dom := testkit.CreateMockStoreAndDomain(t)
 	tk := testkit.NewTestKit(t, store)
@@ -1629,4 +1683,51 @@ func TestMaterializedViewRefreshRequiresAlterPrivilege(t *testing.T) {
 
 	tk.MustExec("grant alter on test.mv to 'mv_refresh_u'@'%'")
 	tkUser.MustExec("refresh materialized view test.mv complete")
+}
+
+func TestMaterializedViewRefreshManualCancelFailureReason(t *testing.T) {
+	store, dom := testkit.CreateMockStoreAndDomain(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("create table t_refresh_manual_cancel (a int not null, b int not null)")
+	tk.MustExec("insert into t_refresh_manual_cancel values (1, 10), (1, 5), (2, 7)")
+	tk.MustExec("create materialized view log on t_refresh_manual_cancel (a, b) purge next date_add(now(), interval 1 hour)")
+	tk.MustExec("create materialized view mv_refresh_manual_cancel (a, s, cnt) refresh fast next date_add(now(), interval 1 hour) as select a, sum(b), count(1) from t_refresh_manual_cancel group by a")
+	tk.MustExec("create user 'mv_refresh_cancel_u'@'%' identified by ''")
+	defer tk.MustExec("drop user 'mv_refresh_cancel_u'@'%'")
+	tk.MustExec("grant alter on test.mv_refresh_manual_cancel to 'mv_refresh_cancel_u'@'%'")
+
+	is := dom.InfoSchema()
+	mvTable, err := is.TableByName(context.Background(), pmodel.NewCIStr("test"), pmodel.NewCIStr("mv_refresh_manual_cancel"))
+	require.NoError(t, err)
+	mviewID := mvTable.Meta().ID
+
+	tkUser := testkit.NewTestKit(t, store)
+	require.NoError(t, tkUser.Session().Auth(&auth.UserIdentity{Username: "mv_refresh_cancel_u", Hostname: "%"}, nil, nil, nil))
+	tkUser.MustExec("use test")
+
+	failpointName := "github.com/pingcap/tidb/pkg/executor/mockManualCancelRefreshMaterializedViewAfterInsertRefreshHistRunning"
+	require.NoError(t, failpoint.Enable(failpointName, "return(true)"))
+	defer func() {
+		require.NoError(t, failpoint.Disable(failpointName))
+	}()
+
+	err = tkUser.ExecToErr("refresh materialized view mv_refresh_manual_cancel complete")
+	require.Error(t, err)
+	require.ErrorContains(t, err, "materialized view task canceled manually")
+
+	tk.MustQuery(fmt.Sprintf(
+		"select REFRESH_STATUS, REFRESH_METHOD, REFRESH_ENDTIME is not null from mysql.tidb_mview_refresh_hist where MVIEW_ID = %d order by REFRESH_JOB_ID desc limit 1",
+		mviewID,
+	)).Check(testkit.Rows("failed complete delta apply manual 1"))
+	tk.MustQuery(fmt.Sprintf(
+		"select count(*) from mysql.tidb_mview_refresh_hist where MVIEW_ID = %d and REFRESH_STATUS = 'running'",
+		mviewID,
+	)).Check(testkit.Rows("0"))
+	reasonRows := tk.MustQuery(fmt.Sprintf(
+		"select REFRESH_FAILED_REASON from mysql.tidb_mview_refresh_hist where MVIEW_ID = %d order by REFRESH_JOB_ID desc limit 1",
+		mviewID,
+	)).Rows()
+	require.Len(t, reasonRows, 1)
+	require.Equal(t, "cancelled manually by 'mv_refresh_cancel_u'@'%'", fmt.Sprint(reasonRows[0][0]))
 }
