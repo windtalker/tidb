@@ -1807,6 +1807,96 @@ WHERE MVIEW_ID = ?
 	require.Equal(t, "cancelled manually by "+requester, fmt.Sprint(reasonRows[0][0]))
 }
 
+func TestCancelMaterializedViewRefreshJob(t *testing.T) {
+	store, dom := testkit.CreateMockStoreAndDomain(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("create table t_refresh_cancel_job (a int not null, b int not null)")
+	tk.MustExec("insert into t_refresh_cancel_job values (1, 10), (1, 5), (2, 7)")
+	tk.MustExec("create materialized view log on t_refresh_cancel_job (a, b) purge next date_add(now(), interval 1 hour)")
+	tk.MustExec("create materialized view mv_refresh_cancel_job (a, s, cnt) refresh fast next date_add(now(), interval 1 hour) as select a, sum(b), count(1) from t_refresh_cancel_job group by a")
+
+	is := dom.InfoSchema()
+	mvTable, err := is.TableByName(context.Background(), pmodel.NewCIStr("test"), pmodel.NewCIStr("mv_refresh_cancel_job"))
+	require.NoError(t, err)
+	mviewID := mvTable.Meta().ID
+
+	pollIntervalFailpoint := "github.com/pingcap/tidb/pkg/executor/mockMVTaskCancelWatchPollInterval"
+	require.NoError(t, failpoint.Enable(pollIntervalFailpoint, "return(50)"))
+	defer func() {
+		require.NoError(t, failpoint.Disable(pollIntervalFailpoint))
+	}()
+
+	pauseFailpoint := "github.com/pingcap/tidb/pkg/executor/pauseRefreshMaterializedViewAfterInsertRefreshHistRunning"
+	require.NoError(t, failpoint.Enable(pauseFailpoint, "pause"))
+	paused := true
+	defer func() {
+		if paused {
+			require.NoError(t, failpoint.Disable(pauseFailpoint))
+		}
+	}()
+
+	refreshDone := make(chan error, 1)
+	go func() {
+		tkRefresh := testkit.NewTestKit(t, store)
+		tkRefresh.MustExec("use test")
+		refreshDone <- tkRefresh.ExecToErr("refresh materialized view mv_refresh_cancel_job complete")
+	}()
+
+	require.Eventually(t, func() bool {
+		rows := tk.MustQuery(fmt.Sprintf(
+			"select count(*) from mysql.tidb_mview_refresh_hist where MVIEW_ID = %d and REFRESH_STATUS = 'running'",
+			mviewID,
+		)).Rows()
+		return fmt.Sprint(rows[0][0]) == "1"
+	}, 10*time.Second, 100*time.Millisecond)
+
+	jobIDRows := tk.MustQuery(fmt.Sprintf(
+		"select REFRESH_JOB_ID from mysql.tidb_mview_refresh_hist where MVIEW_ID = %d and REFRESH_STATUS = 'running' order by REFRESH_JOB_ID desc limit 1",
+		mviewID,
+	)).Rows()
+	require.Len(t, jobIDRows, 1)
+	jobID := fmt.Sprint(jobIDRows[0][0])
+
+	tk.MustExec("create user 'mv_refresh_cancel_u'@'%' identified by ''")
+	defer tk.MustExec("drop user 'mv_refresh_cancel_u'@'%'")
+
+	tkCancel := testkit.NewTestKit(t, store)
+	require.NoError(t, tkCancel.Session().Auth(&auth.UserIdentity{Username: "mv_refresh_cancel_u", Hostname: "%"}, nil, nil, nil))
+	tkCancel.MustExec(fmt.Sprintf("cancel materialized view refresh job %s", jobID))
+	time.Sleep(300 * time.Millisecond)
+
+	require.NoError(t, failpoint.Disable(pauseFailpoint))
+	paused = false
+
+	select {
+	case err := <-refreshDone:
+		require.Error(t, err)
+		require.ErrorContains(t, err, "materialized view task canceled manually")
+	case <-time.After(10 * time.Second):
+		t.Fatal("timeout waiting for refresh to finish")
+	}
+
+	tk.MustQuery(fmt.Sprintf(
+		"select REFRESH_STATUS, REFRESH_METHOD, REFRESH_ENDTIME is not null from mysql.tidb_mview_refresh_hist where MVIEW_ID = %d order by REFRESH_JOB_ID desc limit 1",
+		mviewID,
+	)).Check(testkit.Rows("failed complete delta apply manual 1"))
+	reasonRows := tk.MustQuery(fmt.Sprintf(
+		"select REFRESH_FAILED_REASON from mysql.tidb_mview_refresh_hist where MVIEW_ID = %d order by REFRESH_JOB_ID desc limit 1",
+		mviewID,
+	)).Rows()
+	require.Len(t, reasonRows, 1)
+	require.Equal(t, "cancelled manually by 'mv_refresh_cancel_u'@'%'", fmt.Sprint(reasonRows[0][0]))
+}
+
+func TestCancelMaterializedViewRefreshJobNotRunning(t *testing.T) {
+	store := testkit.CreateMockStore(t)
+	tk := testkit.NewTestKit(t, store)
+
+	err := tk.ExecToErr("cancel materialized view refresh job 1")
+	require.ErrorContains(t, err, "cannot cancel materialized view refresh job 1: job not running, not found, or cancel already requested")
+}
+
 func TestMaterializedViewRefreshCancelWatcherStopsAfterTaskFinish(t *testing.T) {
 	store, _ := testkit.CreateMockStoreAndDomain(t)
 	tk := testkit.NewTestKit(t, store)

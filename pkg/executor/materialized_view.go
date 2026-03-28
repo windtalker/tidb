@@ -35,6 +35,7 @@ import (
 	"github.com/pingcap/tidb/pkg/kv"
 	"github.com/pingcap/tidb/pkg/meta/model"
 	"github.com/pingcap/tidb/pkg/parser/ast"
+	"github.com/pingcap/tidb/pkg/parser/auth"
 	pmodel "github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
 	plannercore "github.com/pingcap/tidb/pkg/planner/core"
@@ -65,6 +66,13 @@ type RefreshMaterializedViewExec struct {
 	stepObserver          mvRefreshStepObserver
 	planFormatForObserver string
 	done                  bool
+}
+
+// CancelMaterializedViewJobExec executes "CANCEL MATERIALIZED VIEW ... JOB" as a utility-style statement.
+type CancelMaterializedViewJobExec struct {
+	exec.BaseExecutor
+	stmt *ast.CancelMaterializedViewJobStmt
+	done bool
 }
 
 var errMLogPurgeLockConflict = errors.NewNoStackError("mlog purge lock conflict")
@@ -166,6 +174,25 @@ func formatMVManualCancelFailureReason(requester string) string {
 		return "cancelled manually"
 	}
 	return "cancelled manually by " + requester
+}
+
+func formatMVManualCancelRequester(user *auth.UserIdentity) string {
+	if user == nil {
+		return ""
+	}
+
+	username := user.AuthUsername
+	if username == "" {
+		username = user.Username
+	}
+	hostname := user.AuthHostname
+	if hostname == "" {
+		hostname = user.Hostname
+	}
+	if username == "" && hostname == "" {
+		return ""
+	}
+	return "'" + strings.ReplaceAll(username, "'", "''") + "'@'" + strings.ReplaceAll(hostname, "'", "''") + "'"
 }
 
 type mvTaskCancelPoller func(context.Context, sqlexec.SQLExecutor) (requested bool, requester string, err error)
@@ -301,6 +328,52 @@ WHERE PURGE_JOB_ID = %?
 		return true, "", nil
 	}
 	return true, rows[0].GetString(1), nil
+}
+
+func requestRefreshHistCancel(
+	kctx context.Context,
+	sctx sessionctx.Context,
+	refreshJobID uint64,
+	requester any,
+) (bool, error) {
+	_, err := sctx.GetSQLExecutor().ExecuteInternal(
+		kctx,
+		`UPDATE mysql.tidb_mview_refresh_hist
+SET CANCEL_REQUESTED_AT = NOW(6),
+	CANCEL_REQUESTED_BY = %?
+WHERE REFRESH_JOB_ID = %?
+  AND REFRESH_STATUS = 'running'
+  AND CANCEL_REQUESTED_AT IS NULL`,
+		requester,
+		refreshJobID,
+	)
+	if err != nil {
+		return false, errors.Trace(err)
+	}
+	return sctx.GetSessionVars().StmtCtx.AffectedRows() > 0, nil
+}
+
+func requestPurgeHistCancel(
+	kctx context.Context,
+	sctx sessionctx.Context,
+	purgeJobID uint64,
+	requester any,
+) (bool, error) {
+	_, err := sctx.GetSQLExecutor().ExecuteInternal(
+		kctx,
+		`UPDATE mysql.tidb_mlog_purge_hist
+SET CANCEL_REQUESTED_AT = NOW(6),
+	CANCEL_REQUESTED_BY = %?
+WHERE PURGE_JOB_ID = %?
+  AND PURGE_STATUS = 'running'
+  AND CANCEL_REQUESTED_AT IS NULL`,
+		requester,
+		purgeJobID,
+	)
+	if err != nil {
+		return false, errors.Trace(err)
+	}
+	return sctx.GetSessionVars().StmtCtx.AffectedRows() > 0, nil
 }
 
 // MVCompleteDeltaApplyExec applies COMPLETE DELTA APPLY diff rows to the target MV table.
@@ -1083,6 +1156,56 @@ func (e *RefreshMaterializedViewExec) Next(ctx context.Context, _ *chunk.Chunk) 
 	ctx = kv.WithInternalSourceType(ctx, kv.InternalTxnMVMaintenance)
 
 	return e.executeRefreshMaterializedView(ctx, e.stmt)
+}
+
+// Next implements the Executor Next interface.
+func (e *CancelMaterializedViewJobExec) Next(ctx context.Context, _ *chunk.Chunk) error {
+	if e.done {
+		return nil
+	}
+	e.done = true
+
+	ctx = kv.WithInternalSourceType(ctx, kv.InternalTxnMVMaintenance)
+	requester := formatMVManualCancelRequester(e.Ctx().GetSessionVars().User)
+	var requesterArg any
+	if requester != "" {
+		requesterArg = requester
+	}
+
+	sctx, err := e.GetSysSession()
+	if err != nil {
+		return err
+	}
+	defer e.ReleaseSysSession(ctx, sctx)
+
+	var applied bool
+	switch e.stmt.Tp {
+	case ast.CancelMaterializedViewJobTypeRefresh:
+		applied, err = requestRefreshHistCancel(ctx, sctx, uint64(e.stmt.JobID), requesterArg)
+		if err != nil {
+			return err
+		}
+		if !applied {
+			return errors.NewNoStackErrorf(
+				"cannot cancel materialized view refresh job %d: job not running, not found, or cancel already requested",
+				e.stmt.JobID,
+			)
+		}
+	case ast.CancelMaterializedViewJobTypeLogPurge:
+		applied, err = requestPurgeHistCancel(ctx, sctx, uint64(e.stmt.JobID), requesterArg)
+		if err != nil {
+			return err
+		}
+		if !applied {
+			return errors.NewNoStackErrorf(
+				"cannot cancel materialized view log purge job %d: job not running, not found, or cancel already requested",
+				e.stmt.JobID,
+			)
+		}
+	default:
+		return errors.Errorf("cancel materialized view job: unsupported type %d", e.stmt.Tp)
+	}
+	return nil
 }
 
 // Next implements the Executor Next interface.
