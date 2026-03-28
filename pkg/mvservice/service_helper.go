@@ -29,6 +29,7 @@ import (
 	meta "github.com/pingcap/tidb/pkg/meta/model"
 	"github.com/pingcap/tidb/pkg/sessionctx"
 	"github.com/pingcap/tidb/pkg/sessionctx/variable"
+	storeerr "github.com/pingcap/tidb/pkg/store/driver/error"
 	basic "github.com/pingcap/tidb/pkg/util"
 	"github.com/pingcap/tidb/pkg/util/chunk"
 	"github.com/pingcap/tidb/pkg/util/logutil"
@@ -212,6 +213,9 @@ func (*serviceHelper) RefreshMV(ctx context.Context, sysSessionPool basic.Sessio
 	defer restoreRefreshSessionVars()
 
 	if _, err = execRCRestrictedSQLWithSession(ctx, sctx, refreshMVSQL, []any{schemaName, mviewName}); err != nil {
+		if isMVTaskCanceledManually(err) {
+			return time.Time{}, errMVTaskCanceledManually
+		}
 		return time.Time{}, err
 	}
 
@@ -458,6 +462,9 @@ func (*serviceHelper) PurgeMVLog(ctx context.Context, sysSessionPool basic.Sessi
 	defer restoreMaintainMemQuota()
 
 	if _, err = execRCRestrictedSQLWithSession(ctx, sctx, purgeMVLogSQL, []any{baseSchema, baseTable}); err != nil {
+		if isMVTaskCanceledManually(err) {
+			return time.Time{}, errMVTaskCanceledManually
+		}
 		return time.Time{}, err
 	}
 
@@ -470,6 +477,94 @@ func (*serviceHelper) PurgeMVLog(ctx context.Context, sysSessionPool basic.Sessi
 	}
 	nextPurge = mvsUnix(rows[0].GetInt64(0), 0)
 	return nextPurge, nil
+}
+
+func (*serviceHelper) TryBackoffRefreshManualCancel(
+	ctx context.Context,
+	sysSessionPool basic.SessionPool,
+	mvID int64,
+	nextRefresh time.Time,
+) (bool, error) {
+	return tryBackoffMVTaskManualCancel(
+		ctx,
+		sysSessionPool,
+		`SELECT NEXT_TIME FROM mysql.tidb_mview_refresh_info WHERE MVIEW_ID = %? FOR UPDATE NOWAIT`,
+		`UPDATE mysql.tidb_mview_refresh_info SET NEXT_TIME = %? WHERE MVIEW_ID = %?`,
+		mvID,
+		nextRefresh,
+	)
+}
+
+func (*serviceHelper) TryBackoffPurgeManualCancel(
+	ctx context.Context,
+	sysSessionPool basic.SessionPool,
+	mvLogID int64,
+	nextPurge time.Time,
+) (bool, error) {
+	return tryBackoffMVTaskManualCancel(
+		ctx,
+		sysSessionPool,
+		`SELECT NEXT_TIME FROM mysql.tidb_mlog_purge_info WHERE MLOG_ID = %? FOR UPDATE NOWAIT`,
+		`UPDATE mysql.tidb_mlog_purge_info SET NEXT_TIME = %? WHERE MLOG_ID = %?`,
+		mvLogID,
+		nextPurge,
+	)
+}
+
+func tryBackoffMVTaskManualCancel(
+	ctx context.Context,
+	sysSessionPool basic.SessionPool,
+	lockSQL string,
+	updateSQL string,
+	objectID int64,
+	nextTime time.Time,
+) (bool, error) {
+	if objectID <= 0 {
+		return false, errors.New("mv service manual cancel backoff target id is invalid")
+	}
+	if nextTime.IsZero() {
+		return false, errors.New("mv service manual cancel backoff target time is invalid")
+	}
+
+	se, err := sysSessionPool.Get()
+	if err != nil {
+		return false, err
+	}
+	defer sysSessionPool.Put(se)
+
+	ctx = kv.WithInternalSourceType(ctx, kv.InternalTxnMVMaintenance)
+	sctx := se.(sessionctx.Context)
+	sqlExec := sctx.GetSQLExecutor()
+	if _, err := sqlExec.ExecuteInternal(ctx, "BEGIN PESSIMISTIC"); err != nil {
+		return false, err
+	}
+
+	committed := false
+	defer func() {
+		if !committed {
+			_, _ = sqlExec.ExecuteInternal(ctx, "ROLLBACK")
+		}
+	}()
+
+	rows, err := execRestrictedSQLWithSession(ctx, sctx, lockSQL, []any{objectID})
+	if err != nil {
+		if storeerr.ErrLockAcquireFailAndNoWaitSet.Equal(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	if len(rows) == 0 || rows[0].IsNull(0) {
+		return false, nil
+	}
+
+	if _, err := execRCRestrictedSQLWithSession(ctx, sctx, updateSQL, []any{nextTime, objectID}); err != nil {
+		return false, err
+	}
+	if _, err := sqlExec.ExecuteInternal(ctx, "COMMIT"); err != nil {
+		return false, err
+	}
+	committed = true
+	return true, nil
 }
 
 // GetCurrentTSO fetches current cluster TSO from TiDB.
@@ -645,9 +740,7 @@ func execRCRestrictedSQLWithSessionPool(ctx context.Context, sysSessionPool basi
 
 // execRCRestrictedSQLWithSession executes SQL through the restricted SQL executor.
 func execRCRestrictedSQLWithSession(ctx context.Context, sctx sessionctx.Context, sql string, params []any) ([]chunk.Row, error) {
-	r, _, err := sctx.GetRestrictedSQLExecutor().ExecRestrictedSQL(ctx, []sqlexec.OptionFuncAlias{sqlexec.ExecOptionUseCurSession},
-		sql, params...,
-	)
+	r, err := execRestrictedSQLWithSession(ctx, sctx, sql, params)
 	if err != nil {
 		logutil.BgLogger().Warn(
 			"execute restricted SQL failed",
@@ -657,6 +750,16 @@ func execRCRestrictedSQLWithSession(ctx context.Context, sctx sessionctx.Context
 			zap.Error(err),
 		)
 	}
+	return r, err
+}
+
+func execRestrictedSQLWithSession(ctx context.Context, sctx sessionctx.Context, sql string, params []any) ([]chunk.Row, error) {
+	r, _, err := sctx.GetRestrictedSQLExecutor().ExecRestrictedSQL(
+		ctx,
+		[]sqlexec.OptionFuncAlias{sqlexec.ExecOptionUseCurSession},
+		sql,
+		params...,
+	)
 	return r, err
 }
 
