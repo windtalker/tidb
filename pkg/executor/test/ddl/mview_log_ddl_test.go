@@ -571,35 +571,72 @@ func TestPurgeMaterializedViewLogPrivilege(t *testing.T) {
 	tkUser.MustExec("purge materialized view log on t_purge_priv")
 }
 
-func TestPurgeMaterializedViewLogManualCancelFailureReason(t *testing.T) {
+func TestPurgeMaterializedViewLogCancelWatcherUsesHistRequest(t *testing.T) {
 	store, dom := testkit.CreateMockStoreAndDomain(t)
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
-	tk.MustExec("create table t_purge_manual_cancel (id int primary key, v int)")
-	tk.MustExec("create materialized view log on t_purge_manual_cancel (id, v) purge next date_add(now(), interval 1 hour)")
-	tk.MustExec("insert into t_purge_manual_cancel values (1, 10)")
-	tk.MustExec("create user 'mv_purge_cancel_u'@'%' identified by ''")
-	defer tk.MustExec("drop user 'mv_purge_cancel_u'@'%'")
-	tk.MustExec("grant select, alter on test.t_purge_manual_cancel to 'mv_purge_cancel_u'@'%'")
+	tk.MustExec("create table t_purge_cancel_watch (id int primary key, v int)")
+	tk.MustExec("create materialized view log on t_purge_cancel_watch (id, v) purge next date_add(now(), interval 1 hour)")
+	tk.MustExec("insert into t_purge_cancel_watch values (1, 10)")
 
 	is := dom.InfoSchema()
-	mlogTable, err := is.TableByName(context.Background(), pmodel.NewCIStr("test"), pmodel.NewCIStr("$mlog$t_purge_manual_cancel"))
+	mlogTable, err := is.TableByName(context.Background(), pmodel.NewCIStr("test"), pmodel.NewCIStr("$mlog$t_purge_cancel_watch"))
 	require.NoError(t, err)
 	mlogID := mlogTable.Meta().ID
 
-	tkUser := testkit.NewTestKit(t, store)
-	require.NoError(t, tkUser.Session().Auth(&auth.UserIdentity{Username: "mv_purge_cancel_u", Hostname: "%"}, nil, nil, nil))
-	tkUser.MustExec("use test")
-
-	failpointName := "github.com/pingcap/tidb/pkg/executor/mockManualCancelPurgeMaterializedViewLogAfterInsertPurgeHistRunning"
-	require.NoError(t, failpoint.Enable(failpointName, "return(true)"))
+	pollIntervalFailpoint := "github.com/pingcap/tidb/pkg/executor/mockMVTaskCancelWatchPollInterval"
+	require.NoError(t, failpoint.Enable(pollIntervalFailpoint, "return(50)"))
 	defer func() {
-		require.NoError(t, failpoint.Disable(failpointName))
+		require.NoError(t, failpoint.Disable(pollIntervalFailpoint))
 	}()
 
-	err = tkUser.ExecToErr("purge materialized view log on t_purge_manual_cancel")
-	require.Error(t, err)
-	require.ErrorContains(t, err, "materialized view task canceled manually")
+	pauseFailpoint := "github.com/pingcap/tidb/pkg/executor/pausePurgeMaterializedViewLogAfterInsertPurgeHistRunning"
+	require.NoError(t, failpoint.Enable(pauseFailpoint, "pause"))
+	paused := true
+	defer func() {
+		if paused {
+			require.NoError(t, failpoint.Disable(pauseFailpoint))
+		}
+	}()
+
+	errCh := make(chan error, 1)
+	go func() {
+		tkPurge := testkit.NewTestKit(t, store)
+		tkPurge.MustExec("use test")
+		errCh <- tkPurge.ExecToErr("purge materialized view log on t_purge_cancel_watch")
+	}()
+
+	require.Eventually(t, func() bool {
+		rows := tk.MustQuery(fmt.Sprintf(
+			"select count(*) from mysql.tidb_mlog_purge_hist where MLOG_ID = %d and PURGE_STATUS = 'running'",
+			mlogID,
+		)).Rows()
+		return fmt.Sprint(rows[0][0]) == "1"
+	}, 10*time.Second, 100*time.Millisecond)
+
+	requester := "'purge_watcher_req'@'stage-d'"
+	tk.MustExec(
+		`UPDATE mysql.tidb_mlog_purge_hist
+SET CANCEL_REQUESTED_AT = NOW(6),
+	CANCEL_REQUESTED_BY = ?
+WHERE MLOG_ID = ?
+  AND PURGE_STATUS = 'running'
+  AND CANCEL_REQUESTED_AT IS NULL`,
+		requester,
+		mlogID,
+	)
+	time.Sleep(300 * time.Millisecond)
+
+	require.NoError(t, failpoint.Disable(pauseFailpoint))
+	paused = false
+
+	select {
+	case err := <-errCh:
+		require.Error(t, err)
+		require.ErrorContains(t, err, "materialized view task canceled manually")
+	case <-time.After(10 * time.Second):
+		t.Fatal("timeout waiting for purge to finish")
+	}
 
 	tk.MustQuery(fmt.Sprintf(
 		"select PURGE_STATUS, PURGE_METHOD, PURGE_ENDTIME is not null from mysql.tidb_mlog_purge_hist where MLOG_ID = %d order by PURGE_JOB_ID desc limit 1",
@@ -614,7 +651,7 @@ func TestPurgeMaterializedViewLogManualCancelFailureReason(t *testing.T) {
 		mlogID,
 	)).Rows()
 	require.Len(t, reasonRows, 1)
-	require.Equal(t, "cancelled manually by 'mv_purge_cancel_u'@'%'", fmt.Sprint(reasonRows[0][0]))
+	require.Equal(t, "cancelled manually by "+requester, fmt.Sprint(reasonRows[0][0]))
 }
 
 func TestPurgeMaterializedViewLogLockRowMissing(t *testing.T) {

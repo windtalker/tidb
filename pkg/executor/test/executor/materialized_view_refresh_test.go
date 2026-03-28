@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1496,31 +1497,33 @@ func TestMaterializedViewRefreshCompleteOutOfPlaceBuildFailureCleansShadow(t *te
 	tk.MustQuery("select a, s, cnt from mv order by a").Check(testkit.Rows("1 15 2", "2 7 1"))
 }
 
-func TestMaterializedViewRefreshCompleteOutOfPlaceManualCancelStopsBeforeCreateShadow(t *testing.T) {
+func TestMaterializedViewRefreshCompleteOutOfPlaceCancelWatcherStopsBeforeCreateShadow(t *testing.T) {
 	store, dom := testkit.CreateMockStoreAndDomain(t)
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
-	tk.MustExec("create table t_oop_manual_cancel (a int not null, b int not null)")
-	tk.MustExec("insert into t_oop_manual_cancel values (1, 10), (1, 5), (2, 7)")
-	tk.MustExec("create materialized view log on t_oop_manual_cancel (a, b) purge next date_add(now(), interval 1 hour)")
-	tk.MustExec("create materialized view mv_oop_manual_cancel (a, s, cnt) refresh fast next date_add(now(), interval 1 hour) as select a, sum(b), count(1) from t_oop_manual_cancel group by a")
-	tk.MustExec("create user 'mv_refresh_oop_cancel_u'@'%' identified by ''")
-	defer tk.MustExec("drop user 'mv_refresh_oop_cancel_u'@'%'")
-	tk.MustExec("grant alter on test.mv_oop_manual_cancel to 'mv_refresh_oop_cancel_u'@'%'")
+	tk.MustExec("create table t_oop_cancel_watch (a int not null, b int not null)")
+	tk.MustExec("insert into t_oop_cancel_watch values (1, 10), (1, 5), (2, 7)")
+	tk.MustExec("create materialized view log on t_oop_cancel_watch (a, b) purge next date_add(now(), interval 1 hour)")
+	tk.MustExec("create materialized view mv_oop_cancel_watch (a, s, cnt) refresh fast next date_add(now(), interval 1 hour) as select a, sum(b), count(1) from t_oop_cancel_watch group by a")
 
 	is := dom.InfoSchema()
-	mvTable, err := is.TableByName(context.Background(), pmodel.NewCIStr("test"), pmodel.NewCIStr("mv_oop_manual_cancel"))
+	mvTable, err := is.TableByName(context.Background(), pmodel.NewCIStr("test"), pmodel.NewCIStr("mv_oop_cancel_watch"))
 	require.NoError(t, err)
 	mviewID := mvTable.Meta().ID
 
-	tkUser := testkit.NewTestKit(t, store)
-	require.NoError(t, tkUser.Session().Auth(&auth.UserIdentity{Username: "mv_refresh_oop_cancel_u", Hostname: "%"}, nil, nil, nil))
-	tkUser.MustExec("use test")
-
-	failpointName := "github.com/pingcap/tidb/pkg/executor/mockManualCancelRefreshMaterializedViewAfterInsertRefreshHistRunning"
-	require.NoError(t, failpoint.Enable(failpointName, "return(true)"))
+	pollIntervalFailpoint := "github.com/pingcap/tidb/pkg/executor/mockMVTaskCancelWatchPollInterval"
+	require.NoError(t, failpoint.Enable(pollIntervalFailpoint, "return(50)"))
 	defer func() {
-		require.NoError(t, failpoint.Disable(failpointName))
+		require.NoError(t, failpoint.Disable(pollIntervalFailpoint))
+	}()
+
+	pauseFailpoint := "github.com/pingcap/tidb/pkg/executor/pauseRefreshMaterializedViewAfterInsertRefreshHistRunning"
+	require.NoError(t, failpoint.Enable(pauseFailpoint, "pause"))
+	paused := true
+	defer func() {
+		if paused {
+			require.NoError(t, failpoint.Disable(pauseFailpoint))
+		}
 	}()
 
 	createShadowHit := false
@@ -1528,11 +1531,46 @@ func TestMaterializedViewRefreshCompleteOutOfPlaceManualCancelStopsBeforeCreateS
 		createShadowHit = true
 	})
 
-	err = tkUser.ExecToErr("refresh materialized view mv_oop_manual_cancel complete out of place")
-	require.Error(t, err)
-	require.ErrorContains(t, err, "materialized view task canceled manually")
-	require.False(t, createShadowHit)
+	refreshDone := make(chan error, 1)
+	go func() {
+		tkRefresh := testkit.NewTestKit(t, store)
+		tkRefresh.MustExec("use test")
+		refreshDone <- tkRefresh.ExecToErr("refresh materialized view mv_oop_cancel_watch complete out of place")
+	}()
 
+	require.Eventually(t, func() bool {
+		rows := tk.MustQuery(fmt.Sprintf(
+			"select count(*) from mysql.tidb_mview_refresh_hist where MVIEW_ID = %d and REFRESH_STATUS = 'running'",
+			mviewID,
+		)).Rows()
+		return fmt.Sprint(rows[0][0]) == "1"
+	}, 10*time.Second, 100*time.Millisecond)
+
+	requester := "'oop_watcher_req'@'stage-c'"
+	tk.MustExec(
+		`UPDATE mysql.tidb_mview_refresh_hist
+SET CANCEL_REQUESTED_AT = NOW(6),
+	CANCEL_REQUESTED_BY = ?
+WHERE MVIEW_ID = ?
+  AND REFRESH_STATUS = 'running'
+  AND CANCEL_REQUESTED_AT IS NULL`,
+		requester,
+		mviewID,
+	)
+	time.Sleep(300 * time.Millisecond)
+
+	require.NoError(t, failpoint.Disable(pauseFailpoint))
+	paused = false
+
+	select {
+	case err := <-refreshDone:
+		require.Error(t, err)
+		require.ErrorContains(t, err, "materialized view task canceled manually")
+	case <-time.After(10 * time.Second):
+		t.Fatal("timeout waiting for refresh to finish")
+	}
+
+	require.False(t, createShadowHit)
 	tk.MustQuery(fmt.Sprintf(
 		"select REFRESH_STATUS, REFRESH_METHOD, REFRESH_ENDTIME is not null from mysql.tidb_mview_refresh_hist where MVIEW_ID = %d order by REFRESH_JOB_ID desc limit 1",
 		mviewID,
@@ -1546,7 +1584,7 @@ func TestMaterializedViewRefreshCompleteOutOfPlaceManualCancelStopsBeforeCreateS
 		mviewID,
 	)).Rows()
 	require.Len(t, reasonRows, 1)
-	require.Equal(t, "cancelled manually by 'mv_refresh_oop_cancel_u'@'%'", fmt.Sprint(reasonRows[0][0]))
+	require.Equal(t, "cancelled manually by "+requester, fmt.Sprint(reasonRows[0][0]))
 	tk.MustQuery("show tables like '\\_\\_mv\\_shadow\\_%'").Check(testkit.Rows())
 }
 
@@ -1685,36 +1723,73 @@ func TestMaterializedViewRefreshRequiresAlterPrivilege(t *testing.T) {
 	tkUser.MustExec("refresh materialized view test.mv complete")
 }
 
-func TestMaterializedViewRefreshManualCancelFailureReason(t *testing.T) {
+func TestMaterializedViewRefreshCancelWatcherUsesHistRequest(t *testing.T) {
 	store, dom := testkit.CreateMockStoreAndDomain(t)
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
-	tk.MustExec("create table t_refresh_manual_cancel (a int not null, b int not null)")
-	tk.MustExec("insert into t_refresh_manual_cancel values (1, 10), (1, 5), (2, 7)")
-	tk.MustExec("create materialized view log on t_refresh_manual_cancel (a, b) purge next date_add(now(), interval 1 hour)")
-	tk.MustExec("create materialized view mv_refresh_manual_cancel (a, s, cnt) refresh fast next date_add(now(), interval 1 hour) as select a, sum(b), count(1) from t_refresh_manual_cancel group by a")
-	tk.MustExec("create user 'mv_refresh_cancel_u'@'%' identified by ''")
-	defer tk.MustExec("drop user 'mv_refresh_cancel_u'@'%'")
-	tk.MustExec("grant alter on test.mv_refresh_manual_cancel to 'mv_refresh_cancel_u'@'%'")
+	tk.MustExec("create table t_refresh_cancel_watch (a int not null, b int not null)")
+	tk.MustExec("insert into t_refresh_cancel_watch values (1, 10), (1, 5), (2, 7)")
+	tk.MustExec("create materialized view log on t_refresh_cancel_watch (a, b) purge next date_add(now(), interval 1 hour)")
+	tk.MustExec("create materialized view mv_refresh_cancel_watch (a, s, cnt) refresh fast next date_add(now(), interval 1 hour) as select a, sum(b), count(1) from t_refresh_cancel_watch group by a")
 
 	is := dom.InfoSchema()
-	mvTable, err := is.TableByName(context.Background(), pmodel.NewCIStr("test"), pmodel.NewCIStr("mv_refresh_manual_cancel"))
+	mvTable, err := is.TableByName(context.Background(), pmodel.NewCIStr("test"), pmodel.NewCIStr("mv_refresh_cancel_watch"))
 	require.NoError(t, err)
 	mviewID := mvTable.Meta().ID
 
-	tkUser := testkit.NewTestKit(t, store)
-	require.NoError(t, tkUser.Session().Auth(&auth.UserIdentity{Username: "mv_refresh_cancel_u", Hostname: "%"}, nil, nil, nil))
-	tkUser.MustExec("use test")
-
-	failpointName := "github.com/pingcap/tidb/pkg/executor/mockManualCancelRefreshMaterializedViewAfterInsertRefreshHistRunning"
-	require.NoError(t, failpoint.Enable(failpointName, "return(true)"))
+	pollIntervalFailpoint := "github.com/pingcap/tidb/pkg/executor/mockMVTaskCancelWatchPollInterval"
+	require.NoError(t, failpoint.Enable(pollIntervalFailpoint, "return(50)"))
 	defer func() {
-		require.NoError(t, failpoint.Disable(failpointName))
+		require.NoError(t, failpoint.Disable(pollIntervalFailpoint))
 	}()
 
-	err = tkUser.ExecToErr("refresh materialized view mv_refresh_manual_cancel complete")
-	require.Error(t, err)
-	require.ErrorContains(t, err, "materialized view task canceled manually")
+	pauseFailpoint := "github.com/pingcap/tidb/pkg/executor/pauseRefreshMaterializedViewAfterInsertRefreshHistRunning"
+	require.NoError(t, failpoint.Enable(pauseFailpoint, "pause"))
+	paused := true
+	defer func() {
+		if paused {
+			require.NoError(t, failpoint.Disable(pauseFailpoint))
+		}
+	}()
+
+	refreshDone := make(chan error, 1)
+	go func() {
+		tkRefresh := testkit.NewTestKit(t, store)
+		tkRefresh.MustExec("use test")
+		refreshDone <- tkRefresh.ExecToErr("refresh materialized view mv_refresh_cancel_watch complete")
+	}()
+
+	require.Eventually(t, func() bool {
+		rows := tk.MustQuery(fmt.Sprintf(
+			"select count(*) from mysql.tidb_mview_refresh_hist where MVIEW_ID = %d and REFRESH_STATUS = 'running'",
+			mviewID,
+		)).Rows()
+		return fmt.Sprint(rows[0][0]) == "1"
+	}, 10*time.Second, 100*time.Millisecond)
+
+	requester := "'refresh_watcher_req'@'stage-c'"
+	tk.MustExec(
+		`UPDATE mysql.tidb_mview_refresh_hist
+SET CANCEL_REQUESTED_AT = NOW(6),
+	CANCEL_REQUESTED_BY = ?
+WHERE MVIEW_ID = ?
+  AND REFRESH_STATUS = 'running'
+  AND CANCEL_REQUESTED_AT IS NULL`,
+		requester,
+		mviewID,
+	)
+	time.Sleep(300 * time.Millisecond)
+
+	require.NoError(t, failpoint.Disable(pauseFailpoint))
+	paused = false
+
+	select {
+	case err := <-refreshDone:
+		require.Error(t, err)
+		require.ErrorContains(t, err, "materialized view task canceled manually")
+	case <-time.After(10 * time.Second):
+		t.Fatal("timeout waiting for refresh to finish")
+	}
 
 	tk.MustQuery(fmt.Sprintf(
 		"select REFRESH_STATUS, REFRESH_METHOD, REFRESH_ENDTIME is not null from mysql.tidb_mview_refresh_hist where MVIEW_ID = %d order by REFRESH_JOB_ID desc limit 1",
@@ -1729,5 +1804,36 @@ func TestMaterializedViewRefreshManualCancelFailureReason(t *testing.T) {
 		mviewID,
 	)).Rows()
 	require.Len(t, reasonRows, 1)
-	require.Equal(t, "cancelled manually by 'mv_refresh_cancel_u'@'%'", fmt.Sprint(reasonRows[0][0]))
+	require.Equal(t, "cancelled manually by "+requester, fmt.Sprint(reasonRows[0][0]))
+}
+
+func TestMaterializedViewRefreshCancelWatcherStopsAfterTaskFinish(t *testing.T) {
+	store, _ := testkit.CreateMockStoreAndDomain(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("create table t_refresh_cancel_watch_stop (a int not null, b int not null)")
+	tk.MustExec("insert into t_refresh_cancel_watch_stop values (1, 10), (1, 5), (2, 7)")
+	tk.MustExec("create materialized view log on t_refresh_cancel_watch_stop (a, b) purge next date_add(now(), interval 1 hour)")
+	tk.MustExec("create materialized view mv_refresh_cancel_watch_stop (a, s, cnt) refresh fast next date_add(now(), interval 1 hour) as select a, sum(b), count(1) from t_refresh_cancel_watch_stop group by a")
+
+	pollIntervalFailpoint := "github.com/pingcap/tidb/pkg/executor/mockMVTaskCancelWatchPollInterval"
+	require.NoError(t, failpoint.Enable(pollIntervalFailpoint, "return(50)"))
+	defer func() {
+		require.NoError(t, failpoint.Disable(pollIntervalFailpoint))
+	}()
+
+	var pollCount atomic.Int32
+	testfailpoint.EnableCall(t, "github.com/pingcap/tidb/pkg/executor/mvTaskCancelWatcherPolled", func(watchName string) {
+		if strings.HasPrefix(watchName, "refresh-") {
+			pollCount.Add(1)
+		}
+	})
+
+	tk.MustExec("insert into t_refresh_cancel_watch_stop values (2, 3), (3, 4)")
+	tk.MustExec("refresh materialized view mv_refresh_cancel_watch_stop complete")
+
+	require.Greater(t, pollCount.Load(), int32(0))
+	countAfterReturn := pollCount.Load()
+	time.Sleep(200 * time.Millisecond)
+	require.Equal(t, countAfterReturn, pollCount.Load())
 }
