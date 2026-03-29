@@ -45,6 +45,7 @@ import (
 	"github.com/pingcap/tidb/pkg/sessionctx"
 	"github.com/pingcap/tidb/pkg/sessionctx/stmtctx"
 	"github.com/pingcap/tidb/pkg/sessionctx/variable"
+	"github.com/pingcap/tidb/pkg/sessiontxn/staleread"
 	storeerr "github.com/pingcap/tidb/pkg/store/driver/error"
 	"github.com/pingcap/tidb/pkg/table"
 	"github.com/pingcap/tidb/pkg/types"
@@ -78,6 +79,7 @@ type CancelMaterializedViewJobExec struct {
 var errMLogPurgeLockConflict = errors.NewNoStackError("mlog purge lock conflict")
 var errMVRefreshAdvisoryLockConflict = errors.NewNoStackError("materialized view refresh advisory lock conflict")
 var errMVTaskCanceledManually = errors.NewNoStackError("materialized view task canceled manually")
+var errMVRefreshFastAsOfTargetNotImplemented = errors.NewNoStackError("refresh materialized view fast as of timestamp: bounded execution is not implemented yet")
 
 const (
 	purgeHistStatusRunning          = "running"
@@ -2134,6 +2136,10 @@ func (e *RefreshMaterializedViewExec) executeRefreshMaterializedView(kctx contex
 	if err != nil {
 		return err
 	}
+	targetRefreshReadTSO, err := evaluateRefreshMaterializedViewTargetTSO(kctx, e.Ctx(), s)
+	if err != nil {
+		return err
+	}
 	stepSet, err := newMVRefreshStepSet(refreshMode)
 	if err != nil {
 		return err
@@ -2358,6 +2364,10 @@ func (e *RefreshMaterializedViewExec) executeRefreshMaterializedView(kctx contex
 	}); err != nil {
 		return err
 	}
+	if refreshMode == ast.RefreshMaterializedViewModeFast && !lockedReadTSONull && targetRefreshReadTSO > 0 && targetRefreshReadTSO == lockedReadTSO {
+		return nil
+	}
+
 	txn, err := refreshSctx.Txn(true)
 	if err != nil {
 		return errors.Trace(err)
@@ -2448,6 +2458,20 @@ func (e *RefreshMaterializedViewExec) executeRefreshMaterializedView(kctx contex
 			return finalizeFailure(errors.New("refresh materialized view fast: LAST_SUCCESS_READ_TSO is NULL"))
 		}
 		lastSuccessfulRefreshReadTSO = lockedReadTSO
+		if targetRefreshReadTSO > 0 {
+			switch {
+			case targetRefreshReadTSO < lastSuccessfulRefreshReadTSO:
+				return finalizeFailure(errors.Errorf(
+					"refresh materialized view fast as of timestamp: target tso %d is older than LAST_SUCCESS_READ_TSO %d",
+					targetRefreshReadTSO,
+					lastSuccessfulRefreshReadTSO,
+				))
+			default:
+				// Stage 1 only wires parser/AST and outer refresh semantics. The bounded merge
+				// window itself will be implemented in the later stage.
+				return finalizeFailure(errMVRefreshFastAsOfTargetNotImplemented)
+			}
+		}
 	}
 
 	executeDataChangesStart := time.Now()
@@ -2460,6 +2484,7 @@ func (e *RefreshMaterializedViewExec) executeRefreshMaterializedView(kctx contex
 		schemaName,
 		tblInfo,
 		lastSuccessfulRefreshReadTSO,
+		targetRefreshReadTSO,
 		stepSet,
 		e.stepObserver,
 		e.planFormatForObserver,
@@ -3034,7 +3059,21 @@ func validateRefreshMaterializedViewStmt(s *ast.RefreshMaterializedViewStmt, isI
 	if s.WithAsyncMode {
 		return 0, "", errors.New("refresh materialized view: WITH ASYNC MODE is not supported yet")
 	}
+	if s.AsOf != nil && mode != ast.RefreshMaterializedViewModeFast {
+		return 0, "", errors.New("refresh materialized view: AS OF TIMESTAMP is only supported for FAST refresh")
+	}
 	return mode, methodType + " " + methodOrigin, nil
+}
+
+func evaluateRefreshMaterializedViewTargetTSO(
+	kctx context.Context,
+	sctx sessionctx.Context,
+	s *ast.RefreshMaterializedViewStmt,
+) (uint64, error) {
+	if s == nil || s.AsOf == nil {
+		return 0, nil
+	}
+	return staleread.CalculateAsOfTsExpr(kctx, sctx.GetPlanCtx(), s.AsOf.TsExpr)
 }
 
 func (e *RefreshMaterializedViewExec) resolveRefreshMaterializedViewTarget(
@@ -3190,6 +3229,7 @@ func executeRefreshMaterializedViewDataChanges(
 	schemaName pmodel.CIStr,
 	tblInfo *model.TableInfo,
 	lastSuccessfulRefreshReadTSO uint64,
+	targetRefreshReadTSO uint64,
 	stepSet mvRefreshStepSet,
 	stepObserver mvRefreshStepObserver,
 	explainFormat string,
@@ -3222,6 +3262,7 @@ func executeRefreshMaterializedViewDataChanges(
 			sessVars,
 			s,
 			lastSuccessfulRefreshReadTSO,
+			targetRefreshReadTSO,
 			stepSet,
 			stepObserver,
 			explainFormat,
@@ -3282,6 +3323,7 @@ func executeRefreshMaterializedViewFast(
 	sessVars *variable.SessionVars,
 	s *ast.RefreshMaterializedViewStmt,
 	lastSuccessfulRefreshReadTSO uint64,
+	targetRefreshReadTSO uint64,
 	stepSet mvRefreshStepSet,
 	stepObserver mvRefreshStepObserver,
 	explainFormat string,
@@ -3293,6 +3335,7 @@ func executeRefreshMaterializedViewFast(
 			sessVars,
 			s,
 			lastSuccessfulRefreshReadTSO,
+			targetRefreshReadTSO,
 		)
 	}); err != nil {
 		return err
@@ -3311,7 +3354,7 @@ func executeRefreshMaterializedViewCompleteDeltaApply(
 	explainFormat string,
 ) error {
 	if err := observeMVRefreshStep(stepObserver, stepSet.dataChangeCompleteDeltaApply, func() error {
-		return executeRefreshMaterializedViewImplement(kctx, sqlExec, sessVars, s, 0)
+		return executeRefreshMaterializedViewImplement(kctx, sqlExec, sessVars, s, 0, 0)
 	}); err != nil {
 		return err
 	}
@@ -3325,10 +3368,12 @@ func executeRefreshMaterializedViewImplement(
 	sessVars *variable.SessionVars,
 	s *ast.RefreshMaterializedViewStmt,
 	lastSuccessfulRefreshReadTSO uint64,
+	targetRefreshReadTSO uint64,
 ) error {
 	implementStmt := &ast.RefreshMaterializedViewImplementStmt{
 		RefreshStmt:                  s,
 		LastSuccessfulRefreshReadTSO: lastSuccessfulRefreshReadTSO,
+		TargetRefreshReadTSO:         targetRefreshReadTSO,
 	}
 
 	if internalExec, ok := sqlExec.(interface {

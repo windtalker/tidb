@@ -769,6 +769,10 @@ func cloneRefreshMaterializedViewStmt(stmt *ast.RefreshMaterializedViewStmt) *as
 		viewName := *stmt.ViewName
 		cloned.ViewName = &viewName
 	}
+	if stmt.AsOf != nil {
+		asOf := *stmt.AsOf
+		cloned.AsOf = &asOf
+	}
 	return &cloned
 }
 
