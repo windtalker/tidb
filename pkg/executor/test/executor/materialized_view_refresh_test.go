@@ -30,6 +30,7 @@ import (
 	"github.com/pingcap/tidb/pkg/parser/auth"
 	pmodel "github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
+	"github.com/pingcap/tidb/pkg/parser/terror"
 	"github.com/pingcap/tidb/pkg/sessionctx/variable"
 	"github.com/pingcap/tidb/pkg/testkit"
 	"github.com/pingcap/tidb/pkg/testkit/testfailpoint"
@@ -43,6 +44,18 @@ func mustExecInternal(t *testing.T, tk *testkit.TestKit, sql string) {
 	rs, err := tk.Session().ExecuteInternal(ctx, sql)
 	require.NoError(t, err)
 	require.Nil(t, rs)
+}
+
+func mustSetMockGCSafePoint(t *testing.T, tk *testkit.TestKit, safePoint time.Time) {
+	t.Helper()
+
+	safePointName := "tikv_gc_safe_point"
+	safePointValue := safePoint.UTC().Format("20060102-15:04:05 -0700")
+	safePointComment := "All versions after safe point can be accessed. (DO NOT EDIT)"
+	updateSafePoint := fmt.Sprintf(`INSERT INTO mysql.tidb VALUES ('%[1]s', '%[2]s', '%[3]s')
+ON DUPLICATE KEY
+	UPDATE variable_value = '%[2]s', comment = '%[3]s'`, safePointName, safePointValue, safePointComment)
+	tk.MustExec(updateSafePoint)
 }
 
 func requireRowsContainPrefix(t *testing.T, rows [][]any, prefix string) {
@@ -590,6 +603,7 @@ func TestMaterializedViewRefreshFastAsOfTimestampOuterSemantics(t *testing.T) {
 
 	fromTime := time.Now().UTC().Add(-time.Hour).Truncate(time.Millisecond)
 	fromTSO := oracle.GoTimeToTS(fromTime)
+	mustSetMockGCSafePoint(t, tk, fromTime.Add(-time.Hour))
 	tk.MustExec(fmt.Sprintf(
 		"update mysql.tidb_mview_refresh_info set LAST_SUCCESS_READ_TSO = %d where MVIEW_ID = %d",
 		fromTSO,
@@ -640,6 +654,47 @@ func TestMaterializedViewRefreshFastAsOfTimestampOuterSemantics(t *testing.T) {
 		newerLiteral,
 	))
 	require.ErrorContains(t, err, "bounded execution is not implemented yet")
+}
+
+func TestMaterializedViewRefreshFastAsOfTimestampRejectsTooOldGCSafePoint(t *testing.T) {
+	store, _ := testkit.CreateMockStoreAndDomain(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("set time_zone = '+00:00'")
+	tk.MustExec("create table t_mv_refresh_asof_gc (a int not null, b int not null)")
+	tk.MustExec("insert into t_mv_refresh_asof_gc values (1, 10)")
+	tk.MustExec("create materialized view log on t_mv_refresh_asof_gc (a, b) purge next date_add(now(), interval 1 hour)")
+	tk.MustExec("create materialized view mv_refresh_asof_gc (a, s, cnt) refresh fast as select a, sum(b), count(1) from t_mv_refresh_asof_gc group by a")
+
+	mvIDRow := tk.MustQuery("select tidb_table_id from information_schema.tables where table_schema = 'test' and table_name = 'mv_refresh_asof_gc'").Rows()
+	require.Len(t, mvIDRow, 1)
+	mvID, err := strconv.ParseInt(fmt.Sprintf("%v", mvIDRow[0][0]), 10, 64)
+	require.NoError(t, err)
+
+	fromTime := time.Now().UTC().Add(-time.Hour).Truncate(time.Millisecond)
+	fromTSO := oracle.GoTimeToTS(fromTime)
+	targetTime := fromTime.Add(2 * time.Second)
+	tk.MustExec(fmt.Sprintf(
+		"update mysql.tidb_mview_refresh_info set LAST_SUCCESS_READ_TSO = %d where MVIEW_ID = %d",
+		fromTSO,
+		mvID,
+	))
+	mustSetMockGCSafePoint(t, tk, targetTime.Add(time.Second))
+
+	histCountBefore := tk.MustQuery(fmt.Sprintf(
+		"select count(*) from mysql.tidb_mview_refresh_hist where MVIEW_ID = %d",
+		mvID,
+	)).Rows()[0][0]
+
+	err = tk.ExecToErr(fmt.Sprintf(
+		"refresh materialized view mv_refresh_asof_gc fast as of timestamp '%s'",
+		targetTime.Format("2006-01-02 15:04:05.000"),
+	))
+	require.True(t, terror.ErrorEqual(err, variable.ErrSnapshotTooOld), "err %v", err)
+	tk.MustQuery(fmt.Sprintf(
+		"select count(*) from mysql.tidb_mview_refresh_hist where MVIEW_ID = %d",
+		mvID,
+	)).Check(testkit.Rows(fmt.Sprintf("%v", histCountBefore)))
 }
 
 func TestMaterializedViewRefreshFastMinMax(t *testing.T) {

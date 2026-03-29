@@ -54,6 +54,8 @@ import (
 	"github.com/pingcap/tidb/pkg/util/dbterror"
 	plannererrors "github.com/pingcap/tidb/pkg/util/dbterror/plannererrors"
 	"github.com/pingcap/tidb/pkg/util/execdetails"
+	"github.com/pingcap/tidb/pkg/util/gcutil"
+	"github.com/pingcap/tidb/pkg/util/generatedexpr"
 	"github.com/pingcap/tidb/pkg/util/logutil"
 	"github.com/pingcap/tidb/pkg/util/sqlescape"
 	"github.com/pingcap/tidb/pkg/util/sqlexec"
@@ -267,6 +269,24 @@ func getMVTaskCancelWatchPollInterval() time.Duration {
 		}
 	})
 	return interval
+}
+
+func validateMVRefreshTargetTSOForBoundedFastRefresh(
+	kctx context.Context,
+	refreshSctx sessionctx.Context,
+	targetTSO uint64,
+) error {
+	if err := sessionctx.ValidateSnapshotReadTS(kctx, refreshSctx.GetStore(), targetTSO, true); err != nil {
+		return errors.Trace(err)
+	}
+	gcSafePoint, err := gcutil.GetGCSafePoint(refreshSctx)
+	if err != nil {
+		return errors.Trace(err)
+	}
+	if err := gcutil.ValidateSnapshotWithGCSafePoint(targetTSO, gcSafePoint); err != nil {
+		return errors.Trace(err)
+	}
+	return nil
 }
 
 func readRefreshHistCancelRequest(
@@ -2377,6 +2397,15 @@ func (e *RefreshMaterializedViewExec) executeRefreshMaterializedView(kctx contex
 		return errors.New("refresh materialized view: invalid transaction start tso")
 	}
 	refreshJobID := startTS
+	boundedFastRefresh := refreshMode == ast.RefreshMaterializedViewModeFast &&
+		!lockedReadTSONull &&
+		targetRefreshReadTSO > 0 &&
+		targetRefreshReadTSO > lockedReadTSO
+	if boundedFastRefresh {
+		if err := validateMVRefreshTargetTSOForBoundedFastRefresh(kctx, refreshSctx, targetRefreshReadTSO); err != nil {
+			return err
+		}
+	}
 
 	histSctx, err := e.GetSysSession()
 	if err != nil {

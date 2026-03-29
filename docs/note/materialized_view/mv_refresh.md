@@ -571,40 +571,36 @@ In particular:
 3. if users leave a backlog unrefreshed for too long and GC advances past the desired historical
    target, later bounded refresh should fail and require a newer target timestamp
 
-What is still required is per-execution protection for one bounded fast refresh.
+What is still required is defining per-execution semantics for one bounded fast refresh.
 
-##### Per-refresh execution protection
+##### Per-refresh execution semantics
 
-Each `FAST ... AS OF TIMESTAMP ...` execution should hold a temporary service safe point at
-`targetTSO`.
+Bounded `FAST ... AS OF TIMESTAMP ...` should follow ordinary stale-read GC semantics rather than
+introducing MV-specific GC blocking.
 
 Semantics:
 
 1. if current GC safe point is already newer than `targetTSO`, refresh must fail
-2. otherwise publish a temporary service safe point at `targetTSO` before running the bounded
-   refresh logic
-3. keep that temporary service safe point for the whole refresh execution
-4. remove it after the refresh finishes (success or failure)
+2. refresh must not acquire a temporary service safe point or otherwise block GC advancement
+3. if GC advances beyond `targetTSO` during execution, refresh may fail and roll back
+4. users can retry with a newer `targetTSO`
 
 Recommended ordering:
 
 1. parse/evaluate `AS OF TIMESTAMP` into `targetTSO`
 2. if `targetTSO < fromTS`, return an error directly
 3. if `targetTSO == fromTS`, return no-op success directly
-4. acquire the temporary service safe point at `targetTSO`
-5. after acquire, run final snapshot / GC-safe-point validation and fail if GC has already advanced
-   beyond `targetTSO`
-6. execute bounded fast refresh while renewing the temporary service safe point
-7. release the temporary service safe point in all exit paths
+4. run normal stale-read style snapshot / GC-safe-point validation before execution
+5. execute bounded fast refresh without blocking GC
+6. rely on the normal snapshot read path to fail if `targetTSO` becomes invalid during execution
 
 Rationale:
 
-1. ordinary pre-check alone is not sufficient because GC may advance in the gap between validation
-   and execution
-2. the outer refresh transaction's own `startTS` / `for_update_tso` does not protect this older
-   historical snapshot automatically
-3. per-execution protection is sufficient for correctness; long-term backlog retention is an
-   operational concern and should not be encoded as persistent GC blocking behavior
+1. this matches TiDB's existing stale-read behavior better
+2. correctness is preserved because refresh is transactional and can roll back on mid-execution
+   stale-read failure
+3. long-term backlog retention remains an operational concern and should not be encoded as MV-level
+   GC blocking behavior
 
 #### Recommended implementation shape
 
@@ -612,8 +608,8 @@ Rationale:
 2. Parse/evaluate that expression into `targetTSO` during refresh preparation.
 3. If `targetTSO == fromTS`, return no-op success without entering `mvmerge`.
 4. Keep current outer refresh transaction framework unchanged.
-5. For every bounded fast refresh execution, acquire a temporary service safe point at `targetTSO`
-   before execution, renew it during execution, and release it afterward.
+5. For every bounded fast refresh execution, run the same kind of snapshot / GC-safe-point
+   legality checks that ordinary stale reads rely on, but do not block GC.
 6. Carry both `fromTS` and `targetTSO` into `mvmerge` build/execution.
 7. Read MV at `writeTxnTSO`.
 8. Read MV log at `writeTxnTSO`, but explicitly filter `_tidb_commit_ts` into `(fromTS, targetTSO]`.
@@ -656,27 +652,25 @@ Completion criteria:
 2. outer executor semantics for `<`, `==`, `>` against `fromTS` are fixed
 3. no bounded merge logic is required yet
 
-##### Stage 2: per-execution GC safe-point keeper
+##### Stage 2: bounded-path GC validation semantics
 
-Goal: ensure one bounded fast refresh can protect `targetTSO` from GC for the whole execution.
+Goal: align bounded fast refresh with ordinary stale-read GC semantics before implementing the
+bounded merge window.
 
 Scope:
 
-1. add a TiDB-side helper to acquire / renew / release one temporary service safe point
-2. use `domain.GetDomain(sctx).GetPDClient()` to access PD client
-3. use `targetTSO` itself as the service safe point value
-4. in bounded path:
-   - acquire the temporary service safe point
-   - run final snapshot / GC-safe-point validation after acquire
-   - renew during execution
-   - release on all exit paths
-5. keep no-op path (`targetTSO == fromTS`) outside this acquire/release flow
+1. reuse normal stale-read style snapshot / GC-safe-point validation for `targetTSO`
+2. keep no-op path (`targetTSO == fromTS`) outside this validation flow
+3. do not acquire a temporary service safe point or otherwise block GC
+4. document that bounded refresh may fail and roll back if GC advances beyond `targetTSO` during
+   execution
 
 Completion criteria:
 
-1. bounded execution always registers and releases the temporary service safe point
-2. `gcSafePoint > targetTSO` fails refresh
-3. no persistent MV-level GC blocking behavior is introduced
+1. `gcSafePoint > targetTSO` fails refresh
+2. no temporary or persistent MV-level GC blocking behavior is introduced
+3. bounded execution semantics are explicitly documented as best-effort with rollback on stale-read
+   failure
 
 ##### Stage 3: bounded FAST merge window
 
@@ -732,7 +726,7 @@ Minimum validation scope:
    - `targetTSO < fromTS`
    - `targetTSO == fromTS`
    - successful bounded watermark advance
-3. GC-related tests for temporary service safe point acquire / release behavior
+3. GC-related tests for start-time rejection when `targetTSO` is older than GC safe point
 4. `MIN/MAX` tests proving recomputation uses `targetTSO`
 5. schema/index change tests proving snapshot-schema planning is honored for full-update lookup
 
