@@ -871,6 +871,56 @@ func TestMaterializedViewRefreshFastAsOfTimestampMinMaxUsesTargetSnapshotData(t 
 		Check(testkit.Rows(strconv.FormatUint(targetTSO, 10)))
 }
 
+func TestMaterializedViewRefreshFastAsOfTimestampMinMaxUsesTargetSnapshotSchema(t *testing.T) {
+	store, _ := testkit.CreateMockStoreAndDomain(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("set time_zone = '+00:00'")
+
+	tk.MustExec("create table t_mv_refresh_asof_minmax_schema (a int not null, b int not null, key idx_ab(a, b))")
+	tk.MustExec("create materialized view log on t_mv_refresh_asof_minmax_schema (a, b) purge next date_add(now(), interval 1 hour)")
+	tk.MustExec("create materialized view mv_refresh_asof_minmax_schema (a, cnt, mx, mn) refresh fast as select a, count(1), max(b), min(b) from t_mv_refresh_asof_minmax_schema group by a")
+
+	tk.MustExec("insert into t_mv_refresh_asof_minmax_schema values (1, 10), (1, 20), (1, 30)")
+	tk.MustExec("refresh materialized view mv_refresh_asof_minmax_schema complete")
+	tk.MustQuery("select * from mv_refresh_asof_minmax_schema").Check(testkit.Rows("1 3 30 10"))
+
+	tk.MustExec("delete from t_mv_refresh_asof_minmax_schema where a = 1 and b = 30")
+	targetBeforeInvisible := time.Now().UTC().Add(50 * time.Millisecond).Truncate(time.Millisecond)
+	sleepUntilBeforeInvisible := time.Until(targetBeforeInvisible.Add(20 * time.Millisecond))
+	if sleepUntilBeforeInvisible > 0 {
+		time.Sleep(sleepUntilBeforeInvisible)
+	}
+	tk.MustExec("alter table t_mv_refresh_asof_minmax_schema alter index idx_ab invisible")
+	mustSetMockGCSafePoint(t, tk, targetBeforeInvisible.Add(-time.Hour))
+
+	targetBeforeInvisibleTSO := oracle.GoTimeToTS(targetBeforeInvisible)
+	tk.MustExec(fmt.Sprintf(
+		"refresh materialized view mv_refresh_asof_minmax_schema fast as of timestamp '%s'",
+		targetBeforeInvisible.Format("2006-01-02 15:04:05.000"),
+	))
+	tk.MustQuery("select * from mv_refresh_asof_minmax_schema").Check(testkit.Rows("1 2 20 10"))
+	tk.MustQuery("select LAST_SUCCESS_READ_TSO from mysql.tidb_mview_refresh_info where MVIEW_ID = (select tidb_table_id from information_schema.tables where table_schema = 'test' and table_name = 'mv_refresh_asof_minmax_schema')").
+		Check(testkit.Rows(strconv.FormatUint(targetBeforeInvisibleTSO, 10)))
+
+	tk.MustExec("delete from t_mv_refresh_asof_minmax_schema where a = 1 and b = 20")
+	targetAfterInvisible := time.Now().UTC().Add(50 * time.Millisecond).Truncate(time.Millisecond)
+	sleepUntilAfterInvisible := time.Until(targetAfterInvisible.Add(20 * time.Millisecond))
+	if sleepUntilAfterInvisible > 0 {
+		time.Sleep(sleepUntilAfterInvisible)
+	}
+	mustSetMockGCSafePoint(t, tk, targetAfterInvisible.Add(-time.Hour))
+
+	err := tk.ExecToErr(fmt.Sprintf(
+		"refresh materialized view mv_refresh_asof_minmax_schema fast as of timestamp '%s'",
+		targetAfterInvisible.Format("2006-01-02 15:04:05.000"),
+	))
+	require.ErrorContains(t, err, "refresh materialized view fast with MIN/MAX requires base table index whose leading columns cover all GROUP BY columns")
+	tk.MustQuery("select * from mv_refresh_asof_minmax_schema").Check(testkit.Rows("1 2 20 10"))
+	tk.MustQuery("select LAST_SUCCESS_READ_TSO from mysql.tidb_mview_refresh_info where MVIEW_ID = (select tidb_table_id from information_schema.tables where table_schema = 'test' and table_name = 'mv_refresh_asof_minmax_schema')").
+		Check(testkit.Rows(strconv.FormatUint(targetBeforeInvisibleTSO, 10)))
+}
+
 func TestMaterializedViewRefreshFastMinMax(t *testing.T) {
 	store, _ := testkit.CreateMockStoreAndDomain(t)
 	tk := testkit.NewTestKit(t, store)

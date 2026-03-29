@@ -306,6 +306,11 @@ type PlanBuilder struct {
 	allowBuildCastArray bool
 	// resolveCtx is set when calling Build, it's only effective in the current Build call.
 	resolveCtx *resolve.Context
+
+	// useInfoSchemaAsIs keeps table metadata on the infoschema chosen by the
+	// caller, instead of upgrading tables to the latest domain schema during
+	// plan building.
+	useInfoSchemaAsIs bool
 }
 
 type handleColHelper struct {
@@ -432,6 +437,16 @@ type PlanBuilderOptAllowCastArray struct{}
 // Apply implements the interface PlanBuilderOpt.
 func (PlanBuilderOptAllowCastArray) Apply(builder *PlanBuilder) {
 	builder.allowBuildCastArray = true
+}
+
+// planBuilderOptUseProvidedInfoSchemaAsIs means the plan builder should keep using the
+// provided infoschema as-is, without upgrading resolved tables to the latest
+// domain schema through MDL.
+type planBuilderOptUseProvidedInfoSchemaAsIs struct{}
+
+// Apply implements the interface PlanBuilderOpt.
+func (planBuilderOptUseProvidedInfoSchemaAsIs) Apply(builder *PlanBuilder) {
+	builder.useInfoSchemaAsIs = true
 }
 
 // NewPlanBuilder creates a new PlanBuilder.
@@ -3888,10 +3903,14 @@ func (b *PlanBuilder) buildRefreshMaterializedViewImplement(ctx context.Context,
 		return &infoschema.SessionExtendedInfoSchema{InfoSchema: planIS}
 	}
 
-	optimizeSelect := func(optCtx context.Context, sel *ast.SelectStmt, planIS infoschema.InfoSchema) (base.PhysicalPlan, error) {
+	optimizeSelect := func(optCtx context.Context, sel *ast.SelectStmt, planIS infoschema.InfoSchema, useInfoSchemaAsIs bool) (base.PhysicalPlan, error) {
 		planIS = ensureSessionExtendedInfoSchema(planIS)
 		nodeW := resolve.NewNodeW(sel)
-		if err := Preprocess(optCtx, sctx, nodeW, WithPreprocessorReturn(&PreprocessorReturn{InfoSchema: planIS})); err != nil {
+		preprocessOpts := []PreprocessOpt{WithPreprocessorReturn(&PreprocessorReturn{InfoSchema: planIS})}
+		if useInfoSchemaAsIs {
+			preprocessOpts = append(preprocessOpts, useProvidedInfoSchemaAsIs)
+		}
+		if err := Preprocess(optCtx, sctx, nodeW, preprocessOpts...); err != nil {
 			return nil, err
 		}
 
@@ -3899,7 +3918,11 @@ func (b *PlanBuilder) buildRefreshMaterializedViewImplement(ctx context.Context,
 		savedBlockNames := b.ctx.GetSessionVars().PlannerSelectBlockAsName.Load()
 		defer b.ctx.GetSessionVars().PlannerSelectBlockAsName.Store(savedBlockNames)
 
-		innerBuilder, _ := NewPlanBuilder().Init(b.ctx, planIS, hint.NewQBHintHandler(nil))
+		var builderOpts []PlanBuilderOpt
+		if useInfoSchemaAsIs {
+			builderOpts = append(builderOpts, planBuilderOptUseProvidedInfoSchemaAsIs{})
+		}
+		innerBuilder, _ := NewPlanBuilder(builderOpts...).Init(b.ctx, planIS, hint.NewQBHintHandler(nil))
 		p, err := innerBuilder.Build(optCtx, nodeW)
 		if err != nil {
 			return nil, err
@@ -3925,7 +3948,7 @@ func (b *PlanBuilder) buildRefreshMaterializedViewImplement(ctx context.Context,
 		if res.MergeSourceSelect == nil {
 			return nil, errors.New("mvmerge: merge source select is nil")
 		}
-		sourcePlan, err := optimizeSelect(ctx, res.MergeSourceSelect, b.is)
+		sourcePlan, err := optimizeSelect(ctx, res.MergeSourceSelect, b.is, false)
 		if err != nil {
 			return nil, err
 		}
@@ -3980,7 +4003,7 @@ func (b *PlanBuilder) buildRefreshMaterializedViewImplement(ctx context.Context,
 			// so force-enable the switch during this one-shot optimization and restore it afterward.
 			savedEnableINLJoinInnerMultiPattern := b.ctx.GetSessionVars().EnableINLJoinInnerMultiPattern
 			b.ctx.GetSessionVars().EnableINLJoinInnerMultiPattern = true
-			fullUpdateLookupPlan, err := optimizeSelect(ctx, res.FullUpdateLookupTemplateSelect, fullUpdateLookupIS)
+			fullUpdateLookupPlan, err := optimizeSelect(ctx, res.FullUpdateLookupTemplateSelect, fullUpdateLookupIS, toTS > 0)
 			b.ctx.GetSessionVars().EnableINLJoinInnerMultiPattern = savedEnableINLJoinInnerMultiPattern
 			if err != nil {
 				return nil, err
@@ -4044,7 +4067,7 @@ func (b *PlanBuilder) buildRefreshMaterializedViewImplement(ctx context.Context,
 		sessionVars.SetEnableCascadesPlanner(false)
 		sessionVars.StmtCtx.HasEnableCascadesPlannerHint = false
 		sessionVars.StmtCtx.EnableCascadesPlanner = false
-		sourcePlan, err := optimizeSelect(ctx, diffRes.DiffSourceSelect, b.is)
+		sourcePlan, err := optimizeSelect(ctx, diffRes.DiffSourceSelect, b.is, false)
 		sessionVars.EnableFullOuterJoin = savedEnableFullOuterJoin
 		sessionVars.SetEnableCascadesPlanner(savedEnableCascadesPlanner)
 		sessionVars.StmtCtx.HasEnableCascadesPlannerHint = savedHasEnableCascadesPlannerHint
