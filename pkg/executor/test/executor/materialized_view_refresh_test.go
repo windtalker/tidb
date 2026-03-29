@@ -838,6 +838,39 @@ func TestMaterializedViewRefreshFastAsOfTimestampRejectsTooOldGCSafePoint(t *tes
 	)).Check(testkit.Rows(fmt.Sprintf("%v", histCountBefore)))
 }
 
+func TestMaterializedViewRefreshFastAsOfTimestampMinMaxUsesTargetSnapshotData(t *testing.T) {
+	store, _ := testkit.CreateMockStoreAndDomain(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("set time_zone = '+00:00'")
+
+	tk.MustExec("create table t_mv_refresh_asof_minmax_data (a int not null, b int not null, key idx_a(a))")
+	tk.MustExec("create materialized view log on t_mv_refresh_asof_minmax_data (a, b) purge next date_add(now(), interval 1 hour)")
+	tk.MustExec("create materialized view mv_refresh_asof_minmax_data (a, cnt, mx, mn) refresh fast as select a, count(1), max(b), min(b) from t_mv_refresh_asof_minmax_data group by a")
+
+	tk.MustExec("insert into t_mv_refresh_asof_minmax_data values (1, 10), (1, 20), (1, 30)")
+	tk.MustExec("refresh materialized view mv_refresh_asof_minmax_data complete")
+	tk.MustQuery("select * from mv_refresh_asof_minmax_data").Check(testkit.Rows("1 3 30 10"))
+
+	tk.MustExec("delete from t_mv_refresh_asof_minmax_data where a = 1 and b = 30")
+	targetTime := time.Now().UTC().Add(50 * time.Millisecond).Truncate(time.Millisecond)
+	sleepUntilTarget := time.Until(targetTime.Add(20 * time.Millisecond))
+	if sleepUntilTarget > 0 {
+		time.Sleep(sleepUntilTarget)
+	}
+	tk.MustExec("insert into t_mv_refresh_asof_minmax_data values (1, 100)")
+	mustSetMockGCSafePoint(t, tk, targetTime.Add(-time.Hour))
+
+	targetTSO := oracle.GoTimeToTS(targetTime)
+	tk.MustExec(fmt.Sprintf(
+		"refresh materialized view mv_refresh_asof_minmax_data fast as of timestamp '%s'",
+		targetTime.Format("2006-01-02 15:04:05.000"),
+	))
+	tk.MustQuery("select * from mv_refresh_asof_minmax_data").Check(testkit.Rows("1 2 20 10"))
+	tk.MustQuery("select LAST_SUCCESS_READ_TSO from mysql.tidb_mview_refresh_info where MVIEW_ID = (select tidb_table_id from information_schema.tables where table_schema = 'test' and table_name = 'mv_refresh_asof_minmax_data')").
+		Check(testkit.Rows(strconv.FormatUint(targetTSO, 10)))
+}
+
 func TestMaterializedViewRefreshFastMinMax(t *testing.T) {
 	store, _ := testkit.CreateMockStoreAndDomain(t)
 	tk := testkit.NewTestKit(t, store)

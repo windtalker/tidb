@@ -3877,14 +3877,21 @@ func (b *PlanBuilder) buildRefreshMaterializedViewImplement(ctx context.Context,
 
 	fromTS := stmt.LastSuccessfulRefreshReadTSO
 	toTS := stmt.TargetRefreshReadTSO
-
-	optimizeSelect := func(optCtx context.Context, sel *ast.SelectStmt) (base.PhysicalPlan, error) {
-		nodeW := resolve.NewNodeW(sel)
-		sctx, ok := b.ctx.(sessionctx.Context)
-		if !ok {
-			return nil, errors.New("RefreshMaterializedViewImplementStmt: invalid session context")
+	sctx, ok := b.ctx.(sessionctx.Context)
+	if !ok {
+		return nil, errors.New("RefreshMaterializedViewImplementStmt: invalid session context")
+	}
+	ensureSessionExtendedInfoSchema := func(planIS infoschema.InfoSchema) infoschema.InfoSchema {
+		if _, ok := planIS.(*infoschema.SessionExtendedInfoSchema); ok {
+			return planIS
 		}
-		if err := Preprocess(optCtx, sctx, nodeW, WithPreprocessorReturn(&PreprocessorReturn{InfoSchema: b.is})); err != nil {
+		return &infoschema.SessionExtendedInfoSchema{InfoSchema: planIS}
+	}
+
+	optimizeSelect := func(optCtx context.Context, sel *ast.SelectStmt, planIS infoschema.InfoSchema) (base.PhysicalPlan, error) {
+		planIS = ensureSessionExtendedInfoSchema(planIS)
+		nodeW := resolve.NewNodeW(sel)
+		if err := Preprocess(optCtx, sctx, nodeW, WithPreprocessorReturn(&PreprocessorReturn{InfoSchema: planIS})); err != nil {
 			return nil, err
 		}
 
@@ -3892,7 +3899,7 @@ func (b *PlanBuilder) buildRefreshMaterializedViewImplement(ctx context.Context,
 		savedBlockNames := b.ctx.GetSessionVars().PlannerSelectBlockAsName.Load()
 		defer b.ctx.GetSessionVars().PlannerSelectBlockAsName.Store(savedBlockNames)
 
-		innerBuilder, _ := NewPlanBuilder().Init(b.ctx, b.is, hint.NewQBHintHandler(nil))
+		innerBuilder, _ := NewPlanBuilder().Init(b.ctx, planIS, hint.NewQBHintHandler(nil))
 		p, err := innerBuilder.Build(optCtx, nodeW)
 		if err != nil {
 			return nil, err
@@ -3918,7 +3925,7 @@ func (b *PlanBuilder) buildRefreshMaterializedViewImplement(ctx context.Context,
 		if res.MergeSourceSelect == nil {
 			return nil, errors.New("mvmerge: merge source select is nil")
 		}
-		sourcePlan, err := optimizeSelect(ctx, res.MergeSourceSelect)
+		sourcePlan, err := optimizeSelect(ctx, res.MergeSourceSelect, b.is)
 		if err != nil {
 			return nil, err
 		}
@@ -3929,15 +3936,13 @@ func (b *PlanBuilder) buildRefreshMaterializedViewImplement(ctx context.Context,
 				res.SourceColumnCount,
 			)
 		}
-		if toTS > 0 && res.FullUpdateLookupTemplateSelect != nil {
-			return nil, errors.New("refresh materialized view fast as of timestamp: MIN/MAX recompute is not implemented yet")
-		}
 		var fullUpdateInnerSource base.PhysicalPlan
 		var fullUpdateInnerColumnCount int
 		var fullUpdateIndexRanges ranger.MutableRanges
 		var fullUpdateKeyOff2IdxOff []int
 		var fullUpdateKeyResultColIdxes []int
 		var fullUpdateOutputMVOffsets []int
+		var fullUpdateSnapshot *MVFullUpdateSnapshot
 		if res.FullUpdateLookupTemplateSelect != nil {
 			if res.FullUpdateLookupColumnCount <= 0 {
 				return nil, errors.New("mvmerge full-update lookup template: invalid output column count")
@@ -3949,11 +3954,23 @@ func (b *PlanBuilder) buildRefreshMaterializedViewImplement(ctx context.Context,
 					res.FullUpdateLookupColumnCount,
 				)
 			}
+			fullUpdateLookupIS := b.is
+			if toTS > 0 {
+				fullUpdateLookupIS, err = staleread.GetSessionSnapshotInfoSchema(sctx, toTS)
+				if err != nil {
+					return nil, err
+				}
+				fullUpdateSnapshot = &MVFullUpdateSnapshot{
+					TS:         toTS,
+					InfoSchema: ensureSessionExtendedInfoSchema(fullUpdateLookupIS),
+				}
+				fullUpdateLookupIS = fullUpdateSnapshot.InfoSchema
+			}
 			// The lookup template relies on index-join inner-child pattern (Selection/Agg on probe side),
 			// so force-enable the switch during this one-shot optimization and restore it afterward.
 			savedEnableINLJoinInnerMultiPattern := b.ctx.GetSessionVars().EnableINLJoinInnerMultiPattern
 			b.ctx.GetSessionVars().EnableINLJoinInnerMultiPattern = true
-			fullUpdateLookupPlan, err := optimizeSelect(ctx, res.FullUpdateLookupTemplateSelect)
+			fullUpdateLookupPlan, err := optimizeSelect(ctx, res.FullUpdateLookupTemplateSelect, fullUpdateLookupIS)
 			b.ctx.GetSessionVars().EnableINLJoinInnerMultiPattern = savedEnableINLJoinInnerMultiPattern
 			if err != nil {
 				return nil, err
@@ -3988,6 +4005,7 @@ func (b *PlanBuilder) buildRefreshMaterializedViewImplement(ctx context.Context,
 			FullUpdateKeyOff2IdxOff:     fullUpdateKeyOff2IdxOff,
 			FullUpdateKeyResultColIdxes: fullUpdateKeyResultColIdxes,
 			FullUpdateOutputMVOffsets:   fullUpdateOutputMVOffsets,
+			FullUpdateSnapshot:          fullUpdateSnapshot,
 			MVTableID:                   res.MVTableID,
 			BaseTableID:                 res.BaseTableID,
 			MLogTableID:                 res.MLogTableID,
@@ -4016,7 +4034,7 @@ func (b *PlanBuilder) buildRefreshMaterializedViewImplement(ctx context.Context,
 		sessionVars.SetEnableCascadesPlanner(false)
 		sessionVars.StmtCtx.HasEnableCascadesPlannerHint = false
 		sessionVars.StmtCtx.EnableCascadesPlanner = false
-		sourcePlan, err := optimizeSelect(ctx, diffRes.DiffSourceSelect)
+		sourcePlan, err := optimizeSelect(ctx, diffRes.DiffSourceSelect, b.is)
 		sessionVars.EnableFullOuterJoin = savedEnableFullOuterJoin
 		sessionVars.SetEnableCascadesPlanner(savedEnableCascadesPlanner)
 		sessionVars.StmtCtx.HasEnableCascadesPlannerHint = savedHasEnableCascadesPlannerHint
