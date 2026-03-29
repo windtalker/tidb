@@ -152,9 +152,9 @@ func (c *mvTaskCancelController) requestManualCancelByRequester(requester string
 	cancel()
 }
 
-func (c *mvTaskCancelController) normalizeTaskFailure(taskErr error) (error, *string) {
+func (c *mvTaskCancelController) normalizeTaskFailure(taskErr error) (*string, error) {
 	if c == nil {
-		return taskErr, nil
+		return nil, taskErr
 	}
 
 	c.mu.Lock()
@@ -163,11 +163,11 @@ func (c *mvTaskCancelController) normalizeTaskFailure(taskErr error) (error, *st
 	c.mu.Unlock()
 
 	if reason != mvTaskCancelReasonManual {
-		return taskErr, nil
+		return nil, taskErr
 	}
 
 	failedReason := formatMVManualCancelFailureReason(requester)
-	return errMVTaskCanceledManually, &failedReason
+	return &failedReason, errMVTaskCanceledManually
 }
 
 func formatMVManualCancelFailureReason(requester string) string {
@@ -199,10 +199,9 @@ func formatMVManualCancelRequester(user *auth.UserIdentity) string {
 type mvTaskCancelPoller func(context.Context, sqlexec.SQLExecutor) (requested bool, requester string, err error)
 
 func startMVTaskCancelWatcher(
-	getSysSession func() (sessionctx.Context, error),
-	releaseSysSession func(context.Context, sessionctx.Context),
-	releaseCtx context.Context,
 	taskCtx context.Context,
+	getSysSession func() (sessionctx.Context, error),
+	releaseWatchSession func(sessionctx.Context),
 	taskCancelController *mvTaskCancelController,
 	watchName string,
 	poller mvTaskCancelPoller,
@@ -220,7 +219,7 @@ func startMVTaskCancelWatcher(
 	watcherDone := make(chan struct{})
 	go func() {
 		defer close(watcherDone)
-		defer releaseSysSession(releaseCtx, watchSctx)
+		defer releaseWatchSession(watchSctx)
 
 		sqlExec := watchSctx.GetSQLExecutor()
 		ticker := time.NewTicker(getMVTaskCancelWatchPollInterval())
@@ -1402,9 +1401,13 @@ func (e *PurgeMaterializedViewLogExec) executePurgeMaterializedViewLog(
 	lockedLastPurgedTSOReady := false
 	purgeJobID := uint64(0)
 	purgeHistRunningInserted := false
+	stopCancelWatcher := func() {}
+	defer func() {
+		stopCancelWatcher()
+	}()
 
 	finalizeFailure := func(purgeErr error) error {
-		finalErr, purgeFailedReason := taskCancelController.normalizeTaskFailure(purgeErr)
+		purgeFailedReason, finalErr := taskCancelController.normalizeTaskFailure(purgeErr)
 		if !purgeHistRunningInserted {
 			return errors.Trace(finalErr)
 		}
@@ -1493,11 +1496,12 @@ func (e *PurgeMaterializedViewLogExec) executePurgeMaterializedViewLog(
 					return errors.Trace(err)
 				}
 				purgeHistRunningInserted = true
-				stopCancelWatcher, err := startMVTaskCancelWatcher(
-					e.GetSysSession,
-					e.ReleaseSysSession,
-					releaseCtx,
+				stopCancelWatcher, err = startMVTaskCancelWatcher(
 					kctx,
+					e.GetSysSession,
+					func(sctx sessionctx.Context) {
+						e.ReleaseSysSession(releaseCtx, sctx)
+					},
 					taskCancelController,
 					fmt.Sprintf("mlog-purge-%d", purgeJobID),
 					func(watchCtx context.Context, watchSQLExec sqlexec.SQLExecutor) (bool, string, error) {
@@ -1508,7 +1512,6 @@ func (e *PurgeMaterializedViewLogExec) executePurgeMaterializedViewLog(
 					_, _ = sqlExec.ExecuteInternal(kctx, "ROLLBACK")
 					return finalizeFailure(err)
 				}
-				defer stopCancelWatcher()
 				failpoint.Inject("pausePurgeMaterializedViewLogAfterInsertPurgeHistRunning", func() {})
 			}
 
@@ -2226,7 +2229,7 @@ func (e *RefreshMaterializedViewExec) executeRefreshMaterializedView(kctx contex
 		}
 
 		finalizeFailure := func(refreshErr error) error {
-			finalErr, refreshFailedReason := taskCancelController.normalizeTaskFailure(refreshErr)
+			refreshFailedReason, finalErr := taskCancelController.normalizeTaskFailure(refreshErr)
 			refreshErrMsg := finalErr.Error()
 			if refreshFailedReason != nil {
 				refreshErrMsg = *refreshFailedReason
@@ -2249,10 +2252,11 @@ func (e *RefreshMaterializedViewExec) executeRefreshMaterializedView(kctx contex
 			return errors.Trace(finalErr)
 		}
 		stopCancelWatcher, err := startMVTaskCancelWatcher(
-			e.GetSysSession,
-			e.ReleaseSysSession,
-			releaseCtx,
 			kctx,
+			e.GetSysSession,
+			func(sctx sessionctx.Context) {
+				e.ReleaseSysSession(releaseCtx, sctx)
+			},
 			taskCancelController,
 			fmt.Sprintf("refresh-%d", refreshJobID),
 			func(watchCtx context.Context, watchSQLExec sqlexec.SQLExecutor) (bool, string, error) {
@@ -2376,7 +2380,7 @@ func (e *RefreshMaterializedViewExec) executeRefreshMaterializedView(kctx contex
 	}
 
 	finalizeFailure := func(refreshErr error) error {
-		finalErr, refreshFailedReason := taskCancelController.normalizeTaskFailure(refreshErr)
+		refreshFailedReason, finalErr := taskCancelController.normalizeTaskFailure(refreshErr)
 		refreshErrMsg := finalErr.Error()
 		if refreshFailedReason != nil {
 			refreshErrMsg = *refreshFailedReason
@@ -2416,10 +2420,11 @@ func (e *RefreshMaterializedViewExec) executeRefreshMaterializedView(kctx contex
 		return errors.Trace(finalErr)
 	}
 	stopCancelWatcher, err := startMVTaskCancelWatcher(
-		e.GetSysSession,
-		e.ReleaseSysSession,
-		releaseCtx,
 		kctx,
+		e.GetSysSession,
+		func(sctx sessionctx.Context) {
+			e.ReleaseSysSession(releaseCtx, sctx)
+		},
 		taskCancelController,
 		fmt.Sprintf("refresh-%d", refreshJobID),
 		func(watchCtx context.Context, watchSQLExec sqlexec.SQLExecutor) (bool, string, error) {
