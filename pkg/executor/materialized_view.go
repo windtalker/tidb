@@ -81,7 +81,6 @@ type CancelMaterializedViewJobExec struct {
 var errMLogPurgeLockConflict = errors.NewNoStackError("mlog purge lock conflict")
 var errMVRefreshAdvisoryLockConflict = errors.NewNoStackError("materialized view refresh advisory lock conflict")
 var errMVTaskCanceledManually = errors.NewNoStackError("materialized view task canceled manually")
-var errMVRefreshFastAsOfTargetNotImplemented = errors.NewNoStackError("refresh materialized view fast as of timestamp: bounded execution is not implemented yet")
 
 const (
 	purgeHistStatusRunning          = "running"
@@ -2488,17 +2487,12 @@ func (e *RefreshMaterializedViewExec) executeRefreshMaterializedView(kctx contex
 		}
 		lastSuccessfulRefreshReadTSO = lockedReadTSO
 		if targetRefreshReadTSO > 0 {
-			switch {
-			case targetRefreshReadTSO < lastSuccessfulRefreshReadTSO:
+			if targetRefreshReadTSO < lastSuccessfulRefreshReadTSO {
 				return finalizeFailure(errors.Errorf(
 					"refresh materialized view fast as of timestamp: target tso %d is older than LAST_SUCCESS_READ_TSO %d",
 					targetRefreshReadTSO,
 					lastSuccessfulRefreshReadTSO,
 				))
-			default:
-				// Stage 1 only wires parser/AST and outer refresh semantics. The bounded merge
-				// window itself will be implemented in the later stage.
-				return finalizeFailure(errMVRefreshFastAsOfTargetNotImplemented)
 			}
 		}
 	}
@@ -2523,9 +2517,20 @@ func (e *RefreshMaterializedViewExec) executeRefreshMaterializedView(kctx contex
 	}
 	executeDataChangesDur = time.Since(executeDataChangesStart)
 
-	refreshReadTSO, err := getRefreshReadTSOForSuccess(sessVars)
+	actualRefreshReadTSO, err := getRefreshReadTSOForSuccess(sessVars)
 	if err != nil {
 		return finalizeFailure(err)
+	}
+	refreshReadTSO := actualRefreshReadTSO
+	if boundedFastRefresh {
+		if targetRefreshReadTSO > actualRefreshReadTSO {
+			return finalizeFailure(errors.Errorf(
+				"refresh materialized view fast as of timestamp: target tso %d is newer than actual refresh read tso %d",
+				targetRefreshReadTSO,
+				actualRefreshReadTSO,
+			))
+		}
+		refreshReadTSO = targetRefreshReadTSO
 	}
 
 	var refreshRows *int64

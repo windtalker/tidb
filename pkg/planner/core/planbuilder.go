@@ -3876,6 +3876,7 @@ func (b *PlanBuilder) buildRefreshMaterializedViewImplement(ctx context.Context,
 	}
 
 	fromTS := stmt.LastSuccessfulRefreshReadTSO
+	toTS := stmt.TargetRefreshReadTSO
 
 	optimizeSelect := func(optCtx context.Context, sel *ast.SelectStmt) (base.PhysicalPlan, error) {
 		nodeW := resolve.NewNodeW(sel)
@@ -3909,7 +3910,7 @@ func (b *PlanBuilder) buildRefreshMaterializedViewImplement(ctx context.Context,
 
 	switch mode {
 	case ast.RefreshMaterializedViewModeFast:
-		res, err := mvmerge.Build(b.ctx, b.is, mvInfo, mvmerge.BuildOptions{FromTS: fromTS}, nil)
+		res, err := mvmerge.Build(b.ctx, b.is, mvInfo, mvmerge.BuildOptions{FromTS: fromTS, ToTS: toTS}, nil)
 		if err != nil {
 			return nil, err
 		}
@@ -3927,6 +3928,9 @@ func (b *PlanBuilder) buildRefreshMaterializedViewImplement(ctx context.Context,
 				sourcePlan.Schema().Len(),
 				res.SourceColumnCount,
 			)
+		}
+		if toTS > 0 && res.FullUpdateLookupTemplateSelect != nil {
+			return nil, errors.New("refresh materialized view fast as of timestamp: MIN/MAX recompute is not implemented yet")
 		}
 		var fullUpdateInnerSource base.PhysicalPlan
 		var fullUpdateInnerColumnCount int

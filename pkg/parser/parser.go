@@ -17124,7 +17124,10 @@ yynewstate:
 		}
 	case 583:
 		{
-			asOf := yyS[yypt-1].item.(*ast.AsOfClause)
+			var asOf *ast.AsOfClause
+			if yyS[yypt-1].item != nil {
+				asOf = yyS[yypt-1].item.(*ast.AsOfClause)
+			}
 			observeType := yyS[yypt-0].item.(ast.RefreshMaterializedViewObserveType)
 			parser.yyVAL.statement = &ast.RefreshMaterializedViewStmt{
 				ViewName:      yyS[yypt-4].item.(*ast.TableName),

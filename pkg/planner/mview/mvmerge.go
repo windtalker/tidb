@@ -59,10 +59,11 @@ const (
 //      [all delta payload columns][all MV columns][optional rowid handle].
 // The executor consumes this one merged source stream and applies aggregate-specific update rules by offset.
 
-// BuildOptions defines the commit-ts lower bound (FromTS, +inf) used to read incremental mv-log rows.
-// Upper bound is provided by statement snapshot ts (for_update_ts at execution time).
+// BuildOptions defines the commit-ts window used to read incremental mv-log rows.
+// When ToTS is zero, no explicit upper bound is added and statement snapshot ts still acts as the read horizon.
 type BuildOptions struct {
 	FromTS uint64
+	ToTS   uint64
 }
 
 // BuildResult is the merge source produced by Build.
@@ -1258,6 +1259,9 @@ func buildMLogDeltaSelect(
 	buildMLogWhere := func() (ast.ExprNode, error) {
 		tsCol := colExpr(model.ExtraCommitTSName.L)
 		var where ast.ExprNode = binary(opcode.GT, tsCol, ast.NewValueExpr(opt.FromTS, "", ""))
+		if opt.ToTS > 0 {
+			where = andExpr(where, binary(opcode.LE, tsCol, ast.NewValueExpr(opt.ToTS, "", "")))
+		}
 		if mvSel.Where != nil {
 			mvWhere, err := cloneExprByRestore(sctx, mvSel.Where)
 			if err != nil {

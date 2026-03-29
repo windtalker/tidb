@@ -335,7 +335,11 @@ func (e *RefreshMaterializedViewDryRunExec) generateRows(ctx context.Context) ([
 }
 
 func (e *RefreshMaterializedViewDryRunExec) buildFastMergePlanRows(ctx context.Context) ([][]string, error) {
-	return e.buildImplementRefreshPlanRows(ctx, 0)
+	lastSuccessfulRefreshReadTSO, err := e.loadFastRefreshReadTSOForDryRun(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return e.buildImplementRefreshPlanRows(ctx, lastSuccessfulRefreshReadTSO)
 }
 
 func (e *RefreshMaterializedViewDryRunExec) buildCompleteDeltaRefreshPlanRows(ctx context.Context) ([][]string, error) {
@@ -345,11 +349,47 @@ func (e *RefreshMaterializedViewDryRunExec) buildCompleteDeltaRefreshPlanRows(ct
 func (e *RefreshMaterializedViewDryRunExec) buildImplementRefreshPlanRows(ctx context.Context, lastSuccessfulRefreshReadTSO uint64) ([][]string, error) {
 	refreshStmt := cloneRefreshMaterializedViewStmt(e.stmt)
 	refreshStmt.ObserveType = ast.RefreshMaterializedViewObserveNone
+	targetRefreshReadTSO, err := evaluateRefreshMaterializedViewTargetTSO(ctx, e.Ctx(), refreshStmt)
+	if err != nil {
+		return nil, err
+	}
 	implementStmt := &ast.RefreshMaterializedViewImplementStmt{
 		RefreshStmt:                  refreshStmt,
 		LastSuccessfulRefreshReadTSO: lastSuccessfulRefreshReadTSO,
+		TargetRefreshReadTSO:         targetRefreshReadTSO,
 	}
 	return e.renderPlanRowsForInternalStmt(ctx, implementStmt)
+}
+
+func (e *RefreshMaterializedViewDryRunExec) loadFastRefreshReadTSOForDryRun(ctx context.Context) (uint64, error) {
+	refreshStmt := cloneRefreshMaterializedViewStmt(e.stmt)
+	refreshExec := &RefreshMaterializedViewExec{
+		BaseExecutor: exec.NewBaseExecutor(e.Ctx(), nil, 0),
+	}
+	_, tblInfo, err := refreshExec.resolveRefreshMaterializedViewTarget(refreshStmt)
+	if err != nil {
+		return 0, err
+	}
+
+	rows, _, err := e.Ctx().GetRestrictedSQLExecutor().ExecRestrictedSQL(
+		ctx,
+		nil,
+		"SELECT LAST_SUCCESS_READ_TSO FROM mysql.tidb_mview_refresh_info WHERE MVIEW_ID = %?",
+		tblInfo.ID,
+	)
+	if err != nil {
+		if infoschema.ErrTableNotExists.Equal(err) {
+			return 0, errors.New("refresh materialized view: required system table mysql.tidb_mview_refresh_info does not exist")
+		}
+		return 0, err
+	}
+	if len(rows) == 0 {
+		return 0, errors.New("refresh materialized view: refresh info row missing in mysql.tidb_mview_refresh_info")
+	}
+	if rows[0].IsNull(0) {
+		return 0, errors.New("refresh materialized view fast: LAST_SUCCESS_READ_TSO is NULL")
+	}
+	return rows[0].GetUint64(0), nil
 }
 
 func (e *RefreshMaterializedViewDryRunExec) buildCompleteRefreshPlanRows(ctx context.Context) ([][]string, [][]string, error) {
