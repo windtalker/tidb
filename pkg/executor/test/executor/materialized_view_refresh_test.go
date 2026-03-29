@@ -897,6 +897,23 @@ func TestMaterializedViewRefreshFastMinMax(t *testing.T) {
 	))
 }
 
+func TestMaterializedViewRefreshFastMinMaxRequiresSupportingIndex(t *testing.T) {
+	store, _ := testkit.CreateMockStoreAndDomain(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+
+	tk.MustExec("create table t_mv_fast_minmax_noidx (id int not null primary key, a int not null, b int not null, key idx_a(a))")
+	tk.MustExec("create materialized view log on t_mv_fast_minmax_noidx (a, b) purge next date_add(now(), interval 1 hour)")
+	tk.MustExec("create materialized view mv_fast_minmax_noidx (a, cnt, mx, mn) refresh fast next date_add(now(), interval 1 hour) as select a, count(1), max(b), min(b) from t_mv_fast_minmax_noidx group by a")
+
+	tk.MustExec("insert into t_mv_fast_minmax_noidx values (1, 1, 10), (2, 1, 20)")
+	tk.MustExec("refresh materialized view mv_fast_minmax_noidx complete")
+
+	tk.MustExec("alter table t_mv_fast_minmax_noidx alter index idx_a invisible")
+	err := tk.ExecToErr("refresh materialized view mv_fast_minmax_noidx fast")
+	require.ErrorContains(t, err, "refresh materialized view fast with MIN/MAX requires base table index whose leading columns cover all GROUP BY columns")
+}
+
 func TestMaterializedViewRefreshFastNullableAggregatesWithDuplicateCountExpr(t *testing.T) {
 	store, _ := testkit.CreateMockStoreAndDomain(t)
 	tk := testkit.NewTestKit(t, store)
