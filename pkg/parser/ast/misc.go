@@ -519,7 +519,7 @@ type RefreshMaterializedViewStmt struct {
 	// CompleteType configures COMPLETE refresh mode.
 	// It is only meaningful when Type == RefreshMaterializedViewTypeComplete.
 	CompleteType RefreshMaterializedViewCompleteType
-	ObserveType   RefreshMaterializedViewObserveType
+	ObserveType  RefreshMaterializedViewObserveType
 }
 
 // RefreshMaterializedViewImplementStmt is an internal-only statement that is constructed directly by the executor
