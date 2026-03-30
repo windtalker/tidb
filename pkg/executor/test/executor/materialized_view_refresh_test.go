@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/pingcap/failpoint"
+	"github.com/pingcap/tidb/pkg/errno"
 	"github.com/pingcap/tidb/pkg/kv"
 	"github.com/pingcap/tidb/pkg/parser/ast"
 	"github.com/pingcap/tidb/pkg/parser/auth"
@@ -1863,6 +1864,8 @@ func TestCancelMaterializedViewRefreshJob(t *testing.T) {
 
 	tkCancel := testkit.NewTestKit(t, store)
 	require.NoError(t, tkCancel.Session().Auth(&auth.UserIdentity{Username: "mv_refresh_cancel_u", Hostname: "%"}, nil, nil, nil))
+	tkCancel.MustGetErrCode(fmt.Sprintf("cancel materialized view refresh job %s", jobID), errno.ErrTableaccessDenied)
+	tk.MustExec("grant alter on test.mv_refresh_cancel_job to 'mv_refresh_cancel_u'@'%'")
 	tkCancel.MustExec(fmt.Sprintf("cancel materialized view refresh job %s", jobID))
 	time.Sleep(300 * time.Millisecond)
 

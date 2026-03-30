@@ -709,6 +709,8 @@ func TestCancelMaterializedViewLogPurgeJob(t *testing.T) {
 
 	tkCancel := testkit.NewTestKit(t, store)
 	require.NoError(t, tkCancel.Session().Auth(&auth.UserIdentity{Username: "mv_purge_cancel_u", Hostname: "%"}, nil, nil, nil))
+	tkCancel.MustGetErrCode(fmt.Sprintf("cancel materialized view log purge job %s", jobID), errno.ErrTableaccessDenied)
+	tk.MustExec("grant alter on test.t_purge_cancel_job to 'mv_purge_cancel_u'@'%'")
 	tkCancel.MustExec(fmt.Sprintf("cancel materialized view log purge job %s", jobID))
 	time.Sleep(300 * time.Millisecond)
 

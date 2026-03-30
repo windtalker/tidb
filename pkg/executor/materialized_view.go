@@ -41,6 +41,7 @@ import (
 	plannercore "github.com/pingcap/tidb/pkg/planner/core"
 	plannercorebase "github.com/pingcap/tidb/pkg/planner/core/base"
 	plannerutil "github.com/pingcap/tidb/pkg/planner/util"
+	"github.com/pingcap/tidb/pkg/privilege"
 	"github.com/pingcap/tidb/pkg/sessionctx"
 	"github.com/pingcap/tidb/pkg/sessionctx/stmtctx"
 	"github.com/pingcap/tidb/pkg/sessionctx/variable"
@@ -374,6 +375,123 @@ WHERE PURGE_JOB_ID = %?
 		return false, errors.Trace(err)
 	}
 	return sctx.GetSessionVars().StmtCtx.AffectedRows() > 0, nil
+}
+
+func checkCancelMaterializedViewJobPrivilege(
+	ctx sessionctx.Context,
+	kctx context.Context,
+	sqlExec sqlexec.SQLExecutor,
+	stmt *ast.CancelMaterializedViewJobStmt,
+) error {
+	if stmt == nil {
+		return errors.New("cancel materialized view job: missing statement")
+	}
+	pm := privilege.GetPrivilegeManager(ctx)
+	user := ctx.GetSessionVars().User
+	if pm == nil || user == nil {
+		return nil
+	}
+
+	is := domain.GetDomain(ctx).InfoSchema()
+	var dbName string
+	var tableName string
+	var found bool
+	var err error
+	switch stmt.Tp {
+	case ast.CancelMaterializedViewJobTypeRefresh:
+		dbName, tableName, found, err = resolveCancelRefreshJobPrivilegeTarget(kctx, sqlExec, is, uint64(stmt.JobID))
+	case ast.CancelMaterializedViewJobTypeLogPurge:
+		dbName, tableName, found, err = resolveCancelPurgeJobPrivilegeTarget(kctx, sqlExec, is, uint64(stmt.JobID))
+	default:
+		return errors.Errorf("invalid materialized view job cancel type: %d", stmt.Tp)
+	}
+	if err != nil || !found {
+		return err
+	}
+	if pm.RequestVerification(ctx.GetSessionVars().ActiveRoles, dbName, tableName, "", mysql.AlterPriv) {
+		return nil
+	}
+	return plannererrors.ErrTableaccessDenied.GenWithStackByArgs("ALTER", user.AuthUsername, user.AuthHostname, tableName)
+}
+
+func resolveCancelRefreshJobPrivilegeTarget(
+	kctx context.Context,
+	sqlExec sqlexec.SQLExecutor,
+	is infoschema.InfoSchema,
+	refreshJobID uint64,
+) (dbName string, tableName string, found bool, err error) {
+	rows, err := sqlexec.ExecSQL(
+		kctx,
+		sqlExec,
+		`SELECT MVIEW_ID
+FROM mysql.tidb_mview_refresh_hist
+WHERE REFRESH_JOB_ID = %?
+  AND REFRESH_STATUS = 'running'`,
+		refreshJobID,
+	)
+	if err != nil {
+		if infoschema.ErrTableNotExists.Equal(err) {
+			return "", "", false, errors.New("refresh materialized view: required system table mysql.tidb_mview_refresh_hist does not exist")
+		}
+		return "", "", false, errors.Trace(err)
+	}
+	if len(rows) == 0 {
+		return "", "", false, nil
+	}
+	mviewID := rows[0].GetInt64(0)
+	mvTable, ok := is.TableByID(context.Background(), mviewID)
+	if !ok {
+		return "", "", false, errors.Errorf("refresh materialized view: cannot resolve target materialized view %d for cancel job %d", mviewID, refreshJobID)
+	}
+	dbInfo, ok := infoschema.SchemaByTable(is, mvTable.Meta())
+	if !ok {
+		return "", "", false, errors.Errorf("refresh materialized view: cannot resolve schema for materialized view %d", mviewID)
+	}
+	return dbInfo.Name.L, mvTable.Meta().Name.L, true, nil
+}
+
+func resolveCancelPurgeJobPrivilegeTarget(
+	kctx context.Context,
+	sqlExec sqlexec.SQLExecutor,
+	is infoschema.InfoSchema,
+	purgeJobID uint64,
+) (dbName string, tableName string, found bool, err error) {
+	rows, err := sqlexec.ExecSQL(
+		kctx,
+		sqlExec,
+		`SELECT MLOG_ID
+FROM mysql.tidb_mlog_purge_hist
+WHERE PURGE_JOB_ID = %?
+  AND PURGE_STATUS = 'running'`,
+		purgeJobID,
+	)
+	if err != nil {
+		if infoschema.ErrTableNotExists.Equal(err) {
+			return "", "", false, errors.New("required system table mysql.tidb_mlog_purge_hist does not exist")
+		}
+		return "", "", false, errors.Trace(err)
+	}
+	if len(rows) == 0 {
+		return "", "", false, nil
+	}
+	mlogID := rows[0].GetInt64(0)
+	mlogTable, ok := is.TableByID(context.Background(), mlogID)
+	if !ok {
+		return "", "", false, errors.Errorf("cannot resolve materialized view log %d for cancel job %d", mlogID, purgeJobID)
+	}
+	mlogInfo := mlogTable.Meta().MaterializedViewLog
+	if mlogInfo == nil {
+		return "", "", false, errors.Errorf("table %d is not a materialized view log", mlogID)
+	}
+	baseTable, ok := is.TableByID(context.Background(), mlogInfo.BaseTableID)
+	if !ok {
+		return "", "", false, errors.Errorf("cannot resolve base table %d for materialized view log %d", mlogInfo.BaseTableID, mlogID)
+	}
+	dbInfo, ok := infoschema.SchemaByTable(is, baseTable.Meta())
+	if !ok {
+		return "", "", false, errors.Errorf("cannot resolve schema for base table %d", mlogInfo.BaseTableID)
+	}
+	return dbInfo.Name.L, baseTable.Meta().Name.L, true, nil
 }
 
 // MVCompleteDeltaApplyExec applies COMPLETE DELTA APPLY diff rows to the target MV table.
@@ -1177,6 +1295,9 @@ func (e *CancelMaterializedViewJobExec) Next(ctx context.Context, _ *chunk.Chunk
 		return err
 	}
 	defer e.ReleaseSysSession(ctx, sctx)
+	if err := checkCancelMaterializedViewJobPrivilege(e.Ctx(), ctx, sctx.GetSQLExecutor(), e.stmt); err != nil {
+		return err
+	}
 
 	var applied bool
 	switch e.stmt.Tp {
