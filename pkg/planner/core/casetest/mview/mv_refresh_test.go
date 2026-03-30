@@ -697,6 +697,71 @@ func TestBuildRefreshMVCompleteDeltaApplyPlan(t *testing.T) {
 	)
 }
 
+func TestBuildRefreshMVCompleteDeltaApplyPlanWithCascadesEnabled(t *testing.T) {
+	sctx := plannercore.MockContext()
+	sctx.GetSessionVars().SetEnableCascadesPlanner(true)
+	sctx.GetSessionVars().StmtCtx.HasEnableCascadesPlannerHint = true
+	sctx.GetSessionVars().StmtCtx.EnableCascadesPlanner = true
+	savedStore := sctx.Store
+	sctx.Store = nil
+	_, err := sctx.Txn(true)
+	require.NoError(t, err)
+	sctx.Store = savedStore
+
+	baseID := int64(1101)
+	mvID := int64(1102)
+
+	baseTbl := &model.TableInfo{
+		ID:    baseID,
+		Name:  pmodel.NewCIStr("t"),
+		State: model.StatePublic,
+		Columns: []*model.ColumnInfo{
+			mkTestCol(1, "a", 0, mysql.TypeLong),
+			mkTestCol(2, "b", 1, mysql.TypeLong),
+		},
+	}
+	baseTbl.Columns[0].FieldType.AddFlag(mysql.NotNullFlag)
+
+	mvTbl := &model.TableInfo{
+		ID:    mvID,
+		Name:  pmodel.NewCIStr("mv_tbl_complete_apply_cascades"),
+		State: model.StatePublic,
+		Columns: []*model.ColumnInfo{
+			mkTestCol(1, "a", 0, mysql.TypeLong),
+			mkTestCol(2, "cnt", 1, mysql.TypeLonglong),
+		},
+		PKIsHandle: true,
+		MaterializedView: &model.MaterializedViewInfo{
+			BaseTableIDs: []int64{baseID},
+			SQLContent:   "select a, count(1) from t group by a",
+		},
+	}
+	mvTbl.Columns[0].FieldType.AddFlag(mysql.NotNullFlag | mysql.PriKeyFlag)
+	mvTbl.Columns[1].FieldType.AddFlag(mysql.NotNullFlag)
+
+	is := infoschema.MockInfoSchema([]*model.TableInfo{baseTbl, mvTbl})
+	domain.GetDomain(sctx).MockInfoCacheAndLoadInfoSchema(is)
+
+	implementStmt := &ast.RefreshMaterializedViewImplementStmt{
+		RefreshStmt: &ast.RefreshMaterializedViewStmt{
+			ViewName:     &ast.TableName{Name: mvTbl.Name},
+			Type:         ast.RefreshMaterializedViewTypeComplete,
+			CompleteType: ast.RefreshMaterializedViewCompleteTypeDeltaApply,
+		},
+		LastSuccessfulRefreshReadTSO: 0,
+	}
+
+	builder, _ := plannercore.NewPlanBuilder().Init(sctx.GetPlanCtx(), is, hint.NewQBHintHandler(nil))
+	p, err := builder.Build(context.Background(), resolve.NewNodeW(implementStmt))
+	require.NoError(t, err)
+
+	_, ok := p.(*plannercore.MVCompleteDeltaApply)
+	require.True(t, ok)
+	require.True(t, sctx.GetSessionVars().GetEnableCascadesPlanner())
+	require.True(t, sctx.GetSessionVars().StmtCtx.HasEnableCascadesPlannerHint)
+	require.True(t, sctx.GetSessionVars().StmtCtx.EnableCascadesPlanner)
+}
+
 func TestBuildRefreshMVCompleteDeltaApplyPlanNullableGroupKey(t *testing.T) {
 	sctx := plannercore.MockContext()
 	savedStore := sctx.Store

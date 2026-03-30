@@ -4002,10 +4002,20 @@ func (b *PlanBuilder) buildRefreshMaterializedViewImplement(ctx context.Context,
 		if diffRes.DiffSourceSelect == nil {
 			return nil, errors.New("complete diff: diff source select is nil")
 		}
-		savedEnableFullOuterJoin := b.ctx.GetSessionVars().EnableFullOuterJoin
-		b.ctx.GetSessionVars().EnableFullOuterJoin = true
+		sessionVars := b.ctx.GetSessionVars()
+		savedEnableFullOuterJoin := sessionVars.EnableFullOuterJoin
+		savedEnableCascadesPlanner := sessionVars.EnableCascadesPlanner
+		savedHasEnableCascadesPlannerHint := sessionVars.StmtCtx.HasEnableCascadesPlannerHint
+		savedStmtEnableCascadesPlanner := sessionVars.StmtCtx.EnableCascadesPlanner
+		sessionVars.EnableFullOuterJoin = true
+		sessionVars.SetEnableCascadesPlanner(false)
+		sessionVars.StmtCtx.HasEnableCascadesPlannerHint = false
+		sessionVars.StmtCtx.EnableCascadesPlanner = false
 		sourcePlan, err := optimizeSelect(ctx, diffRes.DiffSourceSelect)
-		b.ctx.GetSessionVars().EnableFullOuterJoin = savedEnableFullOuterJoin
+		sessionVars.EnableFullOuterJoin = savedEnableFullOuterJoin
+		sessionVars.SetEnableCascadesPlanner(savedEnableCascadesPlanner)
+		sessionVars.StmtCtx.HasEnableCascadesPlannerHint = savedHasEnableCascadesPlannerHint
+		sessionVars.StmtCtx.EnableCascadesPlanner = savedStmtEnableCascadesPlanner
 		if err != nil {
 			return nil, err
 		}
