@@ -85,7 +85,7 @@ func TestShouldUseImportIntoForMVRefreshOutOfPlace(t *testing.T) {
 	require.False(t, shouldUseImportIntoForMVRefreshOutOfPlace("mock-storage"))
 }
 
-func TestMarkMVCompleteDeltaTouchedRowsByColumnStringUsesCollation(t *testing.T) {
+func TestMarkMVCompleteDeltaTouchedRowsByColumnStringUsesBinaryCompare(t *testing.T) {
 	testCases := []struct {
 		name      string
 		collation string
@@ -94,11 +94,11 @@ func TestMarkMVCompleteDeltaTouchedRowsByColumnStringUsesCollation(t *testing.T)
 		touched   bool
 	}{
 		{
-			name:      "case-insensitive collation treats values as equal",
+			name:      "case-insensitive collation still compares bytes",
 			collation: "utf8mb4_general_ci",
 			oldVal:    "a",
 			newVal:    "A",
-			touched:   false,
+			touched:   true,
 		},
 		{
 			name:      "binary collation keeps byte-sensitive change",
@@ -124,7 +124,6 @@ func TestMarkMVCompleteDeltaTouchedRowsByColumnStringUsesCollation(t *testing.T)
 				true,
 				mvCompleteDeltaCompareColumn{
 					fieldType:      ft,
-					collator:       collate.GetCollator(tc.collation),
 					notNull:        true,
 					touchedBitMask: 1,
 				},
@@ -135,6 +134,56 @@ func TestMarkMVCompleteDeltaTouchedRowsByColumnStringUsesCollation(t *testing.T)
 			require.Equal(t, tc.touched, updateTouchedBitmap[0] != 0)
 		})
 	}
+}
+
+func TestMarkMVCompleteDeltaTouchedRowsByColumnEnumSetUseBinaryNameCompare(t *testing.T) {
+	enumFT := types.NewFieldType(mysql.TypeEnum)
+	enumFT.SetCharset("utf8mb4")
+	enumFT.SetCollate("utf8mb4_general_ci")
+	enumChk := chunk.NewChunkWithCapacity([]*types.FieldType{enumFT, enumFT}, 1)
+	enumChk.AppendEnum(0, types.Enum{Name: "x", Value: 1})
+	enumChk.AppendEnum(1, types.Enum{Name: "x", Value: 2})
+
+	enumBitmap := make([]uint8, 1)
+	err := markMVCompleteDeltaTouchedRowsByColumn(
+		[]int{0},
+		enumBitmap,
+		1,
+		true,
+		mvCompleteDeltaCompareColumn{
+			fieldType:      enumFT,
+			notNull:        true,
+			touchedBitMask: 1,
+		},
+		enumChk.Column(0),
+		enumChk.Column(1),
+	)
+	require.NoError(t, err)
+	require.Equal(t, []uint8{0}, enumBitmap)
+
+	setFT := types.NewFieldType(mysql.TypeSet)
+	setFT.SetCharset("utf8mb4")
+	setFT.SetCollate("utf8mb4_general_ci")
+	setChk := chunk.NewChunkWithCapacity([]*types.FieldType{setFT, setFT}, 1)
+	setChk.AppendSet(0, types.Set{Name: "a,b", Value: 3})
+	setChk.AppendSet(1, types.Set{Name: "a,b", Value: 7})
+
+	setBitmap := make([]uint8, 1)
+	err = markMVCompleteDeltaTouchedRowsByColumn(
+		[]int{0},
+		setBitmap,
+		1,
+		true,
+		mvCompleteDeltaCompareColumn{
+			fieldType:      setFT,
+			notNull:        true,
+			touchedBitMask: 1,
+		},
+		setChk.Column(0),
+		setChk.Column(1),
+	)
+	require.NoError(t, err)
+	require.Equal(t, []uint8{0}, setBitmap)
 }
 
 func TestMVCompleteDeltaApplyRuntimeStatsString(t *testing.T) {

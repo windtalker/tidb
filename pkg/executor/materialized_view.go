@@ -130,7 +130,6 @@ type mvCompleteDeltaCompareColumn struct {
 	mInputColID      int
 	qInputColID      int
 	fieldType        *types.FieldType
-	collator         collate.Collator
 	notNull          bool
 	touchedBitMask   uint8
 	touchedByteIndex int
@@ -474,16 +473,11 @@ func (e *MVCompleteDeltaApplyExec) initCompareColumns(inputColCount int) error {
 			)
 		}
 		fieldType := e.writableFieldTypes[writableIdx]
-		var stringCollator collate.Collator
-		if fieldType.EvalType() == types.ETString {
-			stringCollator = collate.GetCollator(fieldType.GetCollate())
-		}
 		e.compareColumns[compareIdx] = mvCompleteDeltaCompareColumn{
 			writableIdx:      writableIdx,
 			mInputColID:      mInputColID,
 			qInputColID:      qInputColID,
 			fieldType:        fieldType,
-			collator:         stringCollator,
 			notNull:          mysql.HasNotNullFlag(fieldType.GetFlag()),
 			touchedBitMask:   uint8(1 << (compareIdx & 7)),
 			touchedByteIndex: compareIdx >> 3,
@@ -718,11 +712,12 @@ func markMVCompleteDeltaTouchedRowsByColumn(
 		}
 		return nil
 	case types.ETString:
+		binaryCollator := collate.GetBinaryCollator()
 		switch compareCol.fieldType.GetType() {
 		case mysql.TypeEnum:
 			if compareCol.notNull {
 				for updateOrdinal, rowIdx := range updateRows {
-					if oldCol.GetEnum(rowIdx).Value != newCol.GetEnum(rowIdx).Value {
+					if binaryCollator.Compare(oldCol.GetEnum(rowIdx).Name, newCol.GetEnum(rowIdx).Name) != 0 {
 						setTouched(updateOrdinal)
 					}
 				}
@@ -737,7 +732,7 @@ func markMVCompleteDeltaTouchedRowsByColumn(
 					}
 					continue
 				}
-				if oldCol.GetEnum(rowIdx).Value != newCol.GetEnum(rowIdx).Value {
+				if binaryCollator.Compare(oldCol.GetEnum(rowIdx).Name, newCol.GetEnum(rowIdx).Name) != 0 {
 					setTouched(updateOrdinal)
 				}
 			}
@@ -745,7 +740,7 @@ func markMVCompleteDeltaTouchedRowsByColumn(
 		case mysql.TypeSet:
 			if compareCol.notNull {
 				for updateOrdinal, rowIdx := range updateRows {
-					if oldCol.GetSet(rowIdx).Value != newCol.GetSet(rowIdx).Value {
+					if binaryCollator.Compare(oldCol.GetSet(rowIdx).Name, newCol.GetSet(rowIdx).Name) != 0 {
 						setTouched(updateOrdinal)
 					}
 				}
@@ -760,7 +755,7 @@ func markMVCompleteDeltaTouchedRowsByColumn(
 					}
 					continue
 				}
-				if oldCol.GetSet(rowIdx).Value != newCol.GetSet(rowIdx).Value {
+				if binaryCollator.Compare(oldCol.GetSet(rowIdx).Name, newCol.GetSet(rowIdx).Name) != 0 {
 					setTouched(updateOrdinal)
 				}
 			}
@@ -768,7 +763,7 @@ func markMVCompleteDeltaTouchedRowsByColumn(
 		}
 		if compareCol.notNull {
 			for updateOrdinal, rowIdx := range updateRows {
-				if compareCol.collator.Compare(oldCol.GetString(rowIdx), newCol.GetString(rowIdx)) != 0 {
+				if binaryCollator.Compare(oldCol.GetString(rowIdx), newCol.GetString(rowIdx)) != 0 {
 					setTouched(updateOrdinal)
 				}
 			}
@@ -783,7 +778,7 @@ func markMVCompleteDeltaTouchedRowsByColumn(
 				}
 				continue
 			}
-			if compareCol.collator.Compare(oldCol.GetString(rowIdx), newCol.GetString(rowIdx)) != 0 {
+			if binaryCollator.Compare(oldCol.GetString(rowIdx), newCol.GetString(rowIdx)) != 0 {
 				setTouched(updateOrdinal)
 			}
 		}
