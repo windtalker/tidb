@@ -471,6 +471,10 @@ func (t *MVService) handleRefreshTaskResult(m *mv, nextRefresh time.Time, err er
 				logutil.BgLogger().Warn("refresh MV manual cancel backoff persist failed, forcing metadata refetch", fields...)
 			}
 			if applied {
+				if appliedNext.IsZero() {
+					t.removeMVTask(m)
+					return
+				}
 				t.rescheduleMVSuccess(m, appliedNext)
 				return
 			}
@@ -517,6 +521,10 @@ func (t *MVService) handlePurgeTaskResult(l *mvLog, nextPurge time.Time, err err
 				logutil.BgLogger().Warn("purge MV log manual cancel backoff persist failed, forcing metadata refetch", fields...)
 			}
 			if applied {
+				if appliedNext.IsZero() {
+					t.removeMVLogTask(l)
+					return
+				}
 				t.rescheduleMVLogSuccess(l, appliedNext)
 				return
 			}

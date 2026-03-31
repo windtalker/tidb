@@ -257,6 +257,8 @@ type mockMVServiceHelper struct {
 	purgeManualCancelBackoffApplied   bool
 	refreshManualCancelBackoffNext    time.Time
 	purgeManualCancelBackoffNext      time.Time
+	refreshManualCancelBackoffNextSet bool
+	purgeManualCancelBackoffNextSet   bool
 	refreshManualCancelBackoffErr     error
 	purgeManualCancelBackoffErr       error
 	refreshManualCancelBackoffCalls   atomic.Int32
@@ -302,7 +304,7 @@ func (m *mockMVServiceHelper) PurgeMVLog(_ context.Context, _ basic.SessionPool,
 
 func (m *mockMVServiceHelper) TryBackoffRefreshManualCancel(_ context.Context, _ basic.SessionPool, _ int64, next time.Time) (bool, time.Time, error) {
 	m.refreshManualCancelBackoffCalls.Add(1)
-	if m.refreshManualCancelBackoffNext.IsZero() {
+	if !m.refreshManualCancelBackoffNextSet && m.refreshManualCancelBackoffNext.IsZero() {
 		m.refreshManualCancelBackoffNext = next
 	}
 	return m.refreshManualCancelBackoffApplied, m.refreshManualCancelBackoffNext, m.refreshManualCancelBackoffErr
@@ -310,7 +312,7 @@ func (m *mockMVServiceHelper) TryBackoffRefreshManualCancel(_ context.Context, _
 
 func (m *mockMVServiceHelper) TryBackoffPurgeManualCancel(_ context.Context, _ basic.SessionPool, _ int64, next time.Time) (bool, time.Time, error) {
 	m.purgeManualCancelBackoffCalls.Add(1)
-	if m.purgeManualCancelBackoffNext.IsZero() {
+	if !m.purgeManualCancelBackoffNextSet && m.purgeManualCancelBackoffNext.IsZero() {
 		m.purgeManualCancelBackoffNext = next
 	}
 	return m.purgeManualCancelBackoffApplied, m.purgeManualCancelBackoffNext, m.purgeManualCancelBackoffErr
@@ -988,6 +990,32 @@ func TestMVServiceTaskResult(t *testing.T) {
 			svc.mvLogPurgeMu.Unlock()
 		})
 
+		t.Run("manual_cancel_applied_clear_schedule", func(t *testing.T) {
+			helper := &mockMVServiceHelper{
+				purgeErr:                        errMVTaskCanceledManually,
+				purgeManualCancelBackoffApplied: true,
+				purgeManualCancelBackoffNextSet: true,
+			}
+			svc := newRunningMVServiceForTest(t, helper)
+
+			l := &mvLog{
+				ID:        307,
+				nextPurge: mvsNow().Add(-time.Minute).Round(0),
+			}
+			svc.buildMVLogPurgeTasks(map[int64]*mvLog{l.ID: l})
+			svc.purgeMVLog([]*mvLog{l})
+
+			waitExecutorFinishedCount(t, svc, 1)
+			require.Equal(t, int32(1), helper.purgeManualCancelBackoffCalls.Load())
+			require.Equal(t, int64(0), l.retryCount.Load())
+			require.Eventually(t, func() bool {
+				svc.mvLogPurgeMu.Lock()
+				_, ok := svc.mvLogPurgeMu.pending[l.ID]
+				svc.mvLogPurgeMu.Unlock()
+				return !ok
+			}, testEventuallyWait, testEventuallyTick)
+		})
+
 		t.Run("manual_cancel_without_persist_forces_refetch", func(t *testing.T) {
 			helper := &mockMVServiceHelper{
 				purgeErr: errMVTaskCanceledManually,
@@ -1089,6 +1117,32 @@ func TestMVServiceTaskResult(t *testing.T) {
 			require.True(t, item.Value.nextRefresh.Equal(expectedNext))
 			require.Equal(t, expectedNext.UnixMilli(), item.Value.orderTs)
 			svc.mvRefreshMu.Unlock()
+		})
+
+		t.Run("manual_cancel_applied_clear_schedule", func(t *testing.T) {
+			helper := &mockMVServiceHelper{
+				refreshErr:                        errMVTaskCanceledManually,
+				refreshManualCancelBackoffApplied: true,
+				refreshManualCancelBackoffNextSet: true,
+			}
+			svc := newRunningMVServiceForTest(t, helper)
+
+			m := &mv{
+				ID:          405,
+				nextRefresh: mvsNow().Add(-time.Minute).Round(0),
+			}
+			svc.buildMVRefreshTasks(map[int64]*mv{m.ID: m})
+			svc.refreshMV([]*mv{m})
+
+			waitExecutorFinishedCount(t, svc, 1)
+			require.Equal(t, int32(1), helper.refreshManualCancelBackoffCalls.Load())
+			require.Equal(t, int64(0), m.retryCount.Load())
+			require.Eventually(t, func() bool {
+				svc.mvRefreshMu.Lock()
+				_, ok := svc.mvRefreshMu.pending[m.ID]
+				svc.mvRefreshMu.Unlock()
+				return !ok
+			}, testEventuallyWait, testEventuallyTick)
 		})
 
 		t.Run("manual_cancel_without_persist_forces_refetch", func(t *testing.T) {
@@ -1826,9 +1880,9 @@ func TestServerHelperTryBackoffRefreshManualCancel(t *testing.T) {
 			testSQLUpdateMVNextTime,
 			101,
 			expectedNext,
-			func(context.Context, sessionctx.Context, int64) (*time.Time, error) {
+			func(context.Context, sessionctx.Context, int64) (*time.Time, bool, error) {
 				next := mvsNow().UTC().Add(time.Minute).Round(0)
-				return &next, nil
+				return &next, false, nil
 			},
 		)
 		require.NoError(t, err)
@@ -1860,8 +1914,8 @@ func TestServerHelperTryBackoffRefreshManualCancel(t *testing.T) {
 			testSQLUpdateMVNextTime,
 			101,
 			cooldownNext,
-			func(context.Context, sessionctx.Context, int64) (*time.Time, error) {
-				return &currentNext, nil
+			func(context.Context, sessionctx.Context, int64) (*time.Time, bool, error) {
+				return &currentNext, true, nil
 			},
 		)
 		require.NoError(t, err)
@@ -1877,7 +1931,7 @@ func TestServerHelperTryBackoffRefreshManualCancel(t *testing.T) {
 		require.Equal(t, int64(101), se.executedRestrictedArg[1][1])
 	})
 
-	t.Run("no_next_schedule", func(t *testing.T) {
+	t.Run("no_next_schedule_clears_next_time", func(t *testing.T) {
 		se := newRecordingSessionContext()
 		se.restrictedRows[testSQLLockMVNextTime] = []chunk.Row{
 			chunk.MutRowFromDatums([]types.Datum{types.NewIntDatum(1)}).ToRow(),
@@ -1892,20 +1946,18 @@ func TestServerHelperTryBackoffRefreshManualCancel(t *testing.T) {
 			testSQLUpdateMVNextTime,
 			101,
 			cooldownNext,
-			func(context.Context, sessionctx.Context, int64) (*time.Time, error) {
-				return nil, nil
+			func(context.Context, sessionctx.Context, int64) (*time.Time, bool, error) {
+				return nil, true, nil
 			},
 		)
 		require.NoError(t, err)
 		require.True(t, applied)
-		require.True(t, appliedNext.Equal(cooldownNext))
+		require.True(t, appliedNext.IsZero())
 		require.Equal(t, []string{"BEGIN PESSIMISTIC", "COMMIT"}, se.executedSQL)
 		require.Equal(t, []string{testSQLLockMVNextTime, testSQLUpdateMVNextTime}, se.executedRestrictedSQL)
 		require.Equal(t, []any{int64(101)}, se.executedRestrictedArg[0])
 		require.Len(t, se.executedRestrictedArg[1], 2)
-		gotNext, ok := se.executedRestrictedArg[1][0].(time.Time)
-		require.True(t, ok)
-		require.True(t, gotNext.Equal(cooldownNext))
+		require.Nil(t, se.executedRestrictedArg[1][0])
 		require.Equal(t, int64(101), se.executedRestrictedArg[1][1])
 	})
 
@@ -1924,8 +1976,8 @@ func TestServerHelperTryBackoffRefreshManualCancel(t *testing.T) {
 			testSQLUpdateMVNextTime,
 			101,
 			cooldownNext,
-			func(context.Context, sessionctx.Context, int64) (*time.Time, error) {
-				return nil, errors.New("mock resolver error")
+			func(context.Context, sessionctx.Context, int64) (*time.Time, bool, error) {
+				return nil, false, errors.New("mock resolver error")
 			},
 		)
 		require.NoError(t, err)
@@ -1973,9 +2025,9 @@ func TestServerHelperTryBackoffPurgeManualCancel(t *testing.T) {
 			testSQLUpdatePurgeNextTime,
 			201,
 			expectedNext,
-			func(context.Context, sessionctx.Context, int64) (*time.Time, error) {
+			func(context.Context, sessionctx.Context, int64) (*time.Time, bool, error) {
 				next := mvsNow().UTC().Add(time.Minute).Round(0)
-				return &next, nil
+				return &next, false, nil
 			},
 		)
 		require.NoError(t, err)
@@ -2007,8 +2059,8 @@ func TestServerHelperTryBackoffPurgeManualCancel(t *testing.T) {
 			testSQLUpdatePurgeNextTime,
 			201,
 			cooldownNext,
-			func(context.Context, sessionctx.Context, int64) (*time.Time, error) {
-				return &currentNext, nil
+			func(context.Context, sessionctx.Context, int64) (*time.Time, bool, error) {
+				return &currentNext, true, nil
 			},
 		)
 		require.NoError(t, err)
@@ -2021,6 +2073,36 @@ func TestServerHelperTryBackoffPurgeManualCancel(t *testing.T) {
 		gotNext, ok := se.executedRestrictedArg[1][0].(time.Time)
 		require.True(t, ok)
 		require.True(t, gotNext.Equal(currentNext))
+		require.Equal(t, int64(201), se.executedRestrictedArg[1][1])
+	})
+
+	t.Run("no_next_schedule_clears_next_time", func(t *testing.T) {
+		se := newRecordingSessionContext()
+		se.restrictedRows[testSQLLockPurgeNextTime] = []chunk.Row{
+			chunk.MutRowFromDatums([]types.Datum{types.NewIntDatum(1)}).ToRow(),
+		}
+		pool := recordingSessionPool{se: se}
+		cooldownNext := mvsNow().UTC().Add(manualCancelBackoffDelay)
+
+		applied, appliedNext, err := tryBackoffMVTaskManualCancel(
+			context.Background(),
+			pool,
+			testSQLLockPurgeNextTime,
+			testSQLUpdatePurgeNextTime,
+			201,
+			cooldownNext,
+			func(context.Context, sessionctx.Context, int64) (*time.Time, bool, error) {
+				return nil, true, nil
+			},
+		)
+		require.NoError(t, err)
+		require.True(t, applied)
+		require.True(t, appliedNext.IsZero())
+		require.Equal(t, []string{"BEGIN PESSIMISTIC", "COMMIT"}, se.executedSQL)
+		require.Equal(t, []string{testSQLLockPurgeNextTime, testSQLUpdatePurgeNextTime}, se.executedRestrictedSQL)
+		require.Equal(t, []any{int64(201)}, se.executedRestrictedArg[0])
+		require.Len(t, se.executedRestrictedArg[1], 2)
+		require.Nil(t, se.executedRestrictedArg[1][0])
 		require.Equal(t, int64(201), se.executedRestrictedArg[1][1])
 	})
 }

@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -515,52 +516,74 @@ func (*serviceHelper) TryBackoffPurgeManualCancel(
 	)
 }
 
-type mvTaskManualCancelNextResolver func(context.Context, sessionctx.Context, int64) (*time.Time, error)
+type mvTaskManualCancelNextResolver func(context.Context, sessionctx.Context, int64) (*time.Time, bool, error)
 
 func deriveMVRefreshManualCancelNextTime(
 	ctx context.Context,
 	sctx sessionctx.Context,
 	mvID int64,
-) (*time.Time, error) {
+) (*time.Time, bool, error) {
 	infoSchema := sctx.GetDomainInfoSchema().(infoschema.InfoSchema)
 	mvTbl, ok := infoSchema.TableByID(ctx, mvID)
 	if !ok {
-		return nil, nil
+		return nil, false, nil
 	}
 	mvMeta := mvTbl.Meta()
 	if mvMeta == nil || mvMeta.MaterializedView == nil {
-		return nil, errors.New("materialized view metadata is invalid")
+		return nil, false, errors.New("materialized view metadata is invalid")
 	}
-	return deriveMaterializedScheduleNextTimeForManualCancel(
+	nextTime, shouldUpdate, err := deriveMaterializedScheduleNextTimeForManualCancel(
 		ctx,
 		sctx,
 		mvMeta.MaterializedView.RefreshStartWith,
 		mvMeta.MaterializedView.RefreshNext,
 		mvMeta.MaterializedView.DefinitionSQLMode,
 	)
+	if err != nil {
+		return nil, false, err
+	}
+	if shouldUpdate && nextTime == nil {
+		if dbInfo, ok := infoschema.SchemaByTable(infoSchema, mvMeta); ok && dbInfo != nil {
+			logManualCancelMaterializedViewRefreshNextTimeUpdateNull(dbInfo.Name.O, mvMeta.Name.O, mvMeta.MaterializedView.RefreshNext)
+		} else {
+			logManualCancelMaterializedViewRefreshNextTimeUpdateNull("", mvMeta.Name.O, mvMeta.MaterializedView.RefreshNext)
+		}
+	}
+	return nextTime, shouldUpdate, nil
 }
 
 func deriveMLogPurgeManualCancelNextTime(
 	ctx context.Context,
 	sctx sessionctx.Context,
 	mvLogID int64,
-) (*time.Time, error) {
+) (*time.Time, bool, error) {
 	infoSchema := sctx.GetDomainInfoSchema().(infoschema.InfoSchema)
 	mlogTbl, ok := infoSchema.TableByID(ctx, mvLogID)
 	if !ok {
-		return nil, nil
+		return nil, false, nil
 	}
 	mlogMeta := mlogTbl.Meta()
 	if mlogMeta == nil || mlogMeta.MaterializedViewLog == nil {
-		return nil, errors.New("materialized view log metadata is invalid")
+		return nil, false, errors.New("materialized view log metadata is invalid")
 	}
-	return deriveMaterializedScheduleNextTimeForManualCancel(
+	nextTime, shouldUpdate, err := deriveMaterializedScheduleNextTimeForManualCancel(
 		ctx,
 		sctx,
 		mlogMeta.MaterializedViewLog.PurgeStartWith,
 		mlogMeta.MaterializedViewLog.PurgeNext,
 		mlogMeta.MaterializedViewLog.DefinitionSQLMode,
 	)
+	if err != nil {
+		return nil, false, err
+	}
+	if shouldUpdate && nextTime == nil {
+		if dbInfo, ok := infoschema.SchemaByTable(infoSchema, mlogMeta); ok && dbInfo != nil {
+			logManualCancelMaterializedViewLogPurgeNextTimeUpdateNull(dbInfo.Name.O, mlogMeta.Name.O, mlogMeta.MaterializedViewLog.PurgeNext)
+		} else {
+			logManualCancelMaterializedViewLogPurgeNextTimeUpdateNull("", mlogMeta.Name.O, mlogMeta.MaterializedViewLog.PurgeNext)
+		}
+	}
+	return nextTime, shouldUpdate, nil
 }
 
 func deriveMaterializedScheduleNextTimeForManualCancel(
@@ -569,7 +592,7 @@ func deriveMaterializedScheduleNextTimeForManualCancel(
 	startExpr string,
 	nextExpr string,
 	scheduleSQLMode mysql.SQLMode,
-) (*time.Time, error) {
+) (*time.Time, bool, error) {
 	nextAt, shouldUpdate, err := expression.DeriveMaterializedScheduleNextTimeUTC(
 		ctx,
 		sctx,
@@ -579,16 +602,48 @@ func deriveMaterializedScheduleNextTimeForManualCancel(
 		scheduleSQLMode,
 	)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if !shouldUpdate || nextAt == nil {
-		return nil, nil
+		return nil, shouldUpdate, nil
 	}
 	goTime, err := nextAt.GoTime(time.UTC)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	return &goTime, nil
+	return &goTime, true, nil
+}
+
+func logManualCancelMaterializedViewRefreshNextTimeUpdateNull(
+	schemaName string,
+	mvName string,
+	nextExpr string,
+) {
+	if strings.TrimSpace(nextExpr) == "" {
+		return
+	}
+	logutil.BgLogger().Error(
+		"refresh MV manual cancel backoff: automatic refresh schedule disabled because NEXT expression evaluated to NULL, updating NEXT_TIME to NULL",
+		zap.String("schemaName", schemaName),
+		zap.String("tableName", mvName),
+		zap.String("refreshNext", nextExpr),
+	)
+}
+
+func logManualCancelMaterializedViewLogPurgeNextTimeUpdateNull(
+	schemaName string,
+	mlogName string,
+	nextExpr string,
+) {
+	if strings.TrimSpace(nextExpr) == "" {
+		return
+	}
+	logutil.BgLogger().Error(
+		"purge MV log manual cancel backoff: automatic purge schedule disabled because NEXT expression evaluated to NULL, updating NEXT_TIME to NULL",
+		zap.String("schemaName", schemaName),
+		zap.String("tableName", mlogName),
+		zap.String("purgeNext", nextExpr),
+	)
 }
 
 func tryBackoffMVTaskManualCancel(
@@ -641,22 +696,35 @@ func tryBackoffMVTaskManualCancel(
 	}
 
 	appliedNextUTC := nextTimeUTC
-	resolvedNext, err := resolveExpectedNext(ctx, sctx, objectID)
+	var appliedNextArg any = nextTimeUTC
+	clearAppliedNext := false
+	resolvedNext, shouldUpdate, err := resolveExpectedNext(ctx, sctx, objectID)
 	// If current metadata cannot provide a better schedule, keep the cooldown fallback
 	// instead of dropping the persisted backoff on the floor.
-	if err == nil && resolvedNext != nil {
-		appliedNextUTC = resolvedNext.UTC()
-		if appliedNextUTC.Before(nextTimeUTC) {
-			appliedNextUTC = nextTimeUTC
+	if err == nil {
+		if shouldUpdate {
+			if resolvedNext == nil {
+				appliedNextArg = nil
+				clearAppliedNext = true
+			} else {
+				appliedNextUTC = resolvedNext.UTC()
+				if appliedNextUTC.Before(nextTimeUTC) {
+					appliedNextUTC = nextTimeUTC
+				}
+				appliedNextArg = appliedNextUTC
+			}
 		}
 	}
-	if _, err := execRCRestrictedSQLWithSession(ctx, sctx, updateSQL, []any{appliedNextUTC, objectID}); err != nil {
+	if _, err := execRCRestrictedSQLWithSession(ctx, sctx, updateSQL, []any{appliedNextArg, objectID}); err != nil {
 		return false, time.Time{}, err
 	}
 	if _, err := sqlExec.ExecuteInternal(ctx, "COMMIT"); err != nil {
 		return false, time.Time{}, err
 	}
 	committed = true
+	if clearAppliedNext {
+		return true, time.Time{}, nil
+	}
 	return true, appliedNextUTC.In(nextTimeLoc), nil
 }
 
