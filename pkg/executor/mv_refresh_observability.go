@@ -335,24 +335,61 @@ func (e *RefreshMaterializedViewDryRunExec) generateRows(ctx context.Context) ([
 }
 
 func (e *RefreshMaterializedViewDryRunExec) buildFastMergePlanRows(ctx context.Context) ([][]string, error) {
-	lastSuccessfulRefreshReadTSO, err := e.loadFastRefreshReadTSOForDryRun(ctx)
+	validationSctx, err := e.GetSysSession()
 	if err != nil {
 		return nil, err
 	}
-	return e.buildImplementRefreshPlanRows(ctx, lastSuccessfulRefreshReadTSO)
+	defer e.ReleaseSysSession(ctx, validationSctx)
+
+	lastSuccessfulRefreshReadTSO, err := e.loadFastRefreshReadTSOForDryRun(ctx, validationSctx)
+	if err != nil {
+		return nil, err
+	}
+	refreshStmt, targetRefreshReadTSO, err := e.buildImplementRefreshPlanInput(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if targetRefreshReadTSO > 0 {
+		if targetRefreshReadTSO < lastSuccessfulRefreshReadTSO {
+			return nil, errors.Errorf(
+				"refresh materialized view fast as of timestamp: target tso %d is older than LAST_SUCCESS_READ_TSO %d",
+				targetRefreshReadTSO,
+				lastSuccessfulRefreshReadTSO,
+			)
+		}
+		if targetRefreshReadTSO > lastSuccessfulRefreshReadTSO {
+			if err := validateMVRefreshTargetTSOForBoundedFastRefresh(ctx, validationSctx, targetRefreshReadTSO); err != nil {
+				return nil, err
+			}
+		}
+	}
+	return e.buildImplementRefreshPlanRows(ctx, refreshStmt, lastSuccessfulRefreshReadTSO, targetRefreshReadTSO)
 }
 
 func (e *RefreshMaterializedViewDryRunExec) buildCompleteDeltaRefreshPlanRows(ctx context.Context) ([][]string, error) {
-	return e.buildImplementRefreshPlanRows(ctx, 0)
+	refreshStmt := cloneRefreshMaterializedViewStmt(e.stmt)
+	refreshStmt.ObserveType = ast.RefreshMaterializedViewObserveNone
+	return e.buildImplementRefreshPlanRows(ctx, refreshStmt, 0, 0)
 }
 
-func (e *RefreshMaterializedViewDryRunExec) buildImplementRefreshPlanRows(ctx context.Context, lastSuccessfulRefreshReadTSO uint64) ([][]string, error) {
+func (e *RefreshMaterializedViewDryRunExec) buildImplementRefreshPlanInput(
+	ctx context.Context,
+) (*ast.RefreshMaterializedViewStmt, uint64, error) {
 	refreshStmt := cloneRefreshMaterializedViewStmt(e.stmt)
 	refreshStmt.ObserveType = ast.RefreshMaterializedViewObserveNone
 	targetRefreshReadTSO, err := evaluateRefreshMaterializedViewTargetTSO(ctx, e.Ctx(), refreshStmt)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
+	return refreshStmt, targetRefreshReadTSO, nil
+}
+
+func (e *RefreshMaterializedViewDryRunExec) buildImplementRefreshPlanRows(
+	ctx context.Context,
+	refreshStmt *ast.RefreshMaterializedViewStmt,
+	lastSuccessfulRefreshReadTSO uint64,
+	targetRefreshReadTSO uint64,
+) ([][]string, error) {
 	implementStmt := &ast.RefreshMaterializedViewImplementStmt{
 		RefreshStmt:                  refreshStmt,
 		LastSuccessfulRefreshReadTSO: lastSuccessfulRefreshReadTSO,
@@ -361,7 +398,10 @@ func (e *RefreshMaterializedViewDryRunExec) buildImplementRefreshPlanRows(ctx co
 	return e.renderPlanRowsForInternalStmt(ctx, implementStmt)
 }
 
-func (e *RefreshMaterializedViewDryRunExec) loadFastRefreshReadTSOForDryRun(ctx context.Context) (uint64, error) {
+func (e *RefreshMaterializedViewDryRunExec) loadFastRefreshReadTSOForDryRun(
+	ctx context.Context,
+	sctx sessionctx.Context,
+) (uint64, error) {
 	refreshStmt := cloneRefreshMaterializedViewStmt(e.stmt)
 	refreshExec := &RefreshMaterializedViewExec{
 		BaseExecutor: exec.NewBaseExecutor(e.Ctx(), nil, 0),
@@ -371,7 +411,7 @@ func (e *RefreshMaterializedViewDryRunExec) loadFastRefreshReadTSOForDryRun(ctx 
 		return 0, err
 	}
 
-	rows, _, err := e.Ctx().GetRestrictedSQLExecutor().ExecRestrictedSQL(
+	rows, _, err := sctx.GetRestrictedSQLExecutor().ExecRestrictedSQL(
 		ctx,
 		nil,
 		"SELECT LAST_SUCCESS_READ_TSO FROM mysql.tidb_mview_refresh_info WHERE MVIEW_ID = %?",
