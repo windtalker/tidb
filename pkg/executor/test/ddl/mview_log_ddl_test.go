@@ -338,6 +338,60 @@ func TestAlterMaterializedViewLogPurgeUpdatesMetaAndNextTime(t *testing.T) {
 	tk.MustExec("drop materialized view log on t")
 }
 
+func TestAlterMaterializedViewLogPurgeBestEffortInfoUpdateWarning(t *testing.T) {
+	store, dom := testkit.CreateMockStoreAndDomain(t)
+	tk := testkit.NewTestKit(t, store)
+	tkLock := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tkLock.MustExec("use test")
+	tk.MustExec("create table t (a int, b int)")
+	tk.MustExec("create materialized view log on t (a, b) purge next date_add(now(), interval 2 hour)")
+
+	getMLogMeta := func() (int64, string, string, string) {
+		is := dom.InfoSchema()
+		mlogTable, err := is.TableByName(context.Background(), pmodel.NewCIStr("test"), pmodel.NewCIStr("$mlog$t"))
+		require.NoError(t, err)
+		require.NotNil(t, mlogTable.Meta().MaterializedViewLog)
+		return mlogTable.Meta().ID,
+			mlogTable.Meta().MaterializedViewLog.PurgeMethod,
+			mlogTable.Meta().MaterializedViewLog.PurgeStartWith,
+			mlogTable.Meta().MaterializedViewLog.PurgeNext
+	}
+
+	mlogID, purgeMethod, purgeStartWith, purgeNext := getMLogMeta()
+	require.Equal(t, "DEFERRED", purgeMethod)
+	require.Equal(t, "", purgeStartWith)
+	require.Equal(t, "DATE_ADD(NOW(), INTERVAL 2 HOUR)", purgeNext)
+
+	const expectedNextTime = "2031-01-02 03:04:05"
+	tk.MustExec(fmt.Sprintf(
+		"update mysql.tidb_mlog_purge_info set NEXT_TIME = cast('%s' as datetime) where MLOG_ID = %d",
+		expectedNextTime,
+		mlogID,
+	))
+	tkLock.MustExec("begin pessimistic")
+	defer tkLock.MustExec("rollback")
+	tkLock.MustExec(fmt.Sprintf(
+		"update mysql.tidb_mlog_purge_info set NEXT_TIME = NEXT_TIME where MLOG_ID = %d",
+		mlogID,
+	))
+
+	tk.MustExec("alter materialized view log on t purge next date_add(now(), interval 25 minute)")
+	tk.MustQuery("show warnings").CheckContain(
+		"alter materialized view log purge: metadata updated but failed to update mysql.tidb_mlog_purge_info.NEXT_TIME within 10s due to row lock contention",
+	)
+
+	_, purgeMethod, purgeStartWith, purgeNext = getMLogMeta()
+	require.Equal(t, "DEFERRED", purgeMethod)
+	require.Equal(t, "", purgeStartWith)
+	require.Equal(t, "DATE_ADD(NOW(), INTERVAL 25 MINUTE)", purgeNext)
+	tk.MustQuery(fmt.Sprintf(
+		"select NEXT_TIME = cast('%s' as datetime) from mysql.tidb_mlog_purge_info where MLOG_ID = %d",
+		expectedNextTime,
+		mlogID,
+	)).Check(testkit.Rows("1"))
+}
+
 func TestCreateMaterializedViewLogMetaColumnNameConflict(t *testing.T) {
 	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
