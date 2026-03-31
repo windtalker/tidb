@@ -35,8 +35,8 @@ var (
 type MVTaskHandler interface {
 	RefreshMV(ctx context.Context, sysSessionPool basic.SessionPool, mvID int64) (nextRefresh time.Time, err error)
 	PurgeMVLog(ctx context.Context, sysSessionPool basic.SessionPool, mvLogID int64) (nextPurge time.Time, err error)
-	TryBackoffRefreshManualCancel(ctx context.Context, sysSessionPool basic.SessionPool, mvID int64, nextRefresh time.Time) (applied bool, err error)
-	TryBackoffPurgeManualCancel(ctx context.Context, sysSessionPool basic.SessionPool, mvLogID int64, nextPurge time.Time) (applied bool, err error)
+	TryBackoffRefreshManualCancel(ctx context.Context, sysSessionPool basic.SessionPool, mvID int64, nextRefresh time.Time) (applied bool, appliedNext time.Time, err error)
+	TryBackoffPurgeManualCancel(ctx context.Context, sysSessionPool basic.SessionPool, mvLogID int64, nextPurge time.Time) (applied bool, appliedNext time.Time, err error)
 	loadAllTiDBMVLogPurge(ctx context.Context, sysSessionPool basic.SessionPool) (map[int64]*mvLog, error)
 	loadAllTiDBMVRefresh(ctx context.Context, sysSessionPool basic.SessionPool) (map[int64]*mv, error)
 	GetCurrentTSO(ctx context.Context, sysSessionPool basic.SessionPool) (uint64, error)

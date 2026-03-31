@@ -53,7 +53,6 @@ import (
 	"github.com/pingcap/tidb/pkg/util/dbterror"
 	plannererrors "github.com/pingcap/tidb/pkg/util/dbterror/plannererrors"
 	"github.com/pingcap/tidb/pkg/util/execdetails"
-	"github.com/pingcap/tidb/pkg/util/generatedexpr"
 	"github.com/pingcap/tidb/pkg/util/logutil"
 	"github.com/pingcap/tidb/pkg/util/sqlescape"
 	"github.com/pingcap/tidb/pkg/util/sqlexec"
@@ -377,8 +376,8 @@ WHERE PURGE_JOB_ID = %?
 }
 
 func checkCancelMaterializedViewJobPrivilege(
-	ctx sessionctx.Context,
 	kctx context.Context,
+	ctx sessionctx.Context,
 	sqlExec sqlexec.SQLExecutor,
 	stmt *ast.CancelMaterializedViewJobStmt,
 ) error {
@@ -1294,7 +1293,7 @@ func (e *CancelMaterializedViewJobExec) Next(ctx context.Context, _ *chunk.Chunk
 		return err
 	}
 	defer e.ReleaseSysSession(ctx, sctx)
-	if err := checkCancelMaterializedViewJobPrivilege(e.Ctx(), ctx, sctx.GetSQLExecutor(), e.stmt); err != nil {
+	if err := checkCancelMaterializedViewJobPrivilege(ctx, e.Ctx(), sctx.GetSQLExecutor(), e.stmt); err != nil {
 		return err
 	}
 
@@ -3499,93 +3498,19 @@ func deriveRuntimeMaterializedScheduleNextTime(
 	if !isInternalSQL {
 		return nil, false, nil
 	}
-	if evalSctx == nil || templateSctx == nil {
-		return nil, false, errors.New("runtime materialized schedule eval session is unavailable")
+	nextAt, shouldUpdate, err := expression.DeriveMaterializedScheduleNextTimeUTC(
+		kctx,
+		evalSctx,
+		templateSctx,
+		startExpr,
+		nextExpr,
+		scheduleSQLMode,
+	)
+	if err != nil || nextAt == nil {
+		return nil, shouldUpdate, err
 	}
-	startExpr = strings.TrimSpace(startExpr)
-	nextExpr = strings.TrimSpace(nextExpr)
-
-	if nextExpr != "" {
-		nextAt, err := evalMaterializedScheduleExprToDatetimeUTC(kctx, evalSctx, templateSctx, nextExpr, scheduleSQLMode)
-		if err != nil {
-			return nil, true, err
-		}
-		if nextAt == nil {
-			return nil, true, nil
-		}
-		nextAtStr := nextAt.String()
-		return &nextAtStr, true, nil
-	}
-	if startExpr != "" {
-		return nil, true, nil
-	}
-	return nil, false, nil
-}
-
-func evalMaterializedScheduleExprToDatetimeUTC(
-	kctx context.Context,
-	evalSctx sessionctx.Context,
-	templateSctx sessionctx.Context,
-	exprSQL string,
-	scheduleSQLMode mysql.SQLMode,
-) (*types.Time, error) {
-	sessVars := evalSctx.GetSessionVars()
-	templateVars := templateSctx.GetSessionVars()
-	origSQLMode := sessVars.SQLMode
-	origTypeFlags := sessVars.StmtCtx.TypeFlags()
-	origErrLevels := sessVars.StmtCtx.ErrLevels()
-	origTimeZone := sessVars.TimeZone
-	origStmtTimeZone := sessVars.StmtCtx.TimeZone()
-	sessVars.SQLMode = scheduleSQLMode
-	sessVars.SetStatusFlag(mysql.ServerStatusNoBackslashEscaped, sessVars.SQLMode.HasNoBackslashEscapesMode())
-	sessVars.StmtCtx.SetTypeFlags(templateVars.StmtCtx.TypeFlags())
-	sessVars.StmtCtx.SetErrLevels(templateVars.StmtCtx.ErrLevels())
-	sessVars.TimeZone = time.UTC
-	sessVars.StmtCtx.SetTimeZone(time.UTC)
-	defer func() {
-		sessVars.SQLMode = origSQLMode
-		sessVars.SetStatusFlag(mysql.ServerStatusNoBackslashEscaped, origSQLMode.HasNoBackslashEscapesMode())
-		sessVars.StmtCtx.SetTypeFlags(origTypeFlags)
-		sessVars.StmtCtx.SetErrLevels(origErrLevels)
-		sessVars.TimeZone = origTimeZone
-		if origStmtTimeZone != nil {
-			sessVars.StmtCtx.SetTimeZone(origStmtTimeZone)
-			return
-		}
-		sessVars.StmtCtx.SetTimeZone(sessVars.Location())
-	}()
-
-	exprNode, err := generatedexpr.ParseExpression(exprSQL)
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	builtExpr, err := expression.BuildSimpleExpr(evalSctx.GetExprCtx(), exprNode)
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-
-	// Refresh statement timestamp before evaluating expressions that may contain NOW.
-	if _, err := sqlexec.ExecSQL(kctx, evalSctx.GetSQLExecutor(), "SELECT NOW(6)"); err != nil {
-		return nil, errors.Trace(err)
-	}
-
-	evalCtx := evalSctx.GetExprCtx().GetEvalCtx()
-	v, err := builtExpr.Eval(evalCtx, chunk.Row{})
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	if v.IsNull() {
-		return nil, nil
-	}
-
-	targetTp := types.NewFieldType(mysql.TypeDatetime)
-	targetTp.SetDecimal(types.MaxFsp)
-	datetimeV, err := v.ConvertTo(evalCtx.TypeCtx(), targetTp)
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	t := datetimeV.GetMysqlTime()
-	return &t, nil
+	nextAtStr := nextAt.String()
+	return &nextAtStr, shouldUpdate, nil
 }
 
 func persistRefreshSuccess(

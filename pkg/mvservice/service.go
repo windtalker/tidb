@@ -461,7 +461,7 @@ func (t *MVService) handleRefreshTaskResult(m *mv, nextRefresh time.Time, err er
 		if isMVTaskCanceledManually(err) {
 			m.retryCount.Store(0)
 			nextRetryAt := mvsNow().Add(manualCancelBackoffDelay)
-			applied, backoffErr := t.mh.TryBackoffRefreshManualCancel(t.ctx, t.sysSessionPool, m.ID, nextRetryAt)
+			applied, appliedNext, backoffErr := t.mh.TryBackoffRefreshManualCancel(t.ctx, t.sysSessionPool, m.ID, nextRetryAt)
 			if backoffErr != nil {
 				fields := append(t.runtimeLogFields(),
 					zap.Int64("mview_id", m.ID),
@@ -471,7 +471,7 @@ func (t *MVService) handleRefreshTaskResult(m *mv, nextRefresh time.Time, err er
 				logutil.BgLogger().Warn("refresh MV manual cancel backoff persist failed, forcing metadata refetch", fields...)
 			}
 			if applied {
-				t.rescheduleMVSuccess(m, nextRetryAt)
+				t.rescheduleMVSuccess(m, appliedNext)
 				return
 			}
 			t.lastMetaFetchMillis.Store(0)
@@ -507,7 +507,7 @@ func (t *MVService) handlePurgeTaskResult(l *mvLog, nextPurge time.Time, err err
 		if isMVTaskCanceledManually(err) {
 			l.retryCount.Store(0)
 			nextRetryAt := mvsNow().Add(manualCancelBackoffDelay)
-			applied, backoffErr := t.mh.TryBackoffPurgeManualCancel(t.ctx, t.sysSessionPool, l.ID, nextRetryAt)
+			applied, appliedNext, backoffErr := t.mh.TryBackoffPurgeManualCancel(t.ctx, t.sysSessionPool, l.ID, nextRetryAt)
 			if backoffErr != nil {
 				fields := append(t.runtimeLogFields(),
 					zap.Int64("mvlog_id", l.ID),
@@ -517,7 +517,7 @@ func (t *MVService) handlePurgeTaskResult(l *mvLog, nextPurge time.Time, err err
 				logutil.BgLogger().Warn("purge MV log manual cancel backoff persist failed, forcing metadata refetch", fields...)
 			}
 			if applied {
-				t.rescheduleMVLogSuccess(l, nextRetryAt)
+				t.rescheduleMVLogSuccess(l, appliedNext)
 				return
 			}
 			t.lastMetaFetchMillis.Store(0)

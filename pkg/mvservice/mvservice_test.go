@@ -964,12 +964,12 @@ func (h *fullChainMVServiceHelper) PurgeMVLog(_ context.Context, _ basic.Session
 	return h.purgeNext, nil
 }
 
-func (*fullChainMVServiceHelper) TryBackoffRefreshManualCancel(context.Context, basic.SessionPool, int64, time.Time) (bool, error) {
-	return false, nil
+func (*fullChainMVServiceHelper) TryBackoffRefreshManualCancel(context.Context, basic.SessionPool, int64, time.Time) (bool, time.Time, error) {
+	return false, time.Time{}, nil
 }
 
-func (*fullChainMVServiceHelper) TryBackoffPurgeManualCancel(context.Context, basic.SessionPool, int64, time.Time) (bool, error) {
-	return false, nil
+func (*fullChainMVServiceHelper) TryBackoffPurgeManualCancel(context.Context, basic.SessionPool, int64, time.Time) (bool, time.Time, error) {
+	return false, time.Time{}, nil
 }
 
 func pendingTaskCounts(svc *MVService) (mvLogCount int, mvCount int) {

@@ -24,9 +24,11 @@ import (
 
 	"github.com/pingcap/tidb/pkg/ddl/notifier"
 	"github.com/pingcap/tidb/pkg/domain/infosync"
+	"github.com/pingcap/tidb/pkg/expression"
 	"github.com/pingcap/tidb/pkg/infoschema"
 	"github.com/pingcap/tidb/pkg/kv"
 	meta "github.com/pingcap/tidb/pkg/meta/model"
+	"github.com/pingcap/tidb/pkg/parser/mysql"
 	"github.com/pingcap/tidb/pkg/sessionctx"
 	"github.com/pingcap/tidb/pkg/sessionctx/variable"
 	storeerr "github.com/pingcap/tidb/pkg/store/driver/error"
@@ -484,7 +486,7 @@ func (*serviceHelper) TryBackoffRefreshManualCancel(
 	sysSessionPool basic.SessionPool,
 	mvID int64,
 	nextRefresh time.Time,
-) (bool, error) {
+) (bool, time.Time, error) {
 	return tryBackoffMVTaskManualCancel(
 		ctx,
 		sysSessionPool,
@@ -492,6 +494,7 @@ func (*serviceHelper) TryBackoffRefreshManualCancel(
 		`UPDATE mysql.tidb_mview_refresh_info SET NEXT_TIME = %? WHERE MVIEW_ID = %?`,
 		mvID,
 		nextRefresh,
+		deriveMVRefreshManualCancelNextTime,
 	)
 }
 
@@ -500,7 +503,7 @@ func (*serviceHelper) TryBackoffPurgeManualCancel(
 	sysSessionPool basic.SessionPool,
 	mvLogID int64,
 	nextPurge time.Time,
-) (bool, error) {
+) (bool, time.Time, error) {
 	return tryBackoffMVTaskManualCancel(
 		ctx,
 		sysSessionPool,
@@ -508,7 +511,84 @@ func (*serviceHelper) TryBackoffPurgeManualCancel(
 		`UPDATE mysql.tidb_mlog_purge_info SET NEXT_TIME = %? WHERE MLOG_ID = %?`,
 		mvLogID,
 		nextPurge,
+		deriveMLogPurgeManualCancelNextTime,
 	)
+}
+
+type mvTaskManualCancelNextResolver func(context.Context, sessionctx.Context, int64) (*time.Time, error)
+
+func deriveMVRefreshManualCancelNextTime(
+	ctx context.Context,
+	sctx sessionctx.Context,
+	mvID int64,
+) (*time.Time, error) {
+	infoSchema := sctx.GetDomainInfoSchema().(infoschema.InfoSchema)
+	mvTbl, ok := infoSchema.TableByID(ctx, mvID)
+	if !ok {
+		return nil, nil
+	}
+	mvMeta := mvTbl.Meta()
+	if mvMeta == nil || mvMeta.MaterializedView == nil {
+		return nil, errors.New("materialized view metadata is invalid")
+	}
+	return deriveMaterializedScheduleNextTimeForManualCancel(
+		ctx,
+		sctx,
+		mvMeta.MaterializedView.RefreshStartWith,
+		mvMeta.MaterializedView.RefreshNext,
+		mvMeta.MaterializedView.DefinitionSQLMode,
+	)
+}
+
+func deriveMLogPurgeManualCancelNextTime(
+	ctx context.Context,
+	sctx sessionctx.Context,
+	mvLogID int64,
+) (*time.Time, error) {
+	infoSchema := sctx.GetDomainInfoSchema().(infoschema.InfoSchema)
+	mlogTbl, ok := infoSchema.TableByID(ctx, mvLogID)
+	if !ok {
+		return nil, nil
+	}
+	mlogMeta := mlogTbl.Meta()
+	if mlogMeta == nil || mlogMeta.MaterializedViewLog == nil {
+		return nil, errors.New("materialized view log metadata is invalid")
+	}
+	return deriveMaterializedScheduleNextTimeForManualCancel(
+		ctx,
+		sctx,
+		mlogMeta.MaterializedViewLog.PurgeStartWith,
+		mlogMeta.MaterializedViewLog.PurgeNext,
+		mlogMeta.MaterializedViewLog.DefinitionSQLMode,
+	)
+}
+
+func deriveMaterializedScheduleNextTimeForManualCancel(
+	ctx context.Context,
+	sctx sessionctx.Context,
+	startExpr string,
+	nextExpr string,
+	scheduleSQLMode mysql.SQLMode,
+) (*time.Time, error) {
+	nextAt, shouldUpdate, err := expression.DeriveMaterializedScheduleNextTimeUTC(
+		ctx,
+		sctx,
+		sctx,
+		startExpr,
+		nextExpr,
+		scheduleSQLMode,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if !shouldUpdate || nextAt == nil {
+		return nil, nil
+	}
+	goTime, err := nextAt.GoTime(time.UTC)
+	if err != nil {
+		return nil, err
+	}
+	return &goTime, nil
 }
 
 func tryBackoffMVTaskManualCancel(
@@ -518,17 +598,20 @@ func tryBackoffMVTaskManualCancel(
 	updateSQL string,
 	objectID int64,
 	nextTime time.Time,
-) (bool, error) {
+	resolveExpectedNext mvTaskManualCancelNextResolver,
+) (bool, time.Time, error) {
 	if objectID <= 0 {
-		return false, errors.New("mv service manual cancel backoff target id is invalid")
+		return false, time.Time{}, errors.New("mv service manual cancel backoff target id is invalid")
 	}
 	if nextTime.IsZero() {
-		return false, errors.New("mv service manual cancel backoff target time is invalid")
+		return false, time.Time{}, errors.New("mv service manual cancel backoff target time is invalid")
 	}
+	nextTimeLoc := nextTime.Location()
+	nextTimeUTC := nextTime.UTC()
 
 	se, err := sysSessionPool.Get()
 	if err != nil {
-		return false, err
+		return false, time.Time{}, err
 	}
 	defer sysSessionPool.Put(se)
 
@@ -536,7 +619,7 @@ func tryBackoffMVTaskManualCancel(
 	sctx := se.(sessionctx.Context)
 	sqlExec := sctx.GetSQLExecutor()
 	if _, err := sqlExec.ExecuteInternal(ctx, "BEGIN PESSIMISTIC"); err != nil {
-		return false, err
+		return false, time.Time{}, err
 	}
 
 	committed := false
@@ -549,22 +632,32 @@ func tryBackoffMVTaskManualCancel(
 	rows, err := execRestrictedSQLWithSession(ctx, sctx, lockSQL, []any{objectID})
 	if err != nil {
 		if storeerr.ErrLockAcquireFailAndNoWaitSet.Equal(err) {
-			return false, nil
+			return false, time.Time{}, nil
 		}
-		return false, err
+		return false, time.Time{}, err
 	}
-	if len(rows) == 0 || rows[0].IsNull(0) {
-		return false, nil
+	if len(rows) == 0 {
+		return false, time.Time{}, nil
 	}
 
-	if _, err := execRCRestrictedSQLWithSession(ctx, sctx, updateSQL, []any{nextTime, objectID}); err != nil {
-		return false, err
+	appliedNextUTC := nextTimeUTC
+	resolvedNext, err := resolveExpectedNext(ctx, sctx, objectID)
+	// If current metadata cannot provide a better schedule, keep the cooldown fallback
+	// instead of dropping the persisted backoff on the floor.
+	if err == nil && resolvedNext != nil {
+		appliedNextUTC = resolvedNext.UTC()
+		if appliedNextUTC.Before(nextTimeUTC) {
+			appliedNextUTC = nextTimeUTC
+		}
+	}
+	if _, err := execRCRestrictedSQLWithSession(ctx, sctx, updateSQL, []any{appliedNextUTC, objectID}); err != nil {
+		return false, time.Time{}, err
 	}
 	if _, err := sqlExec.ExecuteInternal(ctx, "COMMIT"); err != nil {
-		return false, err
+		return false, time.Time{}, err
 	}
 	committed = true
-	return true, nil
+	return true, appliedNextUTC.In(nextTimeLoc), nil
 }
 
 // GetCurrentTSO fetches current cluster TSO from TiDB.
