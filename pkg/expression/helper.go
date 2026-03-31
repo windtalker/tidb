@@ -218,8 +218,10 @@ func getStmtTimestamp(ctx EvalContext) (now time.Time, err error) {
 	return ctx.CurrentTime()
 }
 
-// DeriveMaterializedScheduleNextTimeUTC evaluates the runtime materialized schedule expression
-// and returns the next execution time in UTC.
+// DeriveMaterializedScheduleNextTimeUTC evaluates the runtime NEXT expression and
+// returns the next execution time in UTC. Runtime scheduling only depends on NEXT:
+// when NEXT is absent, callers should still update NEXT_TIME to NULL to clear
+// stale schedule state.
 func DeriveMaterializedScheduleNextTimeUTC(
 	kctx context.Context,
 	evalSctx sessionctx.Context,
@@ -231,7 +233,6 @@ func DeriveMaterializedScheduleNextTimeUTC(
 	if evalSctx == nil || templateSctx == nil {
 		return nil, false, errors.New("runtime materialized schedule eval session is unavailable")
 	}
-	startExpr = strings.TrimSpace(startExpr)
 	nextExpr = strings.TrimSpace(nextExpr)
 
 	if nextExpr != "" {
@@ -244,10 +245,7 @@ func DeriveMaterializedScheduleNextTimeUTC(
 		}
 		return nextAt, true, nil
 	}
-	if startExpr != "" {
-		return nil, true, nil
-	}
-	return nil, false, nil
+	return nil, true, nil
 }
 
 func evalMaterializedScheduleExprToDatetimeUTC(

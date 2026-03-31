@@ -440,6 +440,35 @@ func TestMaterializedViewRefreshInternalSQLStartWithNoNextSetsNextTimeNull(t *te
 	)).Check(testkit.Rows("complete delta apply auto"))
 }
 
+func TestMaterializedViewRefreshInternalSQLNoScheduleSetsNextTimeNull(t *testing.T) {
+	store, dom := testkit.CreateMockStoreAndDomain(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("create table t_internal_no_schedule (a int not null, b int not null)")
+	tk.MustExec("insert into t_internal_no_schedule values (1, 10), (2, 20)")
+	tk.MustExec("create materialized view log on t_internal_no_schedule (a, b) purge next date_add(now(), interval 1 hour)")
+	tk.MustExec("create materialized view mv_internal_no_schedule (a, s, cnt) refresh fast start with date_add(now(), interval 2 hour) next date_add(now(), interval 40 minute) as select a, sum(b), count(1) from t_internal_no_schedule group by a")
+
+	is := dom.InfoSchema()
+	mvTable, err := is.TableByName(context.Background(), pmodel.NewCIStr("test"), pmodel.NewCIStr("mv_internal_no_schedule"))
+	require.NoError(t, err)
+	require.NotNil(t, mvTable.Meta().MaterializedView)
+	// Simulate scheduler metadata state: schedule is fully removed.
+	mvTable.Meta().MaterializedView.RefreshStartWith = ""
+	mvTable.Meta().MaterializedView.RefreshNext = ""
+	mviewID := mvTable.Meta().ID
+
+	tk.MustExec(fmt.Sprintf("update mysql.tidb_mview_refresh_info set NEXT_TIME = UTC_TIMESTAMP() + interval 3 hour where MVIEW_ID = %d", mviewID))
+
+	mustExecInternal(t, tk, "refresh materialized view mv_internal_no_schedule complete")
+	tk.MustQuery(fmt.Sprintf("select NEXT_TIME is null from mysql.tidb_mview_refresh_info where MVIEW_ID = %d", mviewID)).
+		Check(testkit.Rows("1"))
+	tk.MustQuery(fmt.Sprintf(
+		"select REFRESH_METHOD from mysql.tidb_mview_refresh_hist where MVIEW_ID = %d order by REFRESH_JOB_ID desc limit 1",
+		mviewID,
+	)).Check(testkit.Rows("complete delta apply auto"))
+}
+
 func TestMaterializedViewRefreshInternalSQLOutOfPlaceUpdatesNextTime(t *testing.T) {
 	store, dom := testkit.CreateMockStoreAndDomain(t)
 	tk := testkit.NewTestKit(t, store)

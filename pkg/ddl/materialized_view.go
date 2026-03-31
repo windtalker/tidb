@@ -813,6 +813,17 @@ func logAlterMaterializedViewRefreshNextTimeUpdateNull(
 	startExpr string,
 	nextExpr string,
 ) {
+	if strings.TrimSpace(nextExpr) != "" {
+		logutil.DDLLogger().Error(
+			"alter materialized view refresh: automatic refresh schedule disabled because schedule expression evaluated to NULL, updating NEXT_TIME to NULL",
+			zap.String("schemaName", mvSchemaName),
+			zap.String("tableName", mvTableName),
+			zap.String("nullExprClause", nullExprClause),
+			zap.String("refreshStartWith", startExpr),
+			zap.String("refreshNext", nextExpr),
+		)
+		return
+	}
 	logutil.DDLLogger().Warn(
 		"alter materialized view refresh: schedule expression evaluated to NULL, updating NEXT_TIME to NULL",
 		zap.String("schemaName", mvSchemaName),
@@ -871,6 +882,17 @@ func logAlterMaterializedViewLogPurgeNextTimeUpdateNull(
 	startExpr string,
 	nextExpr string,
 ) {
+	if strings.TrimSpace(nextExpr) != "" {
+		logutil.DDLLogger().Error(
+			"alter materialized view log purge: automatic purge schedule disabled because schedule expression evaluated to NULL, updating NEXT_TIME to NULL",
+			zap.String("schemaName", mlogSchemaName),
+			zap.String("tableName", mlogTableName),
+			zap.String("nullExprClause", nullExprClause),
+			zap.String("purgeStartWith", startExpr),
+			zap.String("purgeNext", nextExpr),
+		)
+		return
+	}
 	logutil.DDLLogger().Warn(
 		"alter materialized view log purge: schedule expression evaluated to NULL, updating NEXT_TIME to NULL",
 		zap.String("schemaName", mlogSchemaName),

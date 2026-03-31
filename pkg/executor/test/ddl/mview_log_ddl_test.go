@@ -315,31 +315,25 @@ func TestAlterMaterializedViewLogPurgeUpdatesMetaAndNextTime(t *testing.T) {
 		mlogID,
 	)).Check(testkit.Rows("1 1 1"))
 
-	beforeRows := tk.MustQuery(fmt.Sprintf(
-		"select TIMESTAMPDIFF(SECOND, '1970-01-01 00:00:00', NEXT_TIME) from mysql.tidb_mlog_purge_info where MLOG_ID = %d",
-		mlogID,
-	)).Rows()
 	tk.MustExec("alter materialized view log on t purge")
 	_, purgeMethod, purgeStartWith, purgeNext = getMLogMeta()
 	require.Equal(t, "DEFERRED", purgeMethod)
 	require.Equal(t, "", purgeStartWith)
 	require.Equal(t, "", purgeNext)
-	afterRows := tk.MustQuery(fmt.Sprintf(
-		"select TIMESTAMPDIFF(SECOND, '1970-01-01 00:00:00', NEXT_TIME) from mysql.tidb_mlog_purge_info where MLOG_ID = %d",
+	tk.MustQuery(fmt.Sprintf(
+		"select NEXT_TIME is null from mysql.tidb_mlog_purge_info where MLOG_ID = %d",
 		mlogID,
-	)).Rows()
-	require.Equal(t, beforeRows, afterRows)
+	)).Check(testkit.Rows("1"))
 
 	tk.MustExec("alter materialized view log on t purge immediate")
 	_, purgeMethod, purgeStartWith, purgeNext = getMLogMeta()
 	require.Equal(t, "IMMEDIATE", purgeMethod)
 	require.Equal(t, "", purgeStartWith)
 	require.Equal(t, "", purgeNext)
-	afterImmediateRows := tk.MustQuery(fmt.Sprintf(
-		"select TIMESTAMPDIFF(SECOND, '1970-01-01 00:00:00', NEXT_TIME) from mysql.tidb_mlog_purge_info where MLOG_ID = %d",
+	tk.MustQuery(fmt.Sprintf(
+		"select NEXT_TIME is null from mysql.tidb_mlog_purge_info where MLOG_ID = %d",
 		mlogID,
-	)).Rows()
-	require.Equal(t, afterRows, afterImmediateRows)
+	)).Check(testkit.Rows("1"))
 
 	tk.MustExec("drop materialized view log on t")
 }
@@ -1125,6 +1119,33 @@ func TestPurgeMaterializedViewLogInternalSQLStartWithNoNextSetsNextTimeNull(t *t
 
 	// Internal SQL purge should explicitly set NEXT_TIME = NULL when START WITH exists and NEXT is empty.
 	mustExecInternal(t, tk, "purge materialized view log on t_purge_internal_start_only")
+	tk.MustQuery(fmt.Sprintf("select NEXT_TIME is null from mysql.tidb_mlog_purge_info where MLOG_ID = %d", mlogID)).
+		Check(testkit.Rows("1"))
+	tk.MustQuery(fmt.Sprintf(
+		"select PURGE_METHOD from mysql.tidb_mlog_purge_hist where MLOG_ID = %d order by PURGE_JOB_ID desc limit 1",
+		mlogID,
+	)).Check(testkit.Rows("auto"))
+}
+
+func TestPurgeMaterializedViewLogInternalSQLNoScheduleSetsNextTimeNull(t *testing.T) {
+	store, dom := testkit.CreateMockStoreAndDomain(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("create table t_purge_internal_no_schedule (a int not null, b int not null)")
+	tk.MustExec("create materialized view log on t_purge_internal_no_schedule (a, b) purge start with date_add(now(), interval 2 hour) next date_add(now(), interval 40 minute)")
+
+	is := dom.InfoSchema()
+	mlogTable, err := is.TableByName(context.Background(), pmodel.NewCIStr("test"), pmodel.NewCIStr("$mlog$t_purge_internal_no_schedule"))
+	require.NoError(t, err)
+	require.NotNil(t, mlogTable.Meta().MaterializedViewLog)
+	// Simulate scheduler metadata state: schedule is fully removed.
+	mlogTable.Meta().MaterializedViewLog.PurgeStartWith = ""
+	mlogTable.Meta().MaterializedViewLog.PurgeNext = ""
+	mlogID := mlogTable.Meta().ID
+
+	tk.MustExec(fmt.Sprintf("update mysql.tidb_mlog_purge_info set NEXT_TIME = UTC_TIMESTAMP() + interval 3 hour where MLOG_ID = %d", mlogID))
+
+	mustExecInternal(t, tk, "purge materialized view log on t_purge_internal_no_schedule")
 	tk.MustQuery(fmt.Sprintf("select NEXT_TIME is null from mysql.tidb_mlog_purge_info where MLOG_ID = %d", mlogID)).
 		Check(testkit.Rows("1"))
 	tk.MustQuery(fmt.Sprintf(

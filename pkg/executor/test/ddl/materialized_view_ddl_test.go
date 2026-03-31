@@ -551,20 +551,15 @@ func TestAlterMaterializedViewRefreshUpdatesMetaAndNextTime(t *testing.T) {
 		mviewID,
 	)).Check(testkit.Rows("1 1 1"))
 
-	beforeRows := tk.MustQuery(fmt.Sprintf(
-		"select TIMESTAMPDIFF(SECOND, '1970-01-01 00:00:00', NEXT_TIME) from mysql.tidb_mview_refresh_info where MVIEW_ID = %d",
-		mviewID,
-	)).Rows()
 	tk.MustExec("alter materialized view mv refresh")
 	_, mvInfo = getMViewMeta()
 	require.Equal(t, "FAST", mvInfo.RefreshMethod)
 	require.Equal(t, "", mvInfo.RefreshStartWith)
 	require.Equal(t, "", mvInfo.RefreshNext)
-	afterRows := tk.MustQuery(fmt.Sprintf(
-		"select TIMESTAMPDIFF(SECOND, '1970-01-01 00:00:00', NEXT_TIME) from mysql.tidb_mview_refresh_info where MVIEW_ID = %d",
+	tk.MustQuery(fmt.Sprintf(
+		"select NEXT_TIME is null from mysql.tidb_mview_refresh_info where MVIEW_ID = %d",
 		mviewID,
-	)).Rows()
-	require.Equal(t, beforeRows, afterRows)
+	)).Check(testkit.Rows("1"))
 
 	tk.MustExec("drop materialized view mv")
 	tk.MustExec("drop materialized view log on t")

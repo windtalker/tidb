@@ -1554,6 +1554,9 @@ func (e *PurgeMaterializedViewLogExec) executePurgeMaterializedViewLog(
 				mlogInfo.PurgeNext,
 				isInternalSQL,
 				mlogInfo.DefinitionSQLMode,
+				func() {
+					logRuntimeMaterializedViewLogPurgeNextTimeUpdateNull(schemaName.O, mlogName.O, mlogInfo.PurgeNext)
+				},
 			)
 			if deriveErr != nil {
 				batchErr = deriveErr
@@ -2484,6 +2487,9 @@ func (e *RefreshMaterializedViewExec) executeRefreshMaterializedView(kctx contex
 		tblInfo.MaterializedView.RefreshNext,
 		isInternalSQL,
 		tblInfo.MaterializedView.DefinitionSQLMode,
+		func() {
+			logRuntimeMaterializedViewRefreshNextTimeUpdateNull(schemaName.O, tblInfo.Name.O, tblInfo.MaterializedView.RefreshNext)
+		},
 	)
 	if err != nil {
 		return finalizeFailure(err)
@@ -2693,6 +2699,9 @@ func (e *RefreshMaterializedViewExec) executeRefreshMaterializedViewCompleteOutO
 				tblInfo.MaterializedView.RefreshNext,
 				isInternalSQL,
 				tblInfo.MaterializedView.DefinitionSQLMode,
+				func() {
+					logRuntimeMaterializedViewRefreshNextTimeUpdateNull(schemaName.O, tblInfo.Name.O, tblInfo.MaterializedView.RefreshNext)
+				},
 			)
 			if scheduleErr != nil {
 				return scheduleErr
@@ -3494,6 +3503,7 @@ func deriveRuntimeMaterializedScheduleNextTime(
 	nextExpr string,
 	isInternalSQL bool,
 	scheduleSQLMode mysql.SQLMode,
+	logNullUpdate func(),
 ) (*string, bool, error) {
 	if !isInternalSQL {
 		return nil, false, nil
@@ -3506,11 +3516,49 @@ func deriveRuntimeMaterializedScheduleNextTime(
 		nextExpr,
 		scheduleSQLMode,
 	)
-	if err != nil || nextAt == nil {
-		return nil, shouldUpdate, err
+	if err != nil {
+		return nil, false, err
+	}
+	if shouldUpdate && nextAt == nil && logNullUpdate != nil {
+		logNullUpdate()
+	}
+	if nextAt == nil {
+		return nil, shouldUpdate, nil
 	}
 	nextAtStr := nextAt.String()
 	return &nextAtStr, shouldUpdate, nil
+}
+
+func logRuntimeMaterializedViewRefreshNextTimeUpdateNull(
+	schemaName string,
+	mvName string,
+	nextExpr string,
+) {
+	if strings.TrimSpace(nextExpr) == "" {
+		return
+	}
+	logutil.BgLogger().Error(
+		"refresh materialized view: automatic refresh schedule disabled because NEXT expression evaluated to NULL, updating NEXT_TIME to NULL",
+		zap.String("schemaName", schemaName),
+		zap.String("tableName", mvName),
+		zap.String("refreshNext", nextExpr),
+	)
+}
+
+func logRuntimeMaterializedViewLogPurgeNextTimeUpdateNull(
+	schemaName string,
+	mlogName string,
+	nextExpr string,
+) {
+	if strings.TrimSpace(nextExpr) == "" {
+		return
+	}
+	logutil.BgLogger().Error(
+		"purge materialized view log: automatic purge schedule disabled because NEXT expression evaluated to NULL, updating NEXT_TIME to NULL",
+		zap.String("schemaName", schemaName),
+		zap.String("tableName", mlogName),
+		zap.String("purgeNext", nextExpr),
+	)
 }
 
 func persistRefreshSuccess(
