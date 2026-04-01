@@ -155,6 +155,8 @@ func TestMaterializedViewDDLBasic(t *testing.T) {
 	require.ErrorContains(t, err, "unsupported aggregate function")
 	err = tk.ExecToErr("create materialized view mv_bad_where (a, c) as select a, count(1) from t where rand() > 0 group by a")
 	require.ErrorContains(t, err, "WHERE clause must be deterministic")
+	err = tk.ExecToErr("create materialized view mv_bad_from_unixtime (a, c) as select a, count(1) from t where from_unixtime(1) is not null group by a")
+	require.ErrorContains(t, err, "does not support FROM_UNIXTIME function")
 
 	// SUM on nullable columns requires matching COUNT(column); MIN/MAX does not.
 	tk.MustExec("create table t_sum_nullable (a int not null, b int)")

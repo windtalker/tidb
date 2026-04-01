@@ -1085,6 +1085,11 @@ func validateCreateMaterializedViewQuery(
 	if !ok {
 		return nil, dbterror.ErrGeneralUnsupportedDDL.GenWithStack("CREATE MATERIALIZED VIEW only supports SELECT statement")
 	}
+	if unsupportedFn := findUnsupportedMViewFunction(sel); unsupportedFn != "" {
+		return nil, dbterror.ErrGeneralUnsupportedDDL.GenWithStack(
+			fmt.Sprintf("CREATE MATERIALIZED VIEW does not support %s function", strings.ToUpper(unsupportedFn)),
+		)
+	}
 
 	fromTbl, fromAlias, err := extractSingleTableNameAndAliasFromSelect(sel)
 	if err != nil {
@@ -1352,6 +1357,15 @@ func collectColumnNamesInExpr(expr ast.ExprNode) []*ast.ColumnName {
 	return collector.cols
 }
 
+func findUnsupportedMViewFunction(node ast.Node) string {
+	if node == nil {
+		return ""
+	}
+	collector := &mviewUnsupportedFunctionCollator{}
+	node.Accept(collector)
+	return collector.fnName
+}
+
 type columnNameCollector struct {
 	cols []*ast.ColumnName
 }
@@ -1364,6 +1378,27 @@ func (c *columnNameCollector) Enter(n ast.Node) (ast.Node, bool) {
 }
 
 func (*columnNameCollector) Leave(n ast.Node) (ast.Node, bool) { return n, true }
+
+type mviewUnsupportedFunctionCollator struct {
+	fnName string
+}
+
+func (c *mviewUnsupportedFunctionCollator) Enter(n ast.Node) (ast.Node, bool) {
+	if c.fnName != "" {
+		return n, true
+	}
+	f, ok := n.(*ast.FuncCallExpr)
+	if !ok {
+		return n, false
+	}
+	if f.FnName.L == ast.FromUnixTime {
+		c.fnName = f.FnName.L
+		return n, true
+	}
+	return n, false
+}
+
+func (*mviewUnsupportedFunctionCollator) Leave(n ast.Node) (ast.Node, bool) { return n, true }
 
 func isCountStarOrOne(arg ast.ExprNode) bool {
 	v, ok := arg.(*driver.ValueExpr)
