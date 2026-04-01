@@ -309,6 +309,44 @@ func TestMaterializedViewDDLBasic(t *testing.T) {
 	require.True(t, baseTable.Meta().MaterializedViewBase == nil || (baseTable.Meta().MaterializedViewBase.MLogID == 0 && len(baseTable.Meta().MaterializedViewBase.MViewIDs) == 0))
 }
 
+func TestExchangePartitionRejectsMaterializedViewRelatedTable(t *testing.T) {
+	store := testkit.CreateMockStore(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("set @@tidb_enable_exchange_partition=1")
+	defer tk.MustExec("set @@tidb_enable_exchange_partition=0")
+
+	tk.MustExec(`create table t_base (
+  id bigint not null primary key,
+  v int not null
+)`)
+	tk.MustExec(`create table pt (
+  id bigint not null primary key,
+  v int not null
+)
+partition by range (id) (
+  partition p0 values less than (100),
+  partition p1 values less than maxvalue
+)`)
+	tk.MustExec("insert into t_base values (98, 10), (99, 20)")
+	tk.MustExec("insert into pt values (1, 1), (2, 2), (101, 1001), (102, 1002)")
+
+	tk.MustExec("create materialized view log on t_base (id, v)")
+	err := tk.ExecToErr("alter table pt exchange partition p0 with table t_base")
+	require.ErrorContains(t, err, "EXCHANGE PARTITION on non-partitioned table with materialized view log")
+
+	tk.MustExec(`create materialized view mv (v, cnt, s_id)
+refresh fast
+as
+select v, count(*) as cnt, sum(id) as s_id
+from t_base
+group by v`)
+	tk.MustExec("refresh materialized view mv fast")
+
+	err = tk.ExecToErr("alter table pt exchange partition p0 with table t_base")
+	require.ErrorContains(t, err, "EXCHANGE PARTITION on non-partitioned table with materialized view dependencies")
+}
+
 func TestShowMaterializedViews(t *testing.T) {
 	store, dom := testkit.CreateMockStoreAndDomain(t)
 	tk := testkit.NewTestKit(t, store)
