@@ -888,6 +888,8 @@ func TestPurgeMaterializedViewLogBatchDelete(t *testing.T) {
 	require.NoError(t, err)
 	tk.MustExec("set @@session.tidb_mlog_purge_batch_size = 2")
 	tk.MustExec("purge materialized view log on t_purge_batch_delete")
+	require.Equal(t, uint64(5), tk.Session().AffectedRows())
+	tk.CheckLastMessage("Rows inserted: 0  Updated: 0  Deleted: 5")
 
 	tk.MustQuery("select count(*) from `$mlog$t_purge_batch_delete`").Check(testkit.Rows("0"))
 	tk.MustQuery(fmt.Sprintf("select PURGE_STATUS, PURGE_ROWS from mysql.tidb_mlog_purge_hist where MLOG_ID = %d order by PURGE_JOB_ID desc limit 1", mlogID)).
