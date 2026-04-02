@@ -450,6 +450,24 @@ func TestMaterializedViewRefreshCompleteDeltaApplyStatementResult(t *testing.T) 
 	tk.MustQuery("select * from mv_refresh_result order by a").Check(testkit.Rows("1 11 1", "3 30 1"))
 }
 
+func TestMaterializedViewRefreshCompleteInPlaceStatementResult(t *testing.T) {
+	tk := setupMaterializedViewRefreshStatementResultTest(t)
+	makeMaterializedViewRefreshResultStale(t, tk)
+
+	tk.MustExec("refresh materialized view mv_refresh_result complete in place")
+	requireRefreshMVStatementResult(t, tk, 2, 0, 2)
+	tk.MustQuery("select * from mv_refresh_result order by a").Check(testkit.Rows("1 11 1", "3 30 1"))
+}
+
+func TestMaterializedViewRefreshCompleteOutOfPlaceStatementResult(t *testing.T) {
+	tk := setupMaterializedViewRefreshStatementResultTest(t)
+	makeMaterializedViewRefreshResultStale(t, tk)
+
+	tk.MustExec("refresh materialized view mv_refresh_result complete out of place")
+	requireRefreshMVStatementResult(t, tk, 2, 0, 0)
+	tk.MustQuery("select * from mv_refresh_result order by a").Check(testkit.Rows("1 11 1", "3 30 1"))
+}
+
 func TestProfileMaterializedViewRefreshStepRuntime(t *testing.T) {
 	store, _ := testkit.CreateMockStoreAndDomain(t)
 	tk := testkit.NewTestKit(t, store)

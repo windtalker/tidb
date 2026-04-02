@@ -669,6 +669,13 @@ type mvRefreshStmtResult struct {
 	message      string
 }
 
+func newMVRefreshStmtResultFromWriteCounts(insertRows, updateRows, deleteRows int64) mvRefreshStmtResult {
+	return mvRefreshStmtResult{
+		affectedRows: uint64(insertRows + updateRows + deleteRows),
+		message:      formatMVRefreshWriteResultMessage(insertRows, updateRows, deleteRows),
+	}
+}
+
 func formatMVRefreshWriteResultMessage(insertRows, updateRows, deleteRows int64) string {
 	return fmt.Sprintf(
 		"Rows inserted: %d  Updated: %d  Deleted: %d",
@@ -1587,6 +1594,10 @@ func (e *PurgeMaterializedViewLogExec) executePurgeMaterializedViewLog(
 						errors.Annotate(histErr, "purge materialized view log: purge committed but failed to finalize purge history"),
 					)
 				}
+				applyMVRefreshStmtResult(
+					e.Ctx().GetSessionVars().StmtCtx,
+					newMVRefreshStmtResultFromWriteCounts(0, 0, totalPurgeRows),
+				)
 				e.Ctx().GetSessionVars().StmtCtx.AppendWarning(errors.NewNoStackErrorf(
 					"purge materialized view log on %s.%s stopped before deleting all eligible rows due to lock conflict after deleting %d rows; please retry later",
 					schemaName.O,
@@ -1725,6 +1736,10 @@ func (e *PurgeMaterializedViewLogExec) executePurgeMaterializedViewLog(
 					errors.Annotate(err, "purge materialized view log: purge committed but failed to finalize purge history"),
 				)
 			}
+			applyMVRefreshStmtResult(
+				e.Ctx().GetSessionVars().StmtCtx,
+				newMVRefreshStmtResultFromWriteCounts(0, 0, totalPurgeRows),
+			)
 			return nil
 		}
 	}
@@ -2637,6 +2652,7 @@ func (e *RefreshMaterializedViewExec) executeRefreshMaterializedView(kctx contex
 		if err != nil {
 			return finalizeFailure(err)
 		}
+		refreshStmtResult := captureMVRefreshStmtResult(sessVars)
 		if err := observeMVRefreshStep(e.stepObserver, stepSet.finalizeHist, func() error {
 			refreshEndAt := time.Now()
 			return finalizeRefreshHistWithRetry(
@@ -2656,6 +2672,7 @@ func (e *RefreshMaterializedViewExec) executeRefreshMaterializedView(kctx contex
 				errors.Annotate(err, "refresh materialized view: refresh committed but failed to finalize refresh history"),
 			)
 		}
+		applyMVRefreshStmtResult(e.Ctx().GetSessionVars().StmtCtx, refreshStmtResult)
 		return nil
 	}
 	var scheduleEvalSctx sessionctx.Context
@@ -2856,10 +2873,7 @@ func (e *RefreshMaterializedViewExec) executeRefreshMaterializedView(kctx contex
 		return finalizeFailure(err)
 	}
 	executeDataChangesDur = time.Since(executeDataChangesStart)
-	refreshStmtResult := mvRefreshStmtResult{}
-	if refreshMode == ast.RefreshMaterializedViewModeFast || refreshMode == ast.RefreshMaterializedViewModeCompleteDeltaApply {
-		refreshStmtResult = captureMVRefreshStmtResult(sessVars)
-	}
+	refreshStmtResult := captureMVRefreshStmtResult(sessVars)
 
 	actualRefreshReadTSO, err := getRefreshReadTSOForSuccess(sessVars)
 	if err != nil {
@@ -2923,9 +2937,7 @@ func (e *RefreshMaterializedViewExec) executeRefreshMaterializedView(kctx contex
 	if txnCommitTimerStarted && txnTotalDur == 0 {
 		txnTotalDur = time.Since(txnCommitStart)
 	}
-	if refreshMode == ast.RefreshMaterializedViewModeFast || refreshMode == ast.RefreshMaterializedViewModeCompleteDeltaApply {
-		applyMVRefreshStmtResult(e.Ctx().GetSessionVars().StmtCtx, refreshStmtResult)
-	}
+	applyMVRefreshStmtResult(e.Ctx().GetSessionVars().StmtCtx, refreshStmtResult)
 
 	if err := observeMVRefreshStep(e.stepObserver, stepSet.finalizeHist, func() error {
 		refreshEndAt := time.Now()
@@ -3016,6 +3028,7 @@ func (e *RefreshMaterializedViewExec) executeRefreshMaterializedViewCompleteOutO
 
 	shadowTableName := buildMVRefreshShadowTableName(tblInfo.ID)
 	shadowCreated := false
+	shadowLoadStmtResult := mvRefreshStmtResult{}
 	buildSQLExec := buildSctx.GetSQLExecutor()
 	defer func() {
 		if err == nil || !shadowCreated {
@@ -3091,6 +3104,7 @@ func (e *RefreshMaterializedViewExec) executeRefreshMaterializedViewCompleteOutO
 		if buildErr = executeRefreshMaterializedViewInternalSQL(kctx, buildSQLExec, buildSQL); buildErr != nil {
 			return buildErr
 		}
+		shadowLoadStmtResult = newMVRefreshStmtResultFromWriteCounts(int64(buildSessVars.StmtCtx.AffectedRows()), 0, 0)
 		// Capture profile rows for the real shadow-load statement before any follow-up SQL (for example read tso query)
 		// overwrites session statement context.
 		emitMVRefreshStepPlanRows(e.stepObserver, stepSet.dataChangeOutOfPlaceLoadShadow, buildSessVars, e.planFormatForObserver)
@@ -3161,6 +3175,7 @@ func (e *RefreshMaterializedViewExec) executeRefreshMaterializedViewCompleteOutO
 	}); err != nil {
 		return 0, err
 	}
+	applyMVRefreshStmtResult(refreshSctx.GetSessionVars().StmtCtx, shadowLoadStmtResult)
 	return buildReadTSO, nil
 }
 
@@ -3681,21 +3696,32 @@ func executeRefreshMaterializedViewCompleteInPlace(
 	insertPrefix := sqlescape.MustEscapeSQL("INSERT INTO %n.%n ", schemaName.O, s.ViewName.Name.O)
 	/* #nosec G202: SQLContent is restored from AST (single SELECT statement, no user-provided placeholders). */
 	insertSQL := insertPrefix + tblInfo.MaterializedView.SQLContent
+	deleteRows := int64(0)
 	if err := observeMVRefreshStep(stepObserver, stepSet.dataChangeCompleteDelete, func() error {
 		_, deleteErr := sqlExec.ExecuteInternal(kctx, deleteSQL)
+		if deleteErr == nil && sessVars != nil && sessVars.StmtCtx != nil {
+			deleteRows = int64(sessVars.StmtCtx.AffectedRows())
+		}
 		return deleteErr
 	}); err != nil {
 		return err
 	}
 	emitMVRefreshStepPlanRows(stepObserver, stepSet.dataChangeCompleteDelete, sessVars, explainFormat)
 
+	insertRows := int64(0)
 	if err := observeMVRefreshStep(stepObserver, stepSet.dataChangeCompleteInsert, func() error {
 		_, insertErr := sqlExec.ExecuteInternal(kctx, insertSQL)
+		if insertErr == nil && sessVars != nil && sessVars.StmtCtx != nil {
+			insertRows = int64(sessVars.StmtCtx.AffectedRows())
+		}
 		return insertErr
 	}); err != nil {
 		return err
 	}
 	emitMVRefreshStepPlanRows(stepObserver, stepSet.dataChangeCompleteInsert, sessVars, explainFormat)
+	if sessVars != nil {
+		applyMVRefreshStmtResult(sessVars.StmtCtx, newMVRefreshStmtResultFromWriteCounts(insertRows, 0, deleteRows))
+	}
 	return nil
 }
 
