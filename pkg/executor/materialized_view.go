@@ -574,6 +574,14 @@ func (s *mvCompleteDeltaApplyWriterStats) merge(other mvCompleteDeltaApplyWriter
 	s.deleteRows += other.deleteRows
 }
 
+func (s mvCompleteDeltaApplyWriterStats) affectedRows() uint64 {
+	return uint64(s.insertRows + s.updateRows + s.deleteRows)
+}
+
+func (s mvCompleteDeltaApplyWriterStats) stmtMessage() string {
+	return formatMVRefreshWriteResultMessage(s.insertRows, s.updateRows, s.deleteRows)
+}
+
 type mvCompleteDeltaApplyRuntimeStats struct {
 	writerTime   time.Duration
 	writerDetail mvCompleteDeltaApplyWriterStats
@@ -629,6 +637,38 @@ func (s *mvCompleteDeltaApplyRuntimeStats) Merge(other execdetails.RuntimeStats)
 
 func (*mvCompleteDeltaApplyRuntimeStats) Tp() int {
 	return execdetails.TpMVCompleteDeltaApplyRuntimeStats
+}
+
+type mvRefreshStmtResult struct {
+	affectedRows uint64
+	message      string
+}
+
+func formatMVRefreshWriteResultMessage(insertRows, updateRows, deleteRows int64) string {
+	return fmt.Sprintf(
+		"Rows inserted: %d  Updated: %d  Deleted: %d",
+		insertRows,
+		updateRows,
+		deleteRows,
+	)
+}
+
+func captureMVRefreshStmtResult(sessVars *variable.SessionVars) mvRefreshStmtResult {
+	if sessVars == nil || sessVars.StmtCtx == nil {
+		return mvRefreshStmtResult{}
+	}
+	return mvRefreshStmtResult{
+		affectedRows: sessVars.StmtCtx.AffectedRows(),
+		message:      sessVars.StmtCtx.GetMessage(),
+	}
+}
+
+func applyMVRefreshStmtResult(stmtCtx *stmtctx.StatementContext, result mvRefreshStmtResult) {
+	if stmtCtx == nil {
+		return
+	}
+	stmtCtx.SetAffectedRows(result.affectedRows)
+	stmtCtx.SetMessage(result.message)
 }
 
 // Open implements the Executor interface.
@@ -705,6 +745,7 @@ func (e *MVCompleteDeltaApplyExec) Next(ctx context.Context, req *chunk.Chunk) e
 	if insertSizeHintStep <= 0 {
 		insertSizeHintStep = 1
 	}
+	var stmtWriterDetail mvCompleteDeltaApplyWriterStats
 
 	for {
 		e.childChunk.Reset()
@@ -712,13 +753,17 @@ func (e *MVCompleteDeltaApplyExec) Next(ctx context.Context, req *chunk.Chunk) e
 			return err
 		}
 		if e.childChunk.NumRows() == 0 {
+			applyMVRefreshStmtResult(stmtCtx, mvRefreshStmtResult{
+				affectedRows: stmtWriterDetail.affectedRows(),
+				message:      stmtWriterDetail.stmtMessage(),
+			})
 			return nil
 		}
 		writeStart := time.Time{}
 		if e.runtimeStats != nil {
 			writeStart = time.Now()
 		}
-		if err := e.applyChunk(txn, tableCtx, stmtCtx, insertSizeHintStep, e.childChunk); err != nil {
+		if err := e.applyChunk(txn, tableCtx, stmtCtx, insertSizeHintStep, e.childChunk, &stmtWriterDetail); err != nil {
 			return err
 		}
 		if e.runtimeStats != nil {
@@ -751,6 +796,7 @@ func (e *MVCompleteDeltaApplyExec) applyChunk(
 	stmtCtx *stmtctx.StatementContext,
 	insertSizeHintStep int,
 	input *chunk.Chunk,
+	stmtWriterStats *mvCompleteDeltaApplyWriterStats,
 ) error {
 	ops := input.Column(e.OpColID).Int64s()[:input.NumRows()]
 	insertRemain, err := e.collectChunkUpdateRows(ops)
@@ -760,16 +806,18 @@ func (e *MVCompleteDeltaApplyExec) applyChunk(
 	if err := e.markChunkUpdateTouchedColumns(input); err != nil {
 		return err
 	}
-	var writerStats *mvCompleteDeltaApplyWriterStats
-	var writerStatsDelta mvCompleteDeltaApplyWriterStats
-	if e.runtimeStats != nil {
-		writerStats = &e.runtimeStats.writerDetail
-		writerStatsDelta.chunks = 1
-		writerStatsDelta.rowOps = int64(input.NumRows())
-		defer func() {
-			writerStats.merge(writerStatsDelta)
-		}()
+	writerStatsDelta := mvCompleteDeltaApplyWriterStats{
+		chunks: 1,
+		rowOps: int64(input.NumRows()),
 	}
+	defer func() {
+		if stmtWriterStats != nil {
+			stmtWriterStats.merge(writerStatsDelta)
+		}
+		if e.runtimeStats != nil {
+			e.runtimeStats.writerDetail.merge(writerStatsDelta)
+		}
+	}()
 
 	insertOrdinal := 0
 	updateOrdinal := 0
@@ -2666,6 +2714,10 @@ func (e *RefreshMaterializedViewExec) executeRefreshMaterializedView(kctx contex
 		return finalizeFailure(err)
 	}
 	executeDataChangesDur = time.Since(executeDataChangesStart)
+	refreshStmtResult := mvRefreshStmtResult{}
+	if refreshMode == ast.RefreshMaterializedViewModeFast || refreshMode == ast.RefreshMaterializedViewModeCompleteDeltaApply {
+		refreshStmtResult = captureMVRefreshStmtResult(sessVars)
+	}
 
 	actualRefreshReadTSO, err := getRefreshReadTSOForSuccess(sessVars)
 	if err != nil {
@@ -2728,6 +2780,9 @@ func (e *RefreshMaterializedViewExec) executeRefreshMaterializedView(kctx contex
 	txnFinished = true
 	if txnCommitTimerStarted && txnTotalDur == 0 {
 		txnTotalDur = time.Since(txnCommitStart)
+	}
+	if refreshMode == ast.RefreshMaterializedViewModeFast || refreshMode == ast.RefreshMaterializedViewModeCompleteDeltaApply {
+		applyMVRefreshStmtResult(e.Ctx().GetSessionVars().StmtCtx, refreshStmtResult)
 	}
 
 	if err := observeMVRefreshStep(e.stepObserver, stepSet.finalizeHist, func() error {

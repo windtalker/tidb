@@ -167,6 +167,40 @@ func mustExecCompleteDeltaApplyImplementStmt(t *testing.T, tk *testkit.TestKit, 
 	mustExecRefreshImplementStmt(t, tk, buildCompleteDeltaApplyImplementStmt(schema, view))
 }
 
+func refreshMVStatementResultMessage(insertRows, updateRows, deleteRows int64) string {
+	return fmt.Sprintf(
+		"Rows inserted: %d  Updated: %d  Deleted: %d",
+		insertRows,
+		updateRows,
+		deleteRows,
+	)
+}
+
+func requireRefreshMVStatementResult(t *testing.T, tk *testkit.TestKit, insertRows, updateRows, deleteRows int64) {
+	t.Helper()
+	require.Equal(t, uint64(insertRows+updateRows+deleteRows), tk.Session().AffectedRows())
+	tk.CheckLastMessage(refreshMVStatementResultMessage(insertRows, updateRows, deleteRows))
+}
+
+func setupMaterializedViewRefreshStatementResultTest(t *testing.T) *testkit.TestKit {
+	t.Helper()
+	store, _ := testkit.CreateMockStoreAndDomain(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("create table t_mv_refresh_result (a int primary key, b int not null)")
+	tk.MustExec("insert into t_mv_refresh_result values (1, 10), (2, 20)")
+	tk.MustExec("create materialized view log on t_mv_refresh_result (a, b) purge next date_add(now(), interval 1 hour)")
+	tk.MustExec("create materialized view mv_refresh_result (a, s, cnt) refresh fast next date_add(now(), interval 1 hour) as select a, sum(b), count(1) from t_mv_refresh_result group by a")
+	return tk
+}
+
+func makeMaterializedViewRefreshResultStale(t *testing.T, tk *testkit.TestKit) {
+	t.Helper()
+	tk.MustExec("update t_mv_refresh_result set b = 11 where a = 1")
+	tk.MustExec("delete from t_mv_refresh_result where a = 2")
+	tk.MustExec("insert into t_mv_refresh_result values (3, 30)")
+}
+
 func TestMaterializedViewRefreshCompleteBasic(t *testing.T) {
 	store, dom := testkit.CreateMockStoreAndDomain(t)
 	tk := testkit.NewTestKit(t, store)
@@ -209,6 +243,43 @@ func TestMaterializedViewRefreshCompleteBasic(t *testing.T) {
 		Check(testkit.Rows("1"))
 	tk.MustQuery(fmt.Sprintf("select REFRESH_STATUS, REFRESH_METHOD, REFRESH_ENDTIME is not null, REFRESH_ROWS is null, REFRESH_READ_TSO > 0, REFRESH_FAILED_REASON is null from mysql.tidb_mview_refresh_hist where MVIEW_ID = %d", mviewID)).
 		Check(testkit.Rows("success complete delta apply manual 1 1 1 1"))
+}
+
+func TestMaterializedViewRefreshFastStatementResult(t *testing.T) {
+	tk := setupMaterializedViewRefreshStatementResultTest(t)
+	makeMaterializedViewRefreshResultStale(t, tk)
+
+	tk.MustExec("refresh materialized view mv_refresh_result fast")
+	requireRefreshMVStatementResult(t, tk, 1, 1, 1)
+	tk.MustQuery("select * from mv_refresh_result order by a").Check(testkit.Rows("1 11 1", "3 30 1"))
+}
+
+func TestMaterializedViewRefreshFastAsOfTimestampStatementResult(t *testing.T) {
+	tk := setupMaterializedViewRefreshStatementResultTest(t)
+	tk.MustExec("set time_zone = '+00:00'")
+	makeMaterializedViewRefreshResultStale(t, tk)
+	targetTime := time.Now().UTC().Add(50 * time.Millisecond).Truncate(time.Millisecond)
+	sleepUntilTarget := time.Until(targetTime.Add(20 * time.Millisecond))
+	if sleepUntilTarget > 0 {
+		time.Sleep(sleepUntilTarget)
+	}
+	mustSetMockGCSafePoint(t, tk, targetTime.Add(-time.Hour))
+
+	tk.MustExec(fmt.Sprintf(
+		"refresh materialized view mv_refresh_result fast as of timestamp '%s'",
+		targetTime.Format("2006-01-02 15:04:05.000"),
+	))
+	requireRefreshMVStatementResult(t, tk, 1, 1, 1)
+	tk.MustQuery("select * from mv_refresh_result order by a").Check(testkit.Rows("1 11 1", "3 30 1"))
+}
+
+func TestMaterializedViewRefreshCompleteDeltaApplyStatementResult(t *testing.T) {
+	tk := setupMaterializedViewRefreshStatementResultTest(t)
+	makeMaterializedViewRefreshResultStale(t, tk)
+
+	tk.MustExec("refresh materialized view mv_refresh_result complete delta apply")
+	requireRefreshMVStatementResult(t, tk, 1, 1, 1)
+	tk.MustQuery("select * from mv_refresh_result order by a").Check(testkit.Rows("1 11 1", "3 30 1"))
 }
 
 func TestProfileMaterializedViewRefreshStepRuntime(t *testing.T) {
