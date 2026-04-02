@@ -3225,6 +3225,9 @@ func validateRefreshMaterializedViewStmt(s *ast.RefreshMaterializedViewStmt, isI
 	case ast.RefreshMaterializedViewModeFast:
 		// Framework is supported; actual execution happens via RefreshMaterializedViewImplementStmt.
 		methodType = "fast"
+		if s.AsOf != nil {
+			methodType = "bounded fast"
+		}
 	case ast.RefreshMaterializedViewModeCompleteDeltaApply:
 		methodType = "complete delta apply"
 	case ast.RefreshMaterializedViewModeCompleteInPlace:
