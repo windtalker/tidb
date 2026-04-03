@@ -332,7 +332,20 @@ partition by range (id) (
 	tk.MustExec("insert into pt values (1, 1), (2, 2), (101, 1001), (102, 1002)")
 
 	tk.MustExec("create materialized view log on t_base (id, v)")
-	err := tk.ExecToErr("alter table pt exchange partition p0 with table t_base")
+	tk.MustExec(`create table pt_mlog (
+  id bigint not null,
+  v int not null,
+  _MLOG$_DML_TYPE varchar(1) not null,
+  _MLOG$_OLD_NEW tinyint not null
+)
+partition by range (v) (
+  partition p0 values less than (100),
+  partition p1 values less than maxvalue
+)`)
+	err := tk.ExecToErr("alter table pt_mlog exchange partition p0 with table `$mlog$t_base`")
+	require.ErrorContains(t, err, "EXCHANGE PARTITION on non-partitioned table with materialized view log")
+
+	err = tk.ExecToErr("alter table pt exchange partition p0 with table t_base")
 	require.ErrorContains(t, err, "EXCHANGE PARTITION on non-partitioned table with materialized view log")
 
 	tk.MustExec(`create materialized view mv (v, cnt, s_id)
@@ -345,6 +358,36 @@ group by v`)
 
 	err = tk.ExecToErr("alter table pt exchange partition p0 with table t_base")
 	require.ErrorContains(t, err, "EXCHANGE PARTITION on non-partitioned table with materialized view dependencies")
+}
+
+func TestAlterTablePartitioningRejectsMaterializedViewBaseTable(t *testing.T) {
+	store := testkit.CreateMockStore(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+
+	tk.MustExec(`create table t_base (
+  id bigint not null,
+  v int not null
+)`)
+	tk.MustExec("create materialized view log on t_base (id, v)")
+	err := tk.ExecToErr(`alter table t_base
+partition by range (id) (
+  partition p0 values less than (100),
+  partition p1 values less than maxvalue
+)`)
+	require.ErrorContains(t, err, "ALTER TABLE ... PARTITION BY with materialized view log")
+
+	tk.MustExec(`create table t_base_part (
+  id bigint not null,
+  v int not null
+)
+partition by range (id) (
+  partition p0 values less than (100),
+  partition p1 values less than maxvalue
+)`)
+	tk.MustExec("create materialized view log on t_base_part (id, v)")
+	err = tk.ExecToErr("alter table t_base_part remove partitioning")
+	require.ErrorContains(t, err, "ALTER TABLE ... REMOVE PARTITIONING with materialized view log")
 }
 
 func TestShowMaterializedViews(t *testing.T) {
