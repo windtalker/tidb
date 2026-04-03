@@ -52,208 +52,60 @@ const (
 	alterMaterializedScheduleInfoUpdateLockWaitTimeoutSec = int64(10)
 )
 
-// CaptureMViewExecutionSessionVars captures the user-facing MV execution knobs that should be
-// inherited by a later MV build/refresh job.
-//
-// Most fields are copied 1:1 from the current session. MaintainMemQuota is intentionally captured
-// from tidb_mv_maintain_mem_quota, because this helper describes the requested execution policy
-// rather than the session's already-applied runtime state.
-func CaptureMViewExecutionSessionVars(sessVars *variable.SessionVars) variable.MViewExecutionSessionVars {
-	if sessVars == nil {
-		return variable.MViewExecutionSessionVars{}
-	}
-	return variable.MViewExecutionSessionVars{
-		MaintainMemQuota:             sessVars.MVMaintainMemQuota,
-		TiFlashMaxThreads:            sessVars.TiFlashMaxThreads,
-		TiFlashMaxBytesBeforeExtJoin: sessVars.TiFlashMaxBytesBeforeExternalJoin,
-		TiFlashMaxBytesBeforeExtAgg:  sessVars.TiFlashMaxBytesBeforeExternalGroupBy,
-		TiFlashMaxBytesBeforeExtSort: sessVars.TiFlashMaxBytesBeforeExternalSort,
-		TiFlashMemQuotaQueryPerNode:  sessVars.TiFlashMaxQueryMemoryPerNode,
-		TiFlashQuerySpillRatio:       sessVars.TiFlashQuerySpillRatio,
-		FineGrainedStreamCount:       sessVars.TiFlashFineGrainedShuffleStreamCount,
-		FineGrainedBatchSize:         sessVars.TiFlashFineGrainedShuffleBatchSize,
-		ImportThreads:                sessVars.MViewMaintainImportThreads,
-		ImportDiskQuota:              sessVars.MViewMaintainImportDiskQuota,
-	}
-}
-
-// captureAppliedMViewExecutionSessionVars captures the execution-related values that are currently
-// in effect on a session after MV execution vars have been applied.
-//
-// It looks almost the same as CaptureMViewExecutionSessionVars on purpose: restore logic wants the
-// concrete runtime state, not the original user-facing setting. The important difference is
-// MaintainMemQuota: MV execution applies tidb_mv_maintain_mem_quota onto tidb_mem_quota_query, so
-// the "applied" snapshot must read MemQuotaQuery instead of MVMaintainMemQuota.
-func captureAppliedMViewExecutionSessionVars(sessVars *variable.SessionVars) variable.MViewExecutionSessionVars {
-	if sessVars == nil {
-		return variable.MViewExecutionSessionVars{}
-	}
-	return variable.MViewExecutionSessionVars{
-		MaintainMemQuota:             sessVars.MemQuotaQuery,
-		TiFlashMaxThreads:            sessVars.TiFlashMaxThreads,
-		TiFlashMaxBytesBeforeExtJoin: sessVars.TiFlashMaxBytesBeforeExternalJoin,
-		TiFlashMaxBytesBeforeExtAgg:  sessVars.TiFlashMaxBytesBeforeExternalGroupBy,
-		TiFlashMaxBytesBeforeExtSort: sessVars.TiFlashMaxBytesBeforeExternalSort,
-		TiFlashMemQuotaQueryPerNode:  sessVars.TiFlashMaxQueryMemoryPerNode,
-		TiFlashQuerySpillRatio:       sessVars.TiFlashQuerySpillRatio,
-		FineGrainedStreamCount:       sessVars.TiFlashFineGrainedShuffleStreamCount,
-		FineGrainedBatchSize:         sessVars.TiFlashFineGrainedShuffleBatchSize,
-		ImportThreads:                sessVars.MViewMaintainImportThreads,
-		ImportDiskQuota:              sessVars.MViewMaintainImportDiskQuota,
-	}
-}
-
 // ApplyMViewExecutionSessionVars applies MV execution vars onto a session and returns a restore closure.
 func ApplyMViewExecutionSessionVars(sessVars *variable.SessionVars, target variable.MViewExecutionSessionVars) (func(), error) {
-	if sessVars == nil {
-		return nil, errors.New("mv execution: session vars is nil")
-	}
-
-	// Restore needs the session's real runtime values. This is different from
-	// CaptureMViewExecutionSessionVars(), which describes the target MV execution policy.
-	origin := captureAppliedMViewExecutionSessionVars(sessVars)
-	if origin == target {
-		return func() {}, nil
-	}
-
-	if err := sessVars.SetSystemVar(variable.TiDBMemQuotaQuery, strconv.FormatInt(target.MaintainMemQuota, 10)); err != nil {
-		return nil, errors.Annotate(err, "mv execution: failed to apply tidb_mv_maintain_mem_quota to tidb_mem_quota_query")
-	}
-	if err := sessVars.SetSystemVar(variable.TiDBMaxTiFlashThreads, strconv.FormatInt(target.TiFlashMaxThreads, 10)); err != nil {
-		restoreMViewExecutionSessionVars(sessVars, origin, captureAppliedMViewExecutionSessionVars(sessVars))
-		return nil, errors.Annotate(err, "mv execution: failed to apply tidb_max_tiflash_threads")
-	}
-	if err := sessVars.SetSystemVar(variable.TiDBMaxBytesBeforeTiFlashExternalJoin, strconv.FormatInt(target.TiFlashMaxBytesBeforeExtJoin, 10)); err != nil {
-		restoreMViewExecutionSessionVars(sessVars, origin, captureAppliedMViewExecutionSessionVars(sessVars))
-		return nil, errors.Annotate(err, "mv execution: failed to apply tidb_max_bytes_before_tiflash_external_join")
-	}
-	if err := sessVars.SetSystemVar(variable.TiDBMaxBytesBeforeTiFlashExternalGroupBy, strconv.FormatInt(target.TiFlashMaxBytesBeforeExtAgg, 10)); err != nil {
-		restoreMViewExecutionSessionVars(sessVars, origin, captureAppliedMViewExecutionSessionVars(sessVars))
-		return nil, errors.Annotate(err, "mv execution: failed to apply tidb_max_bytes_before_tiflash_external_group_by")
-	}
-	if err := sessVars.SetSystemVar(variable.TiDBMaxBytesBeforeTiFlashExternalSort, strconv.FormatInt(target.TiFlashMaxBytesBeforeExtSort, 10)); err != nil {
-		restoreMViewExecutionSessionVars(sessVars, origin, captureAppliedMViewExecutionSessionVars(sessVars))
-		return nil, errors.Annotate(err, "mv execution: failed to apply tidb_max_bytes_before_tiflash_external_sort")
-	}
-	if err := sessVars.SetSystemVar(variable.TiFlashMemQuotaQueryPerNode, strconv.FormatInt(target.TiFlashMemQuotaQueryPerNode, 10)); err != nil {
-		restoreMViewExecutionSessionVars(sessVars, origin, captureAppliedMViewExecutionSessionVars(sessVars))
-		return nil, errors.Annotate(err, "mv execution: failed to apply tiflash_mem_quota_query_per_node")
-	}
-	if err := sessVars.SetSystemVar(variable.TiFlashQuerySpillRatio, strconv.FormatFloat(target.TiFlashQuerySpillRatio, 'f', -1, 64)); err != nil {
-		restoreMViewExecutionSessionVars(sessVars, origin, captureAppliedMViewExecutionSessionVars(sessVars))
-		return nil, errors.Annotate(err, "mv execution: failed to apply tiflash_query_spill_ratio")
-	}
-	if err := sessVars.SetSystemVar(variable.TiFlashFineGrainedShuffleStreamCount, strconv.FormatInt(target.FineGrainedStreamCount, 10)); err != nil {
-		restoreMViewExecutionSessionVars(sessVars, origin, captureAppliedMViewExecutionSessionVars(sessVars))
-		return nil, errors.Annotate(err, "mv execution: failed to apply tiflash_fine_grained_shuffle_stream_count")
-	}
-	if err := sessVars.SetSystemVar(variable.TiFlashFineGrainedShuffleBatchSize, strconv.FormatUint(target.FineGrainedBatchSize, 10)); err != nil {
-		restoreMViewExecutionSessionVars(sessVars, origin, captureAppliedMViewExecutionSessionVars(sessVars))
-		return nil, errors.Annotate(err, "mv execution: failed to apply tiflash_fine_grained_shuffle_batch_size")
-	}
-	if err := sessVars.SetSystemVar(variable.TiDBMViewMaintainImportThreads, strconv.Itoa(target.ImportThreads)); err != nil {
-		restoreMViewExecutionSessionVars(sessVars, origin, captureAppliedMViewExecutionSessionVars(sessVars))
-		return nil, errors.Annotate(err, "mv execution: failed to apply tidb_mview_maintain_import_threads")
-	}
-	if err := sessVars.SetSystemVar(variable.TiDBMViewMaintainImportDiskQuota, target.ImportDiskQuota); err != nil {
-		restoreMViewExecutionSessionVars(sessVars, origin, captureAppliedMViewExecutionSessionVars(sessVars))
-		return nil, errors.Annotate(err, "mv execution: failed to apply tidb_mview_maintain_import_disk_quota")
-	}
-
-	return func() {
-		restoreMViewExecutionSessionVars(sessVars, origin, target)
-	}, nil
+	return applyMViewExecutionSessionVars(sessVars, target, false)
 }
 
-func restoreMViewExecutionSessionVars(sessVars *variable.SessionVars, origin, current variable.MViewExecutionSessionVars) {
-	if err := sessVars.SetSystemVar(variable.TiDBMemQuotaQuery, strconv.FormatInt(origin.MaintainMemQuota, 10)); err != nil {
-		logutil.DDLLogger().Warn(
-			"mv execution: failed to restore tidb_mem_quota_query",
-			zap.Int64("originMemQuotaQuery", origin.MaintainMemQuota),
-			zap.Int64("currentMemQuotaQuery", current.MaintainMemQuota),
-			zap.Error(err),
-		)
-	}
-	if err := sessVars.SetSystemVar(variable.TiDBMaxTiFlashThreads, strconv.FormatInt(origin.TiFlashMaxThreads, 10)); err != nil {
-		logutil.DDLLogger().Warn(
-			"mv execution: failed to restore tidb_max_tiflash_threads",
-			zap.Int64("originMaxThreads", origin.TiFlashMaxThreads),
-			zap.Int64("currentMaxThreads", current.TiFlashMaxThreads),
-			zap.Error(err),
-		)
-	}
-	if err := sessVars.SetSystemVar(variable.TiDBMaxBytesBeforeTiFlashExternalJoin, strconv.FormatInt(origin.TiFlashMaxBytesBeforeExtJoin, 10)); err != nil {
-		logutil.DDLLogger().Warn(
-			"mv execution: failed to restore tidb_max_bytes_before_tiflash_external_join",
-			zap.Int64("originMaxBytesBeforeExternalJoin", origin.TiFlashMaxBytesBeforeExtJoin),
-			zap.Int64("currentMaxBytesBeforeExternalJoin", current.TiFlashMaxBytesBeforeExtJoin),
-			zap.Error(err),
-		)
-	}
-	if err := sessVars.SetSystemVar(variable.TiDBMaxBytesBeforeTiFlashExternalGroupBy, strconv.FormatInt(origin.TiFlashMaxBytesBeforeExtAgg, 10)); err != nil {
-		logutil.DDLLogger().Warn(
-			"mv execution: failed to restore tidb_max_bytes_before_tiflash_external_group_by",
-			zap.Int64("originMaxBytesBeforeExternalGroupBy", origin.TiFlashMaxBytesBeforeExtAgg),
-			zap.Int64("currentMaxBytesBeforeExternalGroupBy", current.TiFlashMaxBytesBeforeExtAgg),
-			zap.Error(err),
-		)
-	}
-	if err := sessVars.SetSystemVar(variable.TiDBMaxBytesBeforeTiFlashExternalSort, strconv.FormatInt(origin.TiFlashMaxBytesBeforeExtSort, 10)); err != nil {
-		logutil.DDLLogger().Warn(
-			"mv execution: failed to restore tidb_max_bytes_before_tiflash_external_sort",
-			zap.Int64("originMaxBytesBeforeExternalSort", origin.TiFlashMaxBytesBeforeExtSort),
-			zap.Int64("currentMaxBytesBeforeExternalSort", current.TiFlashMaxBytesBeforeExtSort),
-			zap.Error(err),
-		)
-	}
-	if err := sessVars.SetSystemVar(variable.TiFlashMemQuotaQueryPerNode, strconv.FormatInt(origin.TiFlashMemQuotaQueryPerNode, 10)); err != nil {
-		logutil.DDLLogger().Warn(
-			"mv execution: failed to restore tiflash_mem_quota_query_per_node",
-			zap.Int64("originMemQuotaQueryPerNode", origin.TiFlashMemQuotaQueryPerNode),
-			zap.Int64("currentMemQuotaQueryPerNode", current.TiFlashMemQuotaQueryPerNode),
-			zap.Error(err),
-		)
-	}
-	if err := sessVars.SetSystemVar(variable.TiFlashQuerySpillRatio, strconv.FormatFloat(origin.TiFlashQuerySpillRatio, 'f', -1, 64)); err != nil {
-		logutil.DDLLogger().Warn(
-			"mv execution: failed to restore tiflash_query_spill_ratio",
-			zap.Float64("originQuerySpillRatio", origin.TiFlashQuerySpillRatio),
-			zap.Float64("currentQuerySpillRatio", current.TiFlashQuerySpillRatio),
-			zap.Error(err),
-		)
-	}
-	if err := sessVars.SetSystemVar(variable.TiFlashFineGrainedShuffleStreamCount, strconv.FormatInt(origin.FineGrainedStreamCount, 10)); err != nil {
-		logutil.DDLLogger().Warn(
-			"mv execution: failed to restore tiflash_fine_grained_shuffle_stream_count",
-			zap.Int64("originFineGrainedStreamCount", origin.FineGrainedStreamCount),
-			zap.Int64("currentFineGrainedStreamCount", current.FineGrainedStreamCount),
-			zap.Error(err),
-		)
-	}
-	if err := sessVars.SetSystemVar(variable.TiFlashFineGrainedShuffleBatchSize, strconv.FormatUint(origin.FineGrainedBatchSize, 10)); err != nil {
-		logutil.DDLLogger().Warn(
-			"mv execution: failed to restore tiflash_fine_grained_shuffle_batch_size",
-			zap.Uint64("originFineGrainedBatchSize", origin.FineGrainedBatchSize),
-			zap.Uint64("currentFineGrainedBatchSize", current.FineGrainedBatchSize),
-			zap.Error(err),
-		)
-	}
-	if err := sessVars.SetSystemVar(variable.TiDBMViewMaintainImportThreads, strconv.Itoa(origin.ImportThreads)); err != nil {
-		logutil.DDLLogger().Warn(
-			"mv execution: failed to restore tidb_mview_maintain_import_threads",
-			zap.Int("originImportThreads", origin.ImportThreads),
-			zap.Int("currentImportThreads", current.ImportThreads),
-			zap.Error(err),
-		)
-	}
-	if err := sessVars.SetSystemVar(variable.TiDBMViewMaintainImportDiskQuota, origin.ImportDiskQuota); err != nil {
-		logutil.DDLLogger().Warn(
-			"mv execution: failed to restore tidb_mview_maintain_import_disk_quota",
-			zap.String("originImportDiskQuota", origin.ImportDiskQuota),
-			zap.String("currentImportDiskQuota", current.ImportDiskQuota),
-			zap.Error(err),
-		)
-	}
+// ApplyMViewExecutionSessionVarsBestEffort applies MV execution vars onto a session and falls back
+// to the session's current value for any individual variable that fails to apply.
+func ApplyMViewExecutionSessionVarsBestEffort(sessVars *variable.SessionVars, target variable.MViewExecutionSessionVars) (func(), error) {
+	return applyMViewExecutionSessionVars(sessVars, target, true)
+}
+
+func applyMViewExecutionSessionVars(
+	sessVars *variable.SessionVars,
+	target variable.MViewExecutionSessionVars,
+	bestEffort bool,
+) (func(), error) {
+	return variable.ApplyMViewExecutionSessionVarsWithConfig(
+		sessVars,
+		target,
+		variable.MViewExecutionSessionVarsApplyConfig{
+			MaintainMemQuotaVarName: variable.TiDBMemQuotaQuery,
+			CaptureAppliedVars:      variable.CaptureAppliedMViewExecutionSessionVars,
+			BestEffort:              bestEffort,
+			InjectApplyError:        maybeMockMViewExecutionSessionVarApplyError,
+			OnApplyError: func(name, value string, err error) {
+				logutil.DDLLogger().Warn(
+					"mv execution: failed to apply session var, fallback to current session value",
+					zap.String("var", name),
+					zap.String("value", value),
+					zap.Error(err),
+				)
+			},
+			OnRestoreError: func(name, originValue, currentValue string, err error) {
+				logutil.DDLLogger().Warn(
+					"mv execution: failed to restore session var",
+					zap.String("var", name),
+					zap.String("origin", originValue),
+					zap.String("current", currentValue),
+					zap.Error(err),
+				)
+			},
+		},
+	)
+}
+
+func maybeMockMViewExecutionSessionVarApplyError(varName string) error {
+	var err error
+	failpoint.Inject("mockMViewExecutionSessionVarApplyError", func(val failpoint.Value) {
+		targetVar, ok := val.(string)
+		if ok && targetVar == varName {
+			err = errors.Errorf("mock mv execution session var apply error: %s", varName)
+		}
+	})
+	return err
 }
 
 // AddMViewExecutionSessionVarsToJob snapshots MV execution vars into the DDL job.
@@ -264,7 +116,7 @@ func AddMViewExecutionSessionVarsToJob(job *model.Job, sessVars *variable.Sessio
 	if job.SessionVars == nil {
 		job.SessionVars = make(map[string]string)
 	}
-	target := CaptureMViewExecutionSessionVars(sessVars)
+	target := variable.CaptureMViewExecutionSessionVars(sessVars)
 	job.AddSessionVars(variable.TiDBMVMaintainMemQuota, strconv.FormatInt(target.MaintainMemQuota, 10))
 	job.AddSessionVars(variable.TiDBMaxTiFlashThreads, strconv.FormatInt(target.TiFlashMaxThreads, 10))
 	job.AddSessionVars(variable.TiDBMaxBytesBeforeTiFlashExternalJoin, strconv.FormatInt(target.TiFlashMaxBytesBeforeExtJoin, 10))
@@ -280,7 +132,7 @@ func AddMViewExecutionSessionVarsToJob(job *model.Job, sessVars *variable.Sessio
 
 // MViewExecutionSessionVarsFromJob reconstructs MV execution vars from a DDL job.
 func MViewExecutionSessionVarsFromJob(job *model.Job, defaultSessVars *variable.SessionVars) (variable.MViewExecutionSessionVars, error) {
-	target := captureAppliedMViewExecutionSessionVars(defaultSessVars)
+	target := variable.CaptureAppliedMViewExecutionSessionVars(defaultSessVars)
 	if job == nil {
 		return target, nil
 	}

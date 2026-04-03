@@ -558,6 +558,50 @@ func TestMaterializedViewRefreshInternalSQLFallsBackWhenApplyExecutionSessionVar
 	tk.MustQuery("select * from mv_mv_refresh_apply_vars_internal order by a").Check(testkit.Rows("1 10 1", "2 20 1", "3 30 1"))
 }
 
+func TestMaterializedViewRefreshManualSQLFailsWhenSingleExecutionSessionVarApplyFails(t *testing.T) {
+	store := testkit.CreateMockStore(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("create table t_mv_refresh_single_apply_var_manual (a int not null, b int not null)")
+	tk.MustExec("insert into t_mv_refresh_single_apply_var_manual values (1, 10), (2, 20)")
+	tk.MustExec("create materialized view log on t_mv_refresh_single_apply_var_manual (a, b) purge next date_add(now(), interval 1 hour)")
+	tk.MustExec("create materialized view mv_mv_refresh_single_apply_var_manual (a, s, cnt) refresh fast next date_add(now(), interval 1 hour) as select a, sum(b), count(1) from t_mv_refresh_single_apply_var_manual group by a")
+	prepareRefreshTiFlashSessionVarsForTest(t, tk)
+
+	failpointName := "github.com/pingcap/tidb/pkg/ddl/mockMViewExecutionSessionVarApplyError"
+	require.NoError(t, failpoint.Enable(failpointName, fmt.Sprintf("return(%q)", variable.TiDBMaxTiFlashThreads)))
+	t.Cleanup(func() {
+		require.NoError(t, failpoint.Disable(failpointName))
+	})
+
+	err := tk.ExecToErr("refresh materialized view mv_mv_refresh_single_apply_var_manual complete")
+	require.ErrorContains(t, err, variable.TiDBMaxTiFlashThreads)
+}
+
+func TestMaterializedViewRefreshInternalSQLFallsBackPerVarWhenExecutionSessionVarApplyFails(t *testing.T) {
+	store := testkit.CreateMockStore(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("create table t_mv_refresh_single_apply_var_internal (a int not null, b int not null)")
+	tk.MustExec("insert into t_mv_refresh_single_apply_var_internal values (1, 10), (2, 20)")
+	tk.MustExec("create materialized view log on t_mv_refresh_single_apply_var_internal (a, b) purge next date_add(now(), interval 1 hour)")
+	tk.MustExec("create materialized view mv_mv_refresh_single_apply_var_internal (a, s, cnt) refresh fast next date_add(now(), interval 1 hour) as select a, sum(b), count(1) from t_mv_refresh_single_apply_var_internal group by a")
+	prepareRefreshTiFlashSessionVarsForTest(t, tk)
+
+	failpointName := "github.com/pingcap/tidb/pkg/ddl/mockMViewExecutionSessionVarApplyError"
+	require.NoError(t, failpoint.Enable(failpointName, fmt.Sprintf("return(%q)", variable.TiDBMaxTiFlashThreads)))
+	t.Cleanup(func() {
+		require.NoError(t, failpoint.Disable(failpointName))
+	})
+
+	tk.MustExec("insert into t_mv_refresh_single_apply_var_internal values (3, 30)")
+	requireRefreshTiFlashSessionVarsApplied(t, func() {
+		mustExecInternal(t, tk, "refresh materialized view mv_mv_refresh_single_apply_var_internal complete")
+	}, int64(variable.DefTiFlashMaxThreads), int64(101), int64(202), int64(303), int64(404), float64(0.75), int64(16), uint64(4096))
+	tk.MustQuery("select * from mv_mv_refresh_single_apply_var_internal order by a").Check(testkit.Rows("1 10 1", "2 20 1", "3 30 1"))
+	requireCurrentSessionTiFlashSessionVarsRestored(t, tk.Session().GetSessionVars())
+}
+
 func TestMaterializedViewRefreshInternalSQLOutOfPlaceFallsBackWhenApplyExecutionSessionVarsFails(t *testing.T) {
 	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
@@ -576,6 +620,36 @@ func TestMaterializedViewRefreshInternalSQLOutOfPlaceFallsBackWhenApplyExecution
 	tk.MustExec("insert into t_mv_refresh_apply_vars_internal_oop values (3, 30)")
 	mustExecInternal(t, tk, "refresh materialized view mv_mv_refresh_apply_vars_internal_oop complete out of place")
 	tk.MustQuery("select * from mv_mv_refresh_apply_vars_internal_oop order by a").Check(testkit.Rows("1 10 1", "2 20 1", "3 30 1"))
+}
+
+func TestMaterializedViewRefreshInternalSQLOutOfPlaceFallsBackPerVarWhenExecutionSessionVarApplyFails(t *testing.T) {
+	store := testkit.CreateMockStore(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("create table t_mv_refresh_single_apply_var_internal_oop (a int not null, b int not null)")
+	tk.MustExec("insert into t_mv_refresh_single_apply_var_internal_oop values (1, 10), (2, 20)")
+	tk.MustExec("create materialized view log on t_mv_refresh_single_apply_var_internal_oop (a, b) purge next date_add(now(), interval 1 hour)")
+	tk.MustExec("create materialized view mv_mv_refresh_single_apply_var_internal_oop (a, s, cnt) refresh fast next date_add(now(), interval 1 hour) as select a, sum(b), count(1) from t_mv_refresh_single_apply_var_internal_oop group by a")
+	prepareRefreshTiFlashSessionVarsForTest(t, tk)
+
+	failpointName := "github.com/pingcap/tidb/pkg/ddl/mockMViewExecutionSessionVarApplyError"
+	require.NoError(t, failpoint.Enable(failpointName, fmt.Sprintf("return(%q)", variable.TiDBMaxTiFlashThreads)))
+	t.Cleanup(func() {
+		require.NoError(t, failpoint.Disable(failpointName))
+	})
+
+	tk.MustExec("insert into t_mv_refresh_single_apply_var_internal_oop values (3, 30)")
+	requireTiFlashSessionVarsAppliedWithFailpoint(
+		t,
+		"github.com/pingcap/tidb/pkg/executor/refreshMaterializedViewOutOfPlaceBuildTiFlashSessionVarsApplied",
+		"github.com/pingcap/tidb/pkg/executor/refreshMaterializedViewOutOfPlaceBuildTiFlashSpillSessionVarsApplied",
+		func() {
+			mustExecInternal(t, tk, "refresh materialized view mv_mv_refresh_single_apply_var_internal_oop complete out of place")
+		},
+		int64(variable.DefTiFlashMaxThreads), int64(101), int64(202), int64(303), int64(404), float64(0.75), int64(16), uint64(4096),
+	)
+	tk.MustQuery("select * from mv_mv_refresh_single_apply_var_internal_oop order by a").Check(testkit.Rows("1 10 1", "2 20 1", "3 30 1"))
+	requireCurrentSessionTiFlashSessionVarsRestored(t, tk.Session().GetSessionVars())
 }
 
 func TestMaterializedViewRefreshOutOfPlaceUsesCurrentSessionTiFlashSessionVars(t *testing.T) {

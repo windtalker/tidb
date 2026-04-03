@@ -2988,7 +2988,7 @@ func applyMVMaintenanceMemQuota(sessVars *variable.SessionVars, targetMemQuota i
 }
 
 func captureRefreshExecutionSessionVars(sessVars *variable.SessionVars) variable.MViewExecutionSessionVars {
-	return ddl.CaptureMViewExecutionSessionVars(sessVars)
+	return variable.CaptureMViewExecutionSessionVars(sessVars)
 }
 
 func applyRefreshExecutionSessionVars(sessVars *variable.SessionVars, target variable.MViewExecutionSessionVars, bestEffort bool) (func(), error) {
@@ -3003,6 +3003,8 @@ func applyRefreshExecutionSessionVars(sessVars *variable.SessionVars, target var
 	)
 	if injectedErr != nil {
 		err = injectedErr
+	} else if bestEffort {
+		restore, err = ddl.ApplyMViewExecutionSessionVarsBestEffort(sessVars, target)
 	} else {
 		restore, err = ddl.ApplyMViewExecutionSessionVars(sessVars, target)
 	}
@@ -3018,17 +3020,17 @@ func applyRefreshExecutionSessionVars(sessVars *variable.SessionVars, target var
 	}
 	failpoint.InjectCall(
 		"refreshMaterializedViewTiFlashSessionVarsApplied",
-		target.TiFlashMaxThreads,
-		target.FineGrainedStreamCount,
-		target.FineGrainedBatchSize,
+		sessVars.TiFlashMaxThreads,
+		sessVars.TiFlashFineGrainedShuffleStreamCount,
+		sessVars.TiFlashFineGrainedShuffleBatchSize,
 	)
 	failpoint.InjectCall(
 		"refreshMaterializedViewTiFlashSpillSessionVarsApplied",
-		target.TiFlashMaxBytesBeforeExtJoin,
-		target.TiFlashMaxBytesBeforeExtAgg,
-		target.TiFlashMaxBytesBeforeExtSort,
-		target.TiFlashMemQuotaQueryPerNode,
-		target.TiFlashQuerySpillRatio,
+		sessVars.TiFlashMaxBytesBeforeExternalJoin,
+		sessVars.TiFlashMaxBytesBeforeExternalGroupBy,
+		sessVars.TiFlashMaxBytesBeforeExternalSort,
+		sessVars.TiFlashMaxQueryMemoryPerNode,
+		sessVars.TiFlashQuerySpillRatio,
 	)
 	return restore, nil
 }
