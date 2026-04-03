@@ -519,6 +519,65 @@ func TestMaterializedViewRefreshInternalSQLUsesCurrentSessionTiFlashSessionVars(
 	requireCurrentSessionTiFlashSessionVarsRestored(t, tk.Session().GetSessionVars())
 }
 
+func TestMaterializedViewRefreshManualSQLFailsWhenApplyExecutionSessionVarsFails(t *testing.T) {
+	store := testkit.CreateMockStore(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("create table t_mv_refresh_apply_vars_manual (a int not null, b int not null)")
+	tk.MustExec("insert into t_mv_refresh_apply_vars_manual values (1, 10), (2, 20)")
+	tk.MustExec("create materialized view log on t_mv_refresh_apply_vars_manual (a, b) purge next date_add(now(), interval 1 hour)")
+	tk.MustExec("create materialized view mv_mv_refresh_apply_vars_manual (a, s, cnt) refresh fast next date_add(now(), interval 1 hour) as select a, sum(b), count(1) from t_mv_refresh_apply_vars_manual group by a")
+
+	failpointName := "github.com/pingcap/tidb/pkg/executor/mockRefreshExecutionSessionVarsApplyError"
+	require.NoError(t, failpoint.Enable(failpointName, "return(true)"))
+	t.Cleanup(func() {
+		require.NoError(t, failpoint.Disable(failpointName))
+	})
+
+	err := tk.ExecToErr("refresh materialized view mv_mv_refresh_apply_vars_manual complete")
+	require.ErrorContains(t, err, "mock refresh execution session vars apply error")
+}
+
+func TestMaterializedViewRefreshInternalSQLFallsBackWhenApplyExecutionSessionVarsFails(t *testing.T) {
+	store := testkit.CreateMockStore(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("create table t_mv_refresh_apply_vars_internal (a int not null, b int not null)")
+	tk.MustExec("insert into t_mv_refresh_apply_vars_internal values (1, 10), (2, 20)")
+	tk.MustExec("create materialized view log on t_mv_refresh_apply_vars_internal (a, b) purge next date_add(now(), interval 1 hour)")
+	tk.MustExec("create materialized view mv_mv_refresh_apply_vars_internal (a, s, cnt) refresh fast next date_add(now(), interval 1 hour) as select a, sum(b), count(1) from t_mv_refresh_apply_vars_internal group by a")
+
+	failpointName := "github.com/pingcap/tidb/pkg/executor/mockRefreshExecutionSessionVarsApplyError"
+	require.NoError(t, failpoint.Enable(failpointName, "return(true)"))
+	t.Cleanup(func() {
+		require.NoError(t, failpoint.Disable(failpointName))
+	})
+
+	tk.MustExec("insert into t_mv_refresh_apply_vars_internal values (3, 30)")
+	mustExecInternal(t, tk, "refresh materialized view mv_mv_refresh_apply_vars_internal complete")
+	tk.MustQuery("select * from mv_mv_refresh_apply_vars_internal order by a").Check(testkit.Rows("1 10 1", "2 20 1", "3 30 1"))
+}
+
+func TestMaterializedViewRefreshInternalSQLOutOfPlaceFallsBackWhenApplyExecutionSessionVarsFails(t *testing.T) {
+	store := testkit.CreateMockStore(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("create table t_mv_refresh_apply_vars_internal_oop (a int not null, b int not null)")
+	tk.MustExec("insert into t_mv_refresh_apply_vars_internal_oop values (1, 10), (2, 20)")
+	tk.MustExec("create materialized view log on t_mv_refresh_apply_vars_internal_oop (a, b) purge next date_add(now(), interval 1 hour)")
+	tk.MustExec("create materialized view mv_mv_refresh_apply_vars_internal_oop (a, s, cnt) refresh fast next date_add(now(), interval 1 hour) as select a, sum(b), count(1) from t_mv_refresh_apply_vars_internal_oop group by a")
+
+	failpointName := "github.com/pingcap/tidb/pkg/executor/mockRefreshExecutionSessionVarsApplyError"
+	require.NoError(t, failpoint.Enable(failpointName, "return(true)"))
+	t.Cleanup(func() {
+		require.NoError(t, failpoint.Disable(failpointName))
+	})
+
+	tk.MustExec("insert into t_mv_refresh_apply_vars_internal_oop values (3, 30)")
+	mustExecInternal(t, tk, "refresh materialized view mv_mv_refresh_apply_vars_internal_oop complete out of place")
+	tk.MustQuery("select * from mv_mv_refresh_apply_vars_internal_oop order by a").Check(testkit.Rows("1 10 1", "2 20 1", "3 30 1"))
+}
+
 func TestMaterializedViewRefreshOutOfPlaceUsesCurrentSessionTiFlashSessionVars(t *testing.T) {
 	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)

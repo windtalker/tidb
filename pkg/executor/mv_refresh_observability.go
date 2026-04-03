@@ -486,8 +486,8 @@ func (e *RefreshMaterializedViewDryRunExec) buildOutOfPlaceRefreshPlanRows(ctx c
 		refreshStmt.ViewName.Name.O,
 		tblInfo,
 		e.Ctx().GetStore().Name(),
-		targetExecutionVars.importThreads,
-		targetExecutionVars.importDiskQuota,
+		targetExecutionVars.ImportThreads,
+		targetExecutionVars.ImportDiskQuota,
 	)
 	if err != nil {
 		return nil, err
@@ -853,6 +853,7 @@ func (e *RefreshMaterializedViewDryRunExec) prepareMVRefreshObserveInternalSessi
 	restoreExecutionVars, err := applyRefreshExecutionSessionVars(
 		sctx.GetSessionVars(),
 		captureRefreshExecutionSessionVars(e.Ctx().GetSessionVars()),
+		false,
 	)
 	if err != nil {
 		return nil, err

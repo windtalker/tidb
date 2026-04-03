@@ -27,6 +27,22 @@ import (
 	"golang.org/x/exp/maps"
 )
 
+// MViewExecutionSessionVars captures the execution-scoped session variables shared by MV build,
+// refresh, and mvservice maintenance orchestration.
+type MViewExecutionSessionVars struct {
+	MaintainMemQuota             int64
+	TiFlashMaxThreads            int64
+	TiFlashMaxBytesBeforeExtJoin int64
+	TiFlashMaxBytesBeforeExtAgg  int64
+	TiFlashMaxBytesBeforeExtSort int64
+	TiFlashMemQuotaQueryPerNode  int64
+	TiFlashQuerySpillRatio       float64
+	FineGrainedStreamCount       int64
+	FineGrainedBatchSize         uint64
+	ImportThreads                int
+	ImportDiskQuota              string
+}
+
 // ScopeFlag is for system variable whether can be changed in global/session dynamically or not.
 type ScopeFlag uint8
 

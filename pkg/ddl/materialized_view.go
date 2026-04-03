@@ -52,27 +52,17 @@ const (
 	alterMaterializedScheduleInfoUpdateLockWaitTimeoutSec = int64(10)
 )
 
-// MViewExecutionSessionVars captures execution-scoped session variables used by MV build/refresh.
-type MViewExecutionSessionVars struct {
-	MaintainMemQuota             int64
-	TiFlashMaxThreads            int64
-	TiFlashMaxBytesBeforeExtJoin int64
-	TiFlashMaxBytesBeforeExtAgg  int64
-	TiFlashMaxBytesBeforeExtSort int64
-	TiFlashMemQuotaQueryPerNode  int64
-	TiFlashQuerySpillRatio       float64
-	FineGrainedStreamCount       int64
-	FineGrainedBatchSize         uint64
-	ImportThreads                int
-	ImportDiskQuota              string
-}
-
-// CaptureMViewExecutionSessionVars captures user-facing session vars that should be inherited by MV execution.
-func CaptureMViewExecutionSessionVars(sessVars *variable.SessionVars) MViewExecutionSessionVars {
+// CaptureMViewExecutionSessionVars captures the user-facing MV execution knobs that should be
+// inherited by a later MV build/refresh job.
+//
+// Most fields are copied 1:1 from the current session. MaintainMemQuota is intentionally captured
+// from tidb_mv_maintain_mem_quota, because this helper describes the requested execution policy
+// rather than the session's already-applied runtime state.
+func CaptureMViewExecutionSessionVars(sessVars *variable.SessionVars) variable.MViewExecutionSessionVars {
 	if sessVars == nil {
-		return MViewExecutionSessionVars{}
+		return variable.MViewExecutionSessionVars{}
 	}
-	return MViewExecutionSessionVars{
+	return variable.MViewExecutionSessionVars{
 		MaintainMemQuota:             sessVars.MVMaintainMemQuota,
 		TiFlashMaxThreads:            sessVars.TiFlashMaxThreads,
 		TiFlashMaxBytesBeforeExtJoin: sessVars.TiFlashMaxBytesBeforeExternalJoin,
@@ -87,11 +77,18 @@ func CaptureMViewExecutionSessionVars(sessVars *variable.SessionVars) MViewExecu
 	}
 }
 
-func captureAppliedMViewExecutionSessionVars(sessVars *variable.SessionVars) MViewExecutionSessionVars {
+// captureAppliedMViewExecutionSessionVars captures the execution-related values that are currently
+// in effect on a session after MV execution vars have been applied.
+//
+// It looks almost the same as CaptureMViewExecutionSessionVars on purpose: restore logic wants the
+// concrete runtime state, not the original user-facing setting. The important difference is
+// MaintainMemQuota: MV execution applies tidb_mv_maintain_mem_quota onto tidb_mem_quota_query, so
+// the "applied" snapshot must read MemQuotaQuery instead of MVMaintainMemQuota.
+func captureAppliedMViewExecutionSessionVars(sessVars *variable.SessionVars) variable.MViewExecutionSessionVars {
 	if sessVars == nil {
-		return MViewExecutionSessionVars{}
+		return variable.MViewExecutionSessionVars{}
 	}
-	return MViewExecutionSessionVars{
+	return variable.MViewExecutionSessionVars{
 		MaintainMemQuota:             sessVars.MemQuotaQuery,
 		TiFlashMaxThreads:            sessVars.TiFlashMaxThreads,
 		TiFlashMaxBytesBeforeExtJoin: sessVars.TiFlashMaxBytesBeforeExternalJoin,
@@ -107,11 +104,13 @@ func captureAppliedMViewExecutionSessionVars(sessVars *variable.SessionVars) MVi
 }
 
 // ApplyMViewExecutionSessionVars applies MV execution vars onto a session and returns a restore closure.
-func ApplyMViewExecutionSessionVars(sessVars *variable.SessionVars, target MViewExecutionSessionVars) (func(), error) {
+func ApplyMViewExecutionSessionVars(sessVars *variable.SessionVars, target variable.MViewExecutionSessionVars) (func(), error) {
 	if sessVars == nil {
 		return nil, errors.New("mv execution: session vars is nil")
 	}
 
+	// Restore needs the session's real runtime values. This is different from
+	// CaptureMViewExecutionSessionVars(), which describes the target MV execution policy.
 	origin := captureAppliedMViewExecutionSessionVars(sessVars)
 	if origin == target {
 		return func() {}, nil
@@ -166,7 +165,7 @@ func ApplyMViewExecutionSessionVars(sessVars *variable.SessionVars, target MView
 	}, nil
 }
 
-func restoreMViewExecutionSessionVars(sessVars *variable.SessionVars, origin, current MViewExecutionSessionVars) {
+func restoreMViewExecutionSessionVars(sessVars *variable.SessionVars, origin, current variable.MViewExecutionSessionVars) {
 	if err := sessVars.SetSystemVar(variable.TiDBMemQuotaQuery, strconv.FormatInt(origin.MaintainMemQuota, 10)); err != nil {
 		logutil.DDLLogger().Warn(
 			"mv execution: failed to restore tidb_mem_quota_query",
@@ -280,7 +279,7 @@ func AddMViewExecutionSessionVarsToJob(job *model.Job, sessVars *variable.Sessio
 }
 
 // MViewExecutionSessionVarsFromJob reconstructs MV execution vars from a DDL job.
-func MViewExecutionSessionVarsFromJob(job *model.Job, defaultSessVars *variable.SessionVars) (MViewExecutionSessionVars, error) {
+func MViewExecutionSessionVarsFromJob(job *model.Job, defaultSessVars *variable.SessionVars) (variable.MViewExecutionSessionVars, error) {
 	target := captureAppliedMViewExecutionSessionVars(defaultSessVars)
 	if job == nil {
 		return target, nil
@@ -307,7 +306,7 @@ func MViewExecutionSessionVarsFromJob(job *model.Job, defaultSessVars *variable.
 	if val, ok := job.GetSessionVars(variable.TiFlashQuerySpillRatio); ok {
 		ratio, err := strconv.ParseFloat(val, 64)
 		if err != nil {
-			return MViewExecutionSessionVars{}, errors.Annotatef(err, "invalid %s", variable.TiFlashQuerySpillRatio)
+			return variable.MViewExecutionSessionVars{}, errors.Annotatef(err, "invalid %s", variable.TiFlashQuerySpillRatio)
 		}
 		target.TiFlashQuerySpillRatio = ratio
 	}
