@@ -26,6 +26,7 @@ import (
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/tidb/pkg/errno"
 	"github.com/pingcap/tidb/pkg/kv"
+	"github.com/pingcap/tidb/pkg/metrics"
 	"github.com/pingcap/tidb/pkg/parser/ast"
 	"github.com/pingcap/tidb/pkg/parser/auth"
 	pmodel "github.com/pingcap/tidb/pkg/parser/model"
@@ -35,6 +36,7 @@ import (
 	"github.com/pingcap/tidb/pkg/testkit"
 	"github.com/pingcap/tidb/pkg/testkit/testfailpoint"
 	"github.com/pingcap/tidb/pkg/util/sqlexec"
+	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/require"
 	"github.com/tikv/client-go/v2/oracle"
 )
@@ -342,6 +344,16 @@ func requireRefreshMVStatementResult(t *testing.T, tk *testkit.TestKit, insertRo
 	tk.CheckLastMessage(refreshMVStatementResultMessage(insertRows, updateRows, deleteRows))
 }
 
+func readAffectedRowsMetricValue(t *testing.T, label string) float64 {
+	t.Helper()
+
+	counter, err := metrics.AffectedRowsCounter.GetMetricWithLabelValues(label)
+	require.NoError(t, err)
+	pb := &dto.Metric{}
+	require.NoError(t, counter.Write(pb))
+	return pb.GetCounter().GetValue()
+}
+
 func setupMaterializedViewRefreshStatementResultTest(t *testing.T) *testkit.TestKit {
 	t.Helper()
 	store, _ := testkit.CreateMockStoreAndDomain(t)
@@ -416,9 +428,11 @@ func TestMaterializedViewRefreshCompleteBasic(t *testing.T) {
 func TestMaterializedViewRefreshFastStatementResult(t *testing.T) {
 	tk := setupMaterializedViewRefreshStatementResultTest(t)
 	makeMaterializedViewRefreshResultStale(t, tk)
+	beforeRefreshMV := readAffectedRowsMetricValue(t, "RefreshMV")
 
 	tk.MustExec("refresh materialized view mv_refresh_result fast")
 	requireRefreshMVStatementResult(t, tk, 1, 1, 1)
+	require.Equal(t, 3.0, readAffectedRowsMetricValue(t, "RefreshMV")-beforeRefreshMV)
 	tk.MustQuery("select * from mv_refresh_result order by a").Check(testkit.Rows("1 11 1", "3 30 1"))
 }
 

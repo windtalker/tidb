@@ -1545,6 +1545,10 @@ func (a *ExecStmt) recordAffectedRows2Metrics() {
 			metrics.AffectedRowsCounterNTDMLInsert.Add(float64(affectedRows))
 		case "NTDML-Replace":
 			metrics.AffectedRowsCounterNTDMLReplace.Add(float64(affectedRows))
+		case "RefreshMaterializedView":
+			metrics.AffectedRowsCounterRefreshMV.Add(float64(affectedRows))
+		case "PurgeMaterializedViewLog":
+			metrics.AffectedRowsCounterPurgeMVLog.Add(float64(affectedRows))
 		}
 	}
 }
