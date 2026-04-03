@@ -441,6 +441,40 @@ func TestMaterializedViewRefreshFastAsOfTimestampStatementResult(t *testing.T) {
 	tk.MustQuery("select * from mv_refresh_result order by a").Check(testkit.Rows("1 11 1", "3 30 1"))
 }
 
+func TestMaterializedViewRefreshFastAsOfTimestampNoOpStatementResult(t *testing.T) {
+	store, _ := testkit.CreateMockStoreAndDomain(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("create table t_mv_refresh_result_noop (a int primary key, b int not null)")
+	tk.MustExec("insert into t_mv_refresh_result_noop values (1, 10), (2, 20)")
+	tk.MustExec("create materialized view log on t_mv_refresh_result_noop (a, b) purge next date_add(now(), interval 1 hour)")
+	tk.MustExec("create materialized view mv_refresh_result_noop (a, s, cnt) refresh fast next date_add(now(), interval 1 hour) as select a, sum(b), count(1) from t_mv_refresh_result_noop group by a")
+
+	mvIDRow := tk.MustQuery("select tidb_table_id from information_schema.tables where table_schema = 'test' and table_name = 'mv_refresh_result_noop'").Rows()
+	require.Len(t, mvIDRow, 1)
+	mvID, err := strconv.ParseInt(fmt.Sprintf("%v", mvIDRow[0][0]), 10, 64)
+	require.NoError(t, err)
+
+	lastSuccessTSORow := tk.MustQuery(fmt.Sprintf(
+		"select LAST_SUCCESS_READ_TSO from mysql.tidb_mview_refresh_info where MVIEW_ID = %d",
+		mvID,
+	)).Rows()
+	require.Len(t, lastSuccessTSORow, 1)
+	lastSuccessTSO, err := strconv.ParseUint(fmt.Sprintf("%v", lastSuccessTSORow[0][0]), 10, 64)
+	require.NoError(t, err)
+	require.NotZero(t, lastSuccessTSO)
+
+	tk.MustExec(fmt.Sprintf(
+		"refresh materialized view mv_refresh_result_noop fast as of timestamp TIDB_PARSE_TSO(%d)",
+		lastSuccessTSO,
+	))
+	requireRefreshMVStatementResult(t, tk, 0, 0, 0)
+	tk.MustQuery(fmt.Sprintf(
+		"select count(*) from mysql.tidb_mview_refresh_hist where MVIEW_ID = %d",
+		mvID,
+	)).Check(testkit.Rows("0"))
+}
+
 func TestMaterializedViewRefreshCompleteDeltaApplyStatementResult(t *testing.T) {
 	tk := setupMaterializedViewRefreshStatementResultTest(t)
 	makeMaterializedViewRefreshResultStale(t, tk)

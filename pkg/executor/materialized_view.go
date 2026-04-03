@@ -2728,6 +2728,7 @@ func (e *RefreshMaterializedViewExec) executeRefreshMaterializedView(kctx contex
 		return err
 	}
 	if refreshMode == ast.RefreshMaterializedViewModeFast && !lockedReadTSONull && targetRefreshReadTSO > 0 && targetRefreshReadTSO == lockedReadTSO {
+		applyMVRefreshStmtResult(e.Ctx().GetSessionVars().StmtCtx, newMVRefreshStmtResultFromWriteCounts(0, 0, 0))
 		return nil
 	}
 
