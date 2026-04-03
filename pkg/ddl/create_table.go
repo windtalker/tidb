@@ -749,13 +749,12 @@ func initCreateMaterializedViewBuildSession(sessCtx sessionctx.Context, job *mod
 		restore(sessCtx)
 		return nil, errors.Trace(err)
 	}
-	restoreExecutionVars, err := func() (func(), error) {
-		targetExecutionVars, err := MViewExecutionSessionVarsFromJob(job, sessCtx.GetSessionVars())
-		if err != nil {
-			return nil, errors.Trace(err)
-		}
-		return ApplyMViewExecutionSessionVars(sessCtx.GetSessionVars(), targetExecutionVars)
-	}()
+	targetExecutionVars, err := MViewExecutionSessionVarsFromJob(job, sessCtx.GetSessionVars())
+	if err != nil {
+		restore(sessCtx)
+		return nil, errors.Trace(err)
+	}
+	restoreExecutionVars, err := ApplyMViewExecutionSessionVars(sessCtx.GetSessionVars(), targetExecutionVars)
 	if err != nil {
 		restore(sessCtx)
 		return nil, err
