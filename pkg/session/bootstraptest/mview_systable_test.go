@@ -49,8 +49,12 @@ func TestBootstrapMaterializedViewSystemTables(t *testing.T) {
 
 	tk.MustQuery("select lower(column_name) from information_schema.statistics where table_schema='mysql' and table_name='tidb_mview_refresh_hist' and index_name='PRIMARY' order by seq_in_index").
 		Check(testkit.Rows("refresh_job_id"))
+	tk.MustQuery("select lower(column_name) from information_schema.statistics where table_schema='mysql' and table_name='tidb_mview_refresh_hist' and index_name='idx_mview_time' order by seq_in_index").
+		Check(testkit.Rows("mview_id", "refresh_time"))
 	tk.MustQuery("select lower(column_name) from information_schema.statistics where table_schema='mysql' and table_name='tidb_mview_refresh_hist' and index_name='idx_mview_status' order by seq_in_index").
 		Check(testkit.Rows("mview_id", "refresh_status", "refresh_time"))
+	tk.MustQuery("select lower(column_name) from information_schema.statistics where table_schema='mysql' and table_name='tidb_mview_refresh_hist' and index_name='idx_refresh_time' order by seq_in_index").
+		Check(testkit.Rows("refresh_time"))
 	tk.MustQuery("select lower(column_name) from information_schema.statistics where table_schema='mysql' and table_name='tidb_mview_refresh_hist' and index_name='idx_refresh_status' order by seq_in_index").
 		Check(testkit.Rows("refresh_status", "refresh_time"))
 	tk.MustQuery("select lower(column_name) from information_schema.columns where table_schema='mysql' and table_name='tidb_mview_refresh_hist' order by ordinal_position limit 1").
@@ -67,8 +71,12 @@ func TestBootstrapMaterializedViewSystemTables(t *testing.T) {
 		Check(testkit.Rows("varchar(512)"))
 	tk.MustQuery("select lower(column_name) from information_schema.statistics where table_schema='mysql' and table_name='tidb_mlog_purge_hist' and index_name='PRIMARY' order by seq_in_index").
 		Check(testkit.Rows("purge_job_id"))
+	tk.MustQuery("select lower(column_name) from information_schema.statistics where table_schema='mysql' and table_name='tidb_mlog_purge_hist' and index_name='idx_mlog_time' order by seq_in_index").
+		Check(testkit.Rows("mlog_id", "purge_time"))
 	tk.MustQuery("select lower(column_name) from information_schema.statistics where table_schema='mysql' and table_name='tidb_mlog_purge_hist' and index_name='idx_mlog_status' order by seq_in_index").
 		Check(testkit.Rows("mlog_id", "purge_status", "purge_time"))
+	tk.MustQuery("select lower(column_name) from information_schema.statistics where table_schema='mysql' and table_name='tidb_mlog_purge_hist' and index_name='idx_purge_time' order by seq_in_index").
+		Check(testkit.Rows("purge_time"))
 	tk.MustQuery("select lower(column_name) from information_schema.statistics where table_schema='mysql' and table_name='tidb_mlog_purge_hist' and index_name='idx_purge_status' order by seq_in_index").
 		Check(testkit.Rows("purge_status", "purge_time"))
 	tk.MustQuery("select lower(column_name) from information_schema.columns where table_schema='mysql' and table_name='tidb_mlog_purge_hist' order by ordinal_position limit 1").
@@ -143,6 +151,73 @@ func TestUpgradeToVer221MaterializedViewSystemTables(t *testing.T) {
 		Check(testkit.Rows("varchar(512)"))
 	tk.MustQuery("select lower(column_type) from information_schema.columns where table_schema='mysql' and table_name='tidb_mlog_purge_hist' and column_name='CANCEL_REQUESTED_BY'").
 		Check(testkit.Rows("varchar(512)"))
+}
+
+func TestUpgradeToVer223MaterializedViewHistoryTimeIndexes(t *testing.T) {
+	ctx := context.Background()
+	store, dom := session.CreateStoreAndBootstrap(t)
+	defer func() { require.NoError(t, store.Close()) }()
+
+	seV222 := session.CreateSessionAndSetID(t, store)
+
+	txn, err := store.Begin()
+	require.NoError(t, err)
+	m := meta.NewMutator(txn)
+	require.NoError(t, m.FinishBootstrap(int64(222)))
+	require.NoError(t, txn.Commit(ctx))
+
+	revertVersionAndVariables(t, seV222, 222)
+	session.MustExec(t, seV222, "drop table if exists mysql.tidb_mview_refresh_hist, mysql.tidb_mlog_purge_hist")
+	session.MustExec(t, seV222, `create table mysql.tidb_mview_refresh_hist (
+		REFRESH_JOB_ID bigint unsigned NOT NULL,
+		MVIEW_ID bigint NOT NULL,
+		REFRESH_METHOD varchar(32) NOT NULL,
+		REFRESH_TIME datetime(6) DEFAULT NULL,
+		REFRESH_ENDTIME datetime(6) DEFAULT NULL,
+		REFRESH_STATUS varchar(16) DEFAULT NULL,
+		REFRESH_ROWS bigint DEFAULT NULL,
+		REFRESH_READ_TSO bigint unsigned DEFAULT NULL,
+		REFRESH_FAILED_REASON text DEFAULT NULL,
+		CANCEL_REQUESTED_AT datetime(6) DEFAULT NULL,
+		CANCEL_REQUESTED_BY varchar(512) DEFAULT NULL,
+		PRIMARY KEY(REFRESH_JOB_ID),
+		KEY idx_mview_status (MVIEW_ID, REFRESH_STATUS, REFRESH_TIME),
+		KEY idx_refresh_status (REFRESH_STATUS, REFRESH_TIME))`)
+	session.MustExec(t, seV222, `create table mysql.tidb_mlog_purge_hist (
+		PURGE_JOB_ID bigint unsigned NOT NULL,
+		MLOG_ID bigint NOT NULL,
+		PURGE_METHOD varchar(32) NOT NULL,
+		PURGE_TIME datetime(6) DEFAULT NULL,
+		PURGE_ENDTIME datetime(6) DEFAULT NULL,
+		PURGE_ROWS bigint NOT NULL,
+		PURGE_STATUS varchar(16) DEFAULT NULL,
+		PURGE_FAILED_REASON text DEFAULT NULL,
+		CANCEL_REQUESTED_AT datetime(6) DEFAULT NULL,
+		CANCEL_REQUESTED_BY varchar(512) DEFAULT NULL,
+		PRIMARY KEY(PURGE_JOB_ID),
+		KEY idx_mlog_status (MLOG_ID, PURGE_STATUS, PURGE_TIME),
+		KEY idx_purge_status (PURGE_STATUS, PURGE_TIME))`)
+	session.MustExec(t, seV222, "commit")
+
+	session.UnsetStoreBootstrapped(store.UUID())
+	ver, err := session.GetBootstrapVersion(seV222)
+	require.NoError(t, err)
+	require.Equal(t, int64(222), ver)
+
+	dom.Close()
+	domUpgraded, err := session.BootstrapSession(store)
+	require.NoError(t, err)
+	defer domUpgraded.Close()
+
+	tk := testkit.NewTestKit(t, store)
+	tk.MustQuery("select lower(column_name) from information_schema.statistics where table_schema='mysql' and table_name='tidb_mview_refresh_hist' and index_name='idx_mview_time' order by seq_in_index").
+		Check(testkit.Rows("mview_id", "refresh_time"))
+	tk.MustQuery("select lower(column_name) from information_schema.statistics where table_schema='mysql' and table_name='tidb_mview_refresh_hist' and index_name='idx_refresh_time' order by seq_in_index").
+		Check(testkit.Rows("refresh_time"))
+	tk.MustQuery("select lower(column_name) from information_schema.statistics where table_schema='mysql' and table_name='tidb_mlog_purge_hist' and index_name='idx_mlog_time' order by seq_in_index").
+		Check(testkit.Rows("mlog_id", "purge_time"))
+	tk.MustQuery("select lower(column_name) from information_schema.statistics where table_schema='mysql' and table_name='tidb_mlog_purge_hist' and index_name='idx_purge_time' order by seq_in_index").
+		Check(testkit.Rows("purge_time"))
 }
 
 func TestUpgradeToVer222MaterializedViewHistoryCancelRequestColumns(t *testing.T) {
