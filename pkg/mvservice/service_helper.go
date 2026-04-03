@@ -261,10 +261,17 @@ func (*serviceHelper) RefreshMV(ctx context.Context, sysSessionPool basic.Sessio
 }
 
 type refreshSessionVars struct {
-	maintainMemQuota       int64
-	tiFlashMaxThreads      int64
-	fineGrainedStreamCount int64
-	fineGrainedBatchSize   uint64
+	maintainMemQuota             int64
+	tiFlashMaxThreads            int64
+	tiFlashMaxBytesBeforeExtJoin int64
+	tiFlashMaxBytesBeforeExtAgg  int64
+	tiFlashMaxBytesBeforeExtSort int64
+	tiFlashMemQuotaQueryPerNode  int64
+	tiFlashQuerySpillRatio       float64
+	fineGrainedStreamCount       int64
+	fineGrainedBatchSize         uint64
+	importThreads                int
+	importDiskQuota              string
 }
 
 func applyMVRefreshSessionVarsFromGlobal(ctx context.Context, sessVars *variable.SessionVars) (func(), error) {
@@ -280,6 +287,26 @@ func applyMVRefreshSessionVarsFromGlobal(ctx context.Context, sessVars *variable
 	if err != nil {
 		return nil, fmt.Errorf("mv service: failed to read global tidb_max_tiflash_threads: %w", err)
 	}
+	maxBytesBeforeExtJoinVal, err := sessVars.GetGlobalSystemVar(ctx, variable.TiDBMaxBytesBeforeTiFlashExternalJoin)
+	if err != nil {
+		return nil, fmt.Errorf("mv service: failed to read global tidb_max_bytes_before_tiflash_external_join: %w", err)
+	}
+	maxBytesBeforeExtAggVal, err := sessVars.GetGlobalSystemVar(ctx, variable.TiDBMaxBytesBeforeTiFlashExternalGroupBy)
+	if err != nil {
+		return nil, fmt.Errorf("mv service: failed to read global tidb_max_bytes_before_tiflash_external_group_by: %w", err)
+	}
+	maxBytesBeforeExtSortVal, err := sessVars.GetGlobalSystemVar(ctx, variable.TiDBMaxBytesBeforeTiFlashExternalSort)
+	if err != nil {
+		return nil, fmt.Errorf("mv service: failed to read global tidb_max_bytes_before_tiflash_external_sort: %w", err)
+	}
+	memQuotaQueryPerNodeVal, err := sessVars.GetGlobalSystemVar(ctx, variable.TiFlashMemQuotaQueryPerNode)
+	if err != nil {
+		return nil, fmt.Errorf("mv service: failed to read global tiflash_mem_quota_query_per_node: %w", err)
+	}
+	querySpillRatioVal, err := sessVars.GetGlobalSystemVar(ctx, variable.TiFlashQuerySpillRatio)
+	if err != nil {
+		return nil, fmt.Errorf("mv service: failed to read global tiflash_query_spill_ratio: %w", err)
+	}
 	fineGrainedStreamCountVal, err := sessVars.GetGlobalSystemVar(ctx, variable.TiFlashFineGrainedShuffleStreamCount)
 	if err != nil {
 		return nil, fmt.Errorf("mv service: failed to read global tiflash_fine_grained_shuffle_stream_count: %w", err)
@@ -288,10 +315,27 @@ func applyMVRefreshSessionVarsFromGlobal(ctx context.Context, sessVars *variable
 	if err != nil {
 		return nil, fmt.Errorf("mv service: failed to read global tiflash_fine_grained_shuffle_batch_size: %w", err)
 	}
+	importThreadsVal, err := sessVars.GetGlobalSystemVar(ctx, variable.TiDBMViewMaintainImportThreads)
+	if err != nil {
+		return nil, fmt.Errorf("mv service: failed to read global tidb_mview_maintain_import_threads: %w", err)
+	}
+	importDiskQuotaVal, err := sessVars.GetGlobalSystemVar(ctx, variable.TiDBMViewMaintainImportDiskQuota)
+	if err != nil {
+		return nil, fmt.Errorf("mv service: failed to read global tidb_mview_maintain_import_disk_quota: %w", err)
+	}
+	querySpillRatio, err := strconv.ParseFloat(querySpillRatioVal, 64)
+	if err != nil {
+		return nil, fmt.Errorf("mv service: failed to parse global tiflash_query_spill_ratio: %w", err)
+	}
 
 	target := refreshSessionVars{
-		maintainMemQuota:  variable.TidbOptInt64(maintainMemQuotaVal, variable.DefTiDBMVMaintainMemQuota),
-		tiFlashMaxThreads: variable.TidbOptInt64(maxThreadsVal, variable.DefTiFlashMaxThreads),
+		maintainMemQuota:             variable.TidbOptInt64(maintainMemQuotaVal, variable.DefTiDBMVMaintainMemQuota),
+		tiFlashMaxThreads:            variable.TidbOptInt64(maxThreadsVal, variable.DefTiFlashMaxThreads),
+		tiFlashMaxBytesBeforeExtJoin: variable.TidbOptInt64(maxBytesBeforeExtJoinVal, variable.DefTiFlashMaxBytesBeforeExternalJoin),
+		tiFlashMaxBytesBeforeExtAgg:  variable.TidbOptInt64(maxBytesBeforeExtAggVal, variable.DefTiFlashMaxBytesBeforeExternalGroupBy),
+		tiFlashMaxBytesBeforeExtSort: variable.TidbOptInt64(maxBytesBeforeExtSortVal, variable.DefTiFlashMaxBytesBeforeExternalSort),
+		tiFlashMemQuotaQueryPerNode:  variable.TidbOptInt64(memQuotaQueryPerNodeVal, variable.DefTiFlashMemQuotaQueryPerNode),
+		tiFlashQuerySpillRatio:       querySpillRatio,
 		fineGrainedStreamCount: variable.TidbOptInt64(
 			fineGrainedStreamCountVal,
 			variable.DefTiFlashFineGrainedShuffleStreamCount,
@@ -300,6 +344,8 @@ func applyMVRefreshSessionVarsFromGlobal(ctx context.Context, sessVars *variable
 			fineGrainedBatchSizeVal,
 			variable.DefTiFlashFineGrainedShuffleBatchSize,
 		)),
+		importThreads:   variable.TidbOptInt(importThreadsVal, variable.DefTiDBMViewMaintainImportThreads),
+		importDiskQuota: importDiskQuotaVal,
 	}
 	return applyRefreshSessionVars(sessVars, target)
 }
@@ -336,10 +382,17 @@ func applyMVMaintainMemQuotaFromGlobal(ctx context.Context, sessVars *variable.S
 
 func captureRefreshSessionVars(sessVars *variable.SessionVars) refreshSessionVars {
 	return refreshSessionVars{
-		maintainMemQuota:       sessVars.MVMaintainMemQuota,
-		tiFlashMaxThreads:      sessVars.TiFlashMaxThreads,
-		fineGrainedStreamCount: sessVars.TiFlashFineGrainedShuffleStreamCount,
-		fineGrainedBatchSize:   sessVars.TiFlashFineGrainedShuffleBatchSize,
+		maintainMemQuota:             sessVars.MVMaintainMemQuota,
+		tiFlashMaxThreads:            sessVars.TiFlashMaxThreads,
+		tiFlashMaxBytesBeforeExtJoin: sessVars.TiFlashMaxBytesBeforeExternalJoin,
+		tiFlashMaxBytesBeforeExtAgg:  sessVars.TiFlashMaxBytesBeforeExternalGroupBy,
+		tiFlashMaxBytesBeforeExtSort: sessVars.TiFlashMaxBytesBeforeExternalSort,
+		tiFlashMemQuotaQueryPerNode:  sessVars.TiFlashMaxQueryMemoryPerNode,
+		tiFlashQuerySpillRatio:       sessVars.TiFlashQuerySpillRatio,
+		fineGrainedStreamCount:       sessVars.TiFlashFineGrainedShuffleStreamCount,
+		fineGrainedBatchSize:         sessVars.TiFlashFineGrainedShuffleBatchSize,
+		importThreads:                sessVars.MViewMaintainImportThreads,
+		importDiskQuota:              sessVars.MViewMaintainImportDiskQuota,
 	}
 }
 
@@ -360,6 +413,26 @@ func applyRefreshSessionVars(sessVars *variable.SessionVars, target refreshSessi
 		restoreRefreshSessionVars(sessVars, origin, captureRefreshSessionVars(sessVars))
 		return nil, fmt.Errorf("mv service: failed to apply tidb_max_tiflash_threads on refresh session: %w", err)
 	}
+	if err := sessVars.SetSystemVar(variable.TiDBMaxBytesBeforeTiFlashExternalJoin, strconv.FormatInt(target.tiFlashMaxBytesBeforeExtJoin, 10)); err != nil {
+		restoreRefreshSessionVars(sessVars, origin, captureRefreshSessionVars(sessVars))
+		return nil, fmt.Errorf("mv service: failed to apply tidb_max_bytes_before_tiflash_external_join on refresh session: %w", err)
+	}
+	if err := sessVars.SetSystemVar(variable.TiDBMaxBytesBeforeTiFlashExternalGroupBy, strconv.FormatInt(target.tiFlashMaxBytesBeforeExtAgg, 10)); err != nil {
+		restoreRefreshSessionVars(sessVars, origin, captureRefreshSessionVars(sessVars))
+		return nil, fmt.Errorf("mv service: failed to apply tidb_max_bytes_before_tiflash_external_group_by on refresh session: %w", err)
+	}
+	if err := sessVars.SetSystemVar(variable.TiDBMaxBytesBeforeTiFlashExternalSort, strconv.FormatInt(target.tiFlashMaxBytesBeforeExtSort, 10)); err != nil {
+		restoreRefreshSessionVars(sessVars, origin, captureRefreshSessionVars(sessVars))
+		return nil, fmt.Errorf("mv service: failed to apply tidb_max_bytes_before_tiflash_external_sort on refresh session: %w", err)
+	}
+	if err := sessVars.SetSystemVar(variable.TiFlashMemQuotaQueryPerNode, strconv.FormatInt(target.tiFlashMemQuotaQueryPerNode, 10)); err != nil {
+		restoreRefreshSessionVars(sessVars, origin, captureRefreshSessionVars(sessVars))
+		return nil, fmt.Errorf("mv service: failed to apply tiflash_mem_quota_query_per_node on refresh session: %w", err)
+	}
+	if err := sessVars.SetSystemVar(variable.TiFlashQuerySpillRatio, strconv.FormatFloat(target.tiFlashQuerySpillRatio, 'f', -1, 64)); err != nil {
+		restoreRefreshSessionVars(sessVars, origin, captureRefreshSessionVars(sessVars))
+		return nil, fmt.Errorf("mv service: failed to apply tiflash_query_spill_ratio on refresh session: %w", err)
+	}
 	if err := sessVars.SetSystemVar(variable.TiFlashFineGrainedShuffleStreamCount, strconv.FormatInt(target.fineGrainedStreamCount, 10)); err != nil {
 		restoreRefreshSessionVars(sessVars, origin, captureRefreshSessionVars(sessVars))
 		return nil, fmt.Errorf("mv service: failed to apply tiflash_fine_grained_shuffle_stream_count on refresh session: %w", err)
@@ -367,6 +440,14 @@ func applyRefreshSessionVars(sessVars *variable.SessionVars, target refreshSessi
 	if err := sessVars.SetSystemVar(variable.TiFlashFineGrainedShuffleBatchSize, strconv.FormatUint(target.fineGrainedBatchSize, 10)); err != nil {
 		restoreRefreshSessionVars(sessVars, origin, captureRefreshSessionVars(sessVars))
 		return nil, fmt.Errorf("mv service: failed to apply tiflash_fine_grained_shuffle_batch_size on refresh session: %w", err)
+	}
+	if err := sessVars.SetSystemVar(variable.TiDBMViewMaintainImportThreads, strconv.Itoa(target.importThreads)); err != nil {
+		restoreRefreshSessionVars(sessVars, origin, captureRefreshSessionVars(sessVars))
+		return nil, fmt.Errorf("mv service: failed to apply tidb_mview_maintain_import_threads on refresh session: %w", err)
+	}
+	if err := sessVars.SetSystemVar(variable.TiDBMViewMaintainImportDiskQuota, target.importDiskQuota); err != nil {
+		restoreRefreshSessionVars(sessVars, origin, captureRefreshSessionVars(sessVars))
+		return nil, fmt.Errorf("mv service: failed to apply tidb_mview_maintain_import_disk_quota on refresh session: %w", err)
 	}
 
 	return func() {
@@ -391,6 +472,46 @@ func restoreRefreshSessionVars(sessVars *variable.SessionVars, origin, current r
 			zap.Error(err),
 		)
 	}
+	if err := sessVars.SetSystemVar(variable.TiDBMaxBytesBeforeTiFlashExternalJoin, strconv.FormatInt(origin.tiFlashMaxBytesBeforeExtJoin, 10)); err != nil {
+		logutil.BgLogger().Warn(
+			"mv service: failed to restore tidb_max_bytes_before_tiflash_external_join after refresh",
+			zap.Int64("originMaxBytesBeforeExternalJoin", origin.tiFlashMaxBytesBeforeExtJoin),
+			zap.Int64("currentMaxBytesBeforeExternalJoin", current.tiFlashMaxBytesBeforeExtJoin),
+			zap.Error(err),
+		)
+	}
+	if err := sessVars.SetSystemVar(variable.TiDBMaxBytesBeforeTiFlashExternalGroupBy, strconv.FormatInt(origin.tiFlashMaxBytesBeforeExtAgg, 10)); err != nil {
+		logutil.BgLogger().Warn(
+			"mv service: failed to restore tidb_max_bytes_before_tiflash_external_group_by after refresh",
+			zap.Int64("originMaxBytesBeforeExternalGroupBy", origin.tiFlashMaxBytesBeforeExtAgg),
+			zap.Int64("currentMaxBytesBeforeExternalGroupBy", current.tiFlashMaxBytesBeforeExtAgg),
+			zap.Error(err),
+		)
+	}
+	if err := sessVars.SetSystemVar(variable.TiDBMaxBytesBeforeTiFlashExternalSort, strconv.FormatInt(origin.tiFlashMaxBytesBeforeExtSort, 10)); err != nil {
+		logutil.BgLogger().Warn(
+			"mv service: failed to restore tidb_max_bytes_before_tiflash_external_sort after refresh",
+			zap.Int64("originMaxBytesBeforeExternalSort", origin.tiFlashMaxBytesBeforeExtSort),
+			zap.Int64("currentMaxBytesBeforeExternalSort", current.tiFlashMaxBytesBeforeExtSort),
+			zap.Error(err),
+		)
+	}
+	if err := sessVars.SetSystemVar(variable.TiFlashMemQuotaQueryPerNode, strconv.FormatInt(origin.tiFlashMemQuotaQueryPerNode, 10)); err != nil {
+		logutil.BgLogger().Warn(
+			"mv service: failed to restore tiflash_mem_quota_query_per_node after refresh",
+			zap.Int64("originMemQuotaQueryPerNode", origin.tiFlashMemQuotaQueryPerNode),
+			zap.Int64("currentMemQuotaQueryPerNode", current.tiFlashMemQuotaQueryPerNode),
+			zap.Error(err),
+		)
+	}
+	if err := sessVars.SetSystemVar(variable.TiFlashQuerySpillRatio, strconv.FormatFloat(origin.tiFlashQuerySpillRatio, 'f', -1, 64)); err != nil {
+		logutil.BgLogger().Warn(
+			"mv service: failed to restore tiflash_query_spill_ratio after refresh",
+			zap.Float64("originQuerySpillRatio", origin.tiFlashQuerySpillRatio),
+			zap.Float64("currentQuerySpillRatio", current.tiFlashQuerySpillRatio),
+			zap.Error(err),
+		)
+	}
 	if err := sessVars.SetSystemVar(variable.TiFlashFineGrainedShuffleStreamCount, strconv.FormatInt(origin.fineGrainedStreamCount, 10)); err != nil {
 		logutil.BgLogger().Warn(
 			"mv service: failed to restore tiflash_fine_grained_shuffle_stream_count after refresh",
@@ -404,6 +525,22 @@ func restoreRefreshSessionVars(sessVars *variable.SessionVars, origin, current r
 			"mv service: failed to restore tiflash_fine_grained_shuffle_batch_size after refresh",
 			zap.Uint64("originFineGrainedBatchSize", origin.fineGrainedBatchSize),
 			zap.Uint64("currentFineGrainedBatchSize", current.fineGrainedBatchSize),
+			zap.Error(err),
+		)
+	}
+	if err := sessVars.SetSystemVar(variable.TiDBMViewMaintainImportThreads, strconv.Itoa(origin.importThreads)); err != nil {
+		logutil.BgLogger().Warn(
+			"mv service: failed to restore tidb_mview_maintain_import_threads after refresh",
+			zap.Int("originImportThreads", origin.importThreads),
+			zap.Int("currentImportThreads", current.importThreads),
+			zap.Error(err),
+		)
+	}
+	if err := sessVars.SetSystemVar(variable.TiDBMViewMaintainImportDiskQuota, origin.importDiskQuota); err != nil {
+		logutil.BgLogger().Warn(
+			"mv service: failed to restore tidb_mview_maintain_import_disk_quota after refresh",
+			zap.String("originImportDiskQuota", origin.importDiskQuota),
+			zap.String("currentImportDiskQuota", current.importDiskQuota),
 			zap.Error(err),
 		)
 	}

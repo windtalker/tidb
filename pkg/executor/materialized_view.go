@@ -2457,7 +2457,7 @@ func (e *RefreshMaterializedViewExec) executeRefreshMaterializedView(kctx contex
 			stepSet,
 			expectedLastSuccessReadTSO,
 			expectedLastSuccessReadTSONull,
-			refreshExecutionVars.maintainMemQuota,
+			refreshExecutionVars,
 		)
 		if err != nil {
 			return finalizeFailure(err)
@@ -2760,7 +2760,7 @@ func (e *RefreshMaterializedViewExec) executeRefreshMaterializedViewCompleteOutO
 	stepSet mvRefreshStepSet,
 	expectedLastSuccessReadTSO uint64,
 	expectedLastSuccessReadTSONull bool,
-	targetMaintainMemQuota int64,
+	targetExecutionVars refreshExecutionSessionVars,
 ) (buildReadTSO uint64, err error) {
 	if err := kctx.Err(); err != nil {
 		return 0, err
@@ -2772,12 +2772,31 @@ func (e *RefreshMaterializedViewExec) executeRefreshMaterializedViewCompleteOutO
 	defer e.ReleaseSysSession(releaseCtx, buildSctx)
 
 	buildSessVars := buildSctx.GetSessionVars()
-	restoreBuildMemQuota, err := applyMVMaintenanceMemQuota(buildSessVars, targetMaintainMemQuota)
+	restoreBuildExecutionVars, err := applyRefreshExecutionSessionVars(buildSessVars, targetExecutionVars)
 	if err != nil {
 		return 0, err
 	}
-	defer restoreBuildMemQuota()
-	failpoint.InjectCall("mvMaintainMemQuotaAppliedOnRefreshOutOfPlaceBuildSession", buildSessVars.MemQuotaQuery, targetMaintainMemQuota)
+	defer restoreBuildExecutionVars()
+	failpoint.InjectCall("mvMaintainMemQuotaAppliedOnRefreshOutOfPlaceBuildSession", buildSessVars.MemQuotaQuery, targetExecutionVars.maintainMemQuota)
+	failpoint.InjectCall(
+		"refreshMaterializedViewOutOfPlaceBuildTiFlashSessionVarsApplied",
+		buildSessVars.TiFlashMaxThreads,
+		buildSessVars.TiFlashFineGrainedShuffleStreamCount,
+		buildSessVars.TiFlashFineGrainedShuffleBatchSize,
+	)
+	failpoint.InjectCall(
+		"refreshMaterializedViewOutOfPlaceBuildTiFlashSpillSessionVarsApplied",
+		buildSessVars.TiFlashMaxBytesBeforeExternalJoin,
+		buildSessVars.TiFlashMaxBytesBeforeExternalGroupBy,
+		buildSessVars.TiFlashMaxBytesBeforeExternalSort,
+		buildSessVars.TiFlashMaxQueryMemoryPerNode,
+		buildSessVars.TiFlashQuerySpillRatio,
+	)
+	failpoint.InjectCall(
+		"refreshMaterializedViewOutOfPlaceBuildImportSessionVarsApplied",
+		buildSessVars.MViewMaintainImportThreads,
+		buildSessVars.MViewMaintainImportDiskQuota,
+	)
 
 	restoreBuildSessVars, err := initRefreshMaterializedViewSession(buildSessVars, tblInfo.MaterializedView)
 	if err != nil {
@@ -2858,7 +2877,14 @@ func (e *RefreshMaterializedViewExec) executeRefreshMaterializedViewCompleteOutO
 			zap.String("method", buildMethod),
 		)
 
-		buildSQL, buildErr := buildMVRefreshOutOfPlaceBuildSQL(schemaName.O, shadowTableName, tblInfo, storeName)
+		buildSQL, buildErr := buildMVRefreshOutOfPlaceBuildSQL(
+			schemaName.O,
+			shadowTableName,
+			tblInfo,
+			storeName,
+			targetExecutionVars.importThreads,
+			targetExecutionVars.importDiskQuota,
+		)
 		if buildErr != nil {
 			return buildErr
 		}
@@ -2962,52 +2988,52 @@ func applyMVMaintenanceMemQuota(sessVars *variable.SessionVars, targetMemQuota i
 }
 
 type refreshExecutionSessionVars struct {
-	maintainMemQuota       int64
-	tiFlashMaxThreads      int64
-	fineGrainedStreamCount int64
-	fineGrainedBatchSize   uint64
+	maintainMemQuota             int64
+	tiFlashMaxThreads            int64
+	tiFlashMaxBytesBeforeExtJoin int64
+	tiFlashMaxBytesBeforeExtAgg  int64
+	tiFlashMaxBytesBeforeExtSort int64
+	tiFlashMemQuotaQueryPerNode  int64
+	tiFlashQuerySpillRatio       float64
+	fineGrainedStreamCount       int64
+	fineGrainedBatchSize         uint64
+	importThreads                int
+	importDiskQuota              string
 }
 
 func captureRefreshExecutionSessionVars(sessVars *variable.SessionVars) refreshExecutionSessionVars {
+	target := ddl.CaptureMViewExecutionSessionVars(sessVars)
 	return refreshExecutionSessionVars{
-		maintainMemQuota:       sessVars.MVMaintainMemQuota,
-		tiFlashMaxThreads:      sessVars.TiFlashMaxThreads,
-		fineGrainedStreamCount: sessVars.TiFlashFineGrainedShuffleStreamCount,
-		fineGrainedBatchSize:   sessVars.TiFlashFineGrainedShuffleBatchSize,
-	}
-}
-
-func captureAppliedRefreshExecutionSessionVars(sessVars *variable.SessionVars) refreshExecutionSessionVars {
-	return refreshExecutionSessionVars{
-		maintainMemQuota:       sessVars.MemQuotaQuery,
-		tiFlashMaxThreads:      sessVars.TiFlashMaxThreads,
-		fineGrainedStreamCount: sessVars.TiFlashFineGrainedShuffleStreamCount,
-		fineGrainedBatchSize:   sessVars.TiFlashFineGrainedShuffleBatchSize,
+		maintainMemQuota:             target.MaintainMemQuota,
+		tiFlashMaxThreads:            target.TiFlashMaxThreads,
+		tiFlashMaxBytesBeforeExtJoin: target.TiFlashMaxBytesBeforeExtJoin,
+		tiFlashMaxBytesBeforeExtAgg:  target.TiFlashMaxBytesBeforeExtAgg,
+		tiFlashMaxBytesBeforeExtSort: target.TiFlashMaxBytesBeforeExtSort,
+		tiFlashMemQuotaQueryPerNode:  target.TiFlashMemQuotaQueryPerNode,
+		tiFlashQuerySpillRatio:       target.TiFlashQuerySpillRatio,
+		fineGrainedStreamCount:       target.FineGrainedStreamCount,
+		fineGrainedBatchSize:         target.FineGrainedBatchSize,
+		importThreads:                target.ImportThreads,
+		importDiskQuota:              target.ImportDiskQuota,
 	}
 }
 
 func applyRefreshExecutionSessionVars(sessVars *variable.SessionVars, target refreshExecutionSessionVars) (func(), error) {
-	if sessVars == nil {
-		return nil, errors.New("mv maintenance: session vars is nil")
-	}
-
-	origin := captureAppliedRefreshExecutionSessionVars(sessVars)
-	if origin != target {
-		if err := sessVars.SetSystemVar(variable.TiDBMemQuotaQuery, strconv.FormatInt(target.maintainMemQuota, 10)); err != nil {
-			return nil, errors.Annotate(err, "mv maintenance: failed to apply tidb_mv_maintain_mem_quota to tidb_mem_quota_query")
-		}
-		if err := sessVars.SetSystemVar(variable.TiDBMaxTiFlashThreads, strconv.FormatInt(target.tiFlashMaxThreads, 10)); err != nil {
-			restoreRefreshExecutionSessionVars(sessVars, origin, captureAppliedRefreshExecutionSessionVars(sessVars))
-			return nil, errors.Annotate(err, "mv maintenance: failed to apply tidb_max_tiflash_threads on refresh session")
-		}
-		if err := sessVars.SetSystemVar(variable.TiFlashFineGrainedShuffleStreamCount, strconv.FormatInt(target.fineGrainedStreamCount, 10)); err != nil {
-			restoreRefreshExecutionSessionVars(sessVars, origin, captureAppliedRefreshExecutionSessionVars(sessVars))
-			return nil, errors.Annotate(err, "mv maintenance: failed to apply tiflash_fine_grained_shuffle_stream_count on refresh session")
-		}
-		if err := sessVars.SetSystemVar(variable.TiFlashFineGrainedShuffleBatchSize, strconv.FormatUint(target.fineGrainedBatchSize, 10)); err != nil {
-			restoreRefreshExecutionSessionVars(sessVars, origin, captureAppliedRefreshExecutionSessionVars(sessVars))
-			return nil, errors.Annotate(err, "mv maintenance: failed to apply tiflash_fine_grained_shuffle_batch_size on refresh session")
-		}
+	restore, err := ddl.ApplyMViewExecutionSessionVars(sessVars, ddl.MViewExecutionSessionVars{
+		MaintainMemQuota:             target.maintainMemQuota,
+		TiFlashMaxThreads:            target.tiFlashMaxThreads,
+		TiFlashMaxBytesBeforeExtJoin: target.tiFlashMaxBytesBeforeExtJoin,
+		TiFlashMaxBytesBeforeExtAgg:  target.tiFlashMaxBytesBeforeExtAgg,
+		TiFlashMaxBytesBeforeExtSort: target.tiFlashMaxBytesBeforeExtSort,
+		TiFlashMemQuotaQueryPerNode:  target.tiFlashMemQuotaQueryPerNode,
+		TiFlashQuerySpillRatio:       target.tiFlashQuerySpillRatio,
+		FineGrainedStreamCount:       target.fineGrainedStreamCount,
+		FineGrainedBatchSize:         target.fineGrainedBatchSize,
+		ImportThreads:                target.importThreads,
+		ImportDiskQuota:              target.importDiskQuota,
+	})
+	if err != nil {
+		return nil, err
 	}
 	failpoint.InjectCall(
 		"refreshMaterializedViewTiFlashSessionVarsApplied",
@@ -3015,48 +3041,15 @@ func applyRefreshExecutionSessionVars(sessVars *variable.SessionVars, target ref
 		target.fineGrainedStreamCount,
 		target.fineGrainedBatchSize,
 	)
-
-	return func() {
-		if origin == target {
-			return
-		}
-		restoreRefreshExecutionSessionVars(sessVars, origin, target)
-	}, nil
-}
-
-func restoreRefreshExecutionSessionVars(sessVars *variable.SessionVars, origin, current refreshExecutionSessionVars) {
-	if err := sessVars.SetSystemVar(variable.TiDBMemQuotaQuery, strconv.FormatInt(origin.maintainMemQuota, 10)); err != nil {
-		logutil.BgLogger().Warn(
-			"mv maintenance: failed to restore tidb_mem_quota_query on refresh session",
-			zap.Int64("originMemQuotaQuery", origin.maintainMemQuota),
-			zap.Int64("currentMemQuotaQuery", current.maintainMemQuota),
-			zap.Error(err),
-		)
-	}
-	if err := sessVars.SetSystemVar(variable.TiDBMaxTiFlashThreads, strconv.FormatInt(origin.tiFlashMaxThreads, 10)); err != nil {
-		logutil.BgLogger().Warn(
-			"mv maintenance: failed to restore tidb_max_tiflash_threads on refresh session",
-			zap.Int64("originMaxThreads", origin.tiFlashMaxThreads),
-			zap.Int64("currentMaxThreads", current.tiFlashMaxThreads),
-			zap.Error(err),
-		)
-	}
-	if err := sessVars.SetSystemVar(variable.TiFlashFineGrainedShuffleStreamCount, strconv.FormatInt(origin.fineGrainedStreamCount, 10)); err != nil {
-		logutil.BgLogger().Warn(
-			"mv maintenance: failed to restore tiflash_fine_grained_shuffle_stream_count on refresh session",
-			zap.Int64("originFineGrainedStreamCount", origin.fineGrainedStreamCount),
-			zap.Int64("currentFineGrainedStreamCount", current.fineGrainedStreamCount),
-			zap.Error(err),
-		)
-	}
-	if err := sessVars.SetSystemVar(variable.TiFlashFineGrainedShuffleBatchSize, strconv.FormatUint(origin.fineGrainedBatchSize, 10)); err != nil {
-		logutil.BgLogger().Warn(
-			"mv maintenance: failed to restore tiflash_fine_grained_shuffle_batch_size on refresh session",
-			zap.Uint64("originFineGrainedBatchSize", origin.fineGrainedBatchSize),
-			zap.Uint64("currentFineGrainedBatchSize", current.fineGrainedBatchSize),
-			zap.Error(err),
-		)
-	}
+	failpoint.InjectCall(
+		"refreshMaterializedViewTiFlashSpillSessionVarsApplied",
+		target.tiFlashMaxBytesBeforeExtJoin,
+		target.tiFlashMaxBytesBeforeExtAgg,
+		target.tiFlashMaxBytesBeforeExtSort,
+		target.tiFlashMemQuotaQueryPerNode,
+		target.tiFlashQuerySpillRatio,
+	)
+	return restore, nil
 }
 
 func buildMVRefreshShadowTableName(mviewID int64) string {
@@ -3088,6 +3081,8 @@ func buildMVRefreshOutOfPlaceBuildSQL(
 	shadowTableName string,
 	tblInfo *model.TableInfo,
 	storeName string,
+	importThreads int,
+	importDiskQuota string,
 ) (string, error) {
 	if tblInfo.MaterializedView == nil || len(tblInfo.MaterializedView.SQLContent) == 0 {
 		return "", errors.New("refresh materialized view: invalid select sql")
@@ -3095,7 +3090,8 @@ func buildMVRefreshOutOfPlaceBuildSQL(
 	selectSQL := tblInfo.MaterializedView.SQLContent
 	if shouldUseImportIntoForMVRefreshOutOfPlace(storeName) {
 		prefix := sqlescape.MustEscapeSQL("IMPORT INTO %n.%n FROM ", schemaName, shadowTableName)
-		return prefix + "(" + selectSQL + ") WITH disable_precheck", nil
+		options := ddl.BuildMViewImportIntoOptions(importThreads, importDiskQuota)
+		return prefix + "(" + selectSQL + ") WITH " + strings.Join(options, ", "), nil
 	}
 	prefix := sqlescape.MustEscapeSQL("INSERT INTO %n.%n ", schemaName, shadowTableName)
 	return prefix + selectSQL, nil
