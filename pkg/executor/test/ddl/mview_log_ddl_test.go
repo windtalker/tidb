@@ -899,10 +899,12 @@ func TestPurgeMaterializedViewLogBatchDelete(t *testing.T) {
 	maxCommitTS, err := strconv.ParseUint(fmt.Sprint(tk.MustQuery("select max(_tidb_commit_ts) from `$mlog$t_purge_batch_delete`").Rows()[0][0]), 10, 64)
 	require.NoError(t, err)
 	tk.MustExec("set @@session.tidb_mlog_purge_batch_size = 2")
+	beforeDelete := readAffectedRowsMetricValue(t, "Delete")
 	beforePurgeMVLog := readAffectedRowsMetricValue(t, "PurgeMVLog")
 	tk.MustExec("purge materialized view log on t_purge_batch_delete")
 	require.Equal(t, uint64(5), tk.Session().AffectedRows())
 	tk.CheckLastMessage("Rows inserted: 0  Updated: 0  Deleted: 5")
+	require.Equal(t, 0.0, readAffectedRowsMetricValue(t, "Delete")-beforeDelete)
 	require.Equal(t, 5.0, readAffectedRowsMetricValue(t, "PurgeMVLog")-beforePurgeMVLog)
 
 	tk.MustQuery("select count(*) from `$mlog$t_purge_batch_delete`").Check(testkit.Rows("0"))
