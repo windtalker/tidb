@@ -48,6 +48,8 @@ type MVTaskHandler interface {
 		currentTSO uint64,
 		mviewRefreshRetention time.Duration,
 		mlogPurgeRetention time.Duration,
+		mviewRefreshMaxRecords uint64,
+		mlogPurgeMaxRecords uint64,
 	) error
 }
 

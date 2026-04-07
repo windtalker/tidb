@@ -2789,6 +2789,26 @@ var defaultSysVars = []*SysVar{
 		}
 		return nil
 	}},
+	{Scope: ScopeGlobal, Name: TiDBMViewRefreshHistMaxRecords, Value: strconv.Itoa(DefTiDBMViewRefreshHistMaxRecords), Type: TypeUnsigned, MinValue: 0, MaxValue: math.MaxInt64, SetGlobal: func(_ context.Context, _ *SessionVars, s string) error {
+		val, err := strconv.ParseUint(s, 10, 64)
+		if err != nil {
+			return err
+		}
+		if setter := SetMVServiceMViewRefreshHistMaxRecords.Load(); setter != nil {
+			(*setter)(val)
+		}
+		return nil
+	}},
+	{Scope: ScopeGlobal, Name: TiDBMLogPurgeHistMaxRecords, Value: strconv.Itoa(DefTiDBMLogPurgeHistMaxRecords), Type: TypeUnsigned, MinValue: 0, MaxValue: math.MaxInt64, SetGlobal: func(_ context.Context, _ *SessionVars, s string) error {
+		val, err := strconv.ParseUint(s, 10, 64)
+		if err != nil {
+			return err
+		}
+		if setter := SetMVServiceMLogPurgeHistMaxRecords.Load(); setter != nil {
+			(*setter)(val)
+		}
+		return nil
+	}},
 	{Scope: ScopeGlobal | ScopeSession, Name: TiDBNonTransactionalIgnoreError, Value: BoolToOnOff(DefTiDBBatchDMLIgnoreError), Type: TypeBool,
 		SetSession: func(s *SessionVars, val string) error {
 			s.NonTransactionalIgnoreError = TiDBOptOn(val)

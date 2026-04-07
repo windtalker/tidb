@@ -66,6 +66,8 @@ type MVService struct {
 	serverRefreshInterval           time.Duration
 	mviewRefreshHistRetentionMillis atomic.Int64
 	mlogPurgeHistRetentionMillis    atomic.Int64
+	mviewRefreshHistMaxRecords      atomic.Uint64
+	mlogPurgeHistMaxRecords         atomic.Uint64
 	nextHistoryGCAtMillis           atomic.Int64
 	historyGCRetryCount             atomic.Int64
 	historyGCRunning                atomic.Bool
@@ -101,8 +103,9 @@ const (
 	defaultMVFetchInterval       = 30 * time.Second
 	defaultMVBasicInterval       = time.Second
 	defaultServerRefreshInterval = 5 * time.Second
-	defaultMVHistoryGCInterval   = time.Hour
+	defaultMVHistoryGCInterval   = 20 * time.Minute
 	defaultMVHistoryGCRetention  = 365 * 24 * time.Hour
+	defaultMVHistoryGCMaxRecords = uint64(1000000)
 	defaultMVTaskRetryBase       = 10 * time.Second
 	defaultMVTaskRetryMax        = 120 * time.Second
 	manualCancelBackoffDelay     = 2 * time.Minute
@@ -474,7 +477,7 @@ func (t *MVService) logMVRefreshAlerts(alertTasks []refreshAlertTask) {
 		if task.overdue {
 			logutil.BgLogger().Error("Materialized_view_refresh_time_overdue", fields...)
 		} else {
-			logutil.BgLogger().Warn("Materialized_view_refresh_time_warning", fields...)
+			logutil.BgLogger().Error("Materialized_view_refresh_time_warning", fields...)
 		}
 	}
 }
@@ -940,6 +943,7 @@ func (t *MVService) maybeGCOperationHistory(now time.Time) {
 func (t *MVService) runGCOperationHistory(now time.Time, historyGCInterval time.Duration) {
 	defer t.historyGCRunning.Store(false)
 	mviewRefreshRetention, mlogPurgeRetention := t.historyGCRetentionConfig()
+	mviewRefreshMaxRecords, mlogPurgeMaxRecords := t.historyGCMaxRecordsConfig()
 	startAt := mvsNow()
 	result := mvDurationResultSuccess
 	defer func() {
@@ -964,13 +968,23 @@ func (t *MVService) runGCOperationHistory(now time.Time, historyGCInterval time.
 		logutil.BgLogger().Warn("get current tso failed when GC MV/MVLOG operation history", fields...)
 		return
 	}
-	if err := t.mh.PurgeMVHistoryBeforeTSO(t.ctx, t.sysSessionPool, currentTSO, mviewRefreshRetention, mlogPurgeRetention); err != nil {
+	if err := t.mh.PurgeMVHistoryBeforeTSO(
+		t.ctx,
+		t.sysSessionPool,
+		currentTSO,
+		mviewRefreshRetention,
+		mlogPurgeRetention,
+		mviewRefreshMaxRecords,
+		mlogPurgeMaxRecords,
+	); err != nil {
 		result = mvDurationResultFailed
 		t.scheduleHistoryGCFailure(now, historyGCInterval)
 		fields := append(t.runtimeLogFields(),
 			zap.Uint64("current_tso", currentTSO),
 			zap.Duration("mview_refresh_hist_retention", mviewRefreshRetention),
 			zap.Duration("mlog_purge_hist_retention", mlogPurgeRetention),
+			zap.Uint64("mview_refresh_hist_max_records", mviewRefreshMaxRecords),
+			zap.Uint64("mlog_purge_hist_max_records", mlogPurgeMaxRecords),
 			zap.Error(err),
 		)
 		logutil.BgLogger().Warn("GC MV/MVLOG operation history failed", fields...)

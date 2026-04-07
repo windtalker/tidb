@@ -1851,12 +1851,16 @@ func TestMVServiceGlobalSysVars(t *testing.T) {
 	oldMemory := SetMVServiceTaskThresholdMemory.Load()
 	oldRefreshHist := SetMVServiceMViewRefreshHistRetention.Load()
 	oldPurgeHist := SetMVServiceMLogPurgeHistRetention.Load()
+	oldRefreshHistMaxRecords := SetMVServiceMViewRefreshHistMaxRecords.Load()
+	oldPurgeHistMaxRecords := SetMVServiceMLogPurgeHistMaxRecords.Load()
 	defer func() {
 		SetMVServiceTaskMaxConcurrency.Store(oldTaskMax)
 		SetMVServiceTaskThresholdCPU.Store(oldCPU)
 		SetMVServiceTaskThresholdMemory.Store(oldMemory)
 		SetMVServiceMViewRefreshHistRetention.Store(oldRefreshHist)
 		SetMVServiceMLogPurgeHistRetention.Store(oldPurgeHist)
+		SetMVServiceMViewRefreshHistMaxRecords.Store(oldRefreshHistMaxRecords)
+		SetMVServiceMLogPurgeHistMaxRecords.Store(oldPurgeHistMaxRecords)
 	}()
 
 	gotTaskMax := -1
@@ -1864,17 +1868,23 @@ func TestMVServiceGlobalSysVars(t *testing.T) {
 	gotMemory := -1.0
 	var gotRefreshHist time.Duration
 	var gotPurgeHist time.Duration
+	gotRefreshHistMaxRecords := uint64(0)
+	gotPurgeHistMaxRecords := uint64(0)
 
 	taskMaxFn := func(v int) { gotTaskMax = v }
 	cpuFn := func(v float64) { gotCPU = v }
 	memoryFn := func(v float64) { gotMemory = v }
 	refreshHistFn := func(v time.Duration) { gotRefreshHist = v }
 	purgeHistFn := func(v time.Duration) { gotPurgeHist = v }
+	refreshHistMaxRecordsFn := func(v uint64) { gotRefreshHistMaxRecords = v }
+	purgeHistMaxRecordsFn := func(v uint64) { gotPurgeHistMaxRecords = v }
 	SetMVServiceTaskMaxConcurrency.Store(&taskMaxFn)
 	SetMVServiceTaskThresholdCPU.Store(&cpuFn)
 	SetMVServiceTaskThresholdMemory.Store(&memoryFn)
 	SetMVServiceMViewRefreshHistRetention.Store(&refreshHistFn)
 	SetMVServiceMLogPurgeHistRetention.Store(&purgeHistFn)
+	SetMVServiceMViewRefreshHistMaxRecords.Store(&refreshHistMaxRecordsFn)
+	SetMVServiceMLogPurgeHistMaxRecords.Store(&purgeHistMaxRecordsFn)
 
 	require.NoError(t, mock.SetGlobalSysVar(context.Background(), TiDBMViewTaskMax, "0"))
 	require.Equal(t, 0, gotTaskMax)
@@ -1890,4 +1900,10 @@ func TestMVServiceGlobalSysVars(t *testing.T) {
 
 	require.NoError(t, mock.SetGlobalSysVar(context.Background(), TiDBMLogPurgeHistTime, "48"))
 	require.Equal(t, 48*time.Hour, gotPurgeHist)
+
+	require.NoError(t, mock.SetGlobalSysVar(context.Background(), TiDBMViewRefreshHistMaxRecords, "1000000"))
+	require.Equal(t, uint64(1000000), gotRefreshHistMaxRecords)
+
+	require.NoError(t, mock.SetGlobalSysVar(context.Background(), TiDBMLogPurgeHistMaxRecords, "0"))
+	require.Equal(t, uint64(0), gotPurgeHistMaxRecords)
 }

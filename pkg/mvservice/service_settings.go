@@ -35,8 +35,10 @@ type Config struct {
 	RetryBaseDelay time.Duration
 	RetryMaxDelay  time.Duration
 
-	MViewRefreshHistRetention time.Duration
-	MLogPurgeHistRetention    time.Duration
+	MViewRefreshHistRetention  time.Duration
+	MLogPurgeHistRetention     time.Duration
+	MViewRefreshHistMaxRecords uint64
+	MLogPurgeHistMaxRecords    uint64
 
 	ServerConsistentHashReplicas int
 
@@ -55,6 +57,8 @@ func DefaultMVServiceConfig() Config {
 		RetryMaxDelay:                defaultMVTaskRetryMax,
 		MViewRefreshHistRetention:    defaultMVHistoryGCRetention,
 		MLogPurgeHistRetention:       defaultMVHistoryGCRetention,
+		MViewRefreshHistMaxRecords:   defaultMVHistoryGCMaxRecords,
+		MLogPurgeHistMaxRecords:      defaultMVHistoryGCMaxRecords,
 		ServerConsistentHashReplicas: defaultCHReplicas,
 	}
 }
@@ -132,6 +136,8 @@ func NewMVService(ctx context.Context, se basic.SessionPool, helper Helper, cfg 
 		panic(fmt.Sprintf("invalid MV service mlog purge history retention config: retention=%s err=%v",
 			cfg.MLogPurgeHistRetention, err))
 	}
+	mgr.SetMViewRefreshHistMaxRecords(cfg.MViewRefreshHistMaxRecords)
+	mgr.SetMLogPurgeHistMaxRecords(cfg.MLogPurgeHistMaxRecords)
 	if err := mgr.setRetryDelayConfig(cfg.RetryBaseDelay, cfg.RetryMaxDelay); err != nil {
 		panic(fmt.Sprintf("invalid MV service retry config: base=%s max=%s err=%v",
 			cfg.RetryBaseDelay, cfg.RetryMaxDelay, err))
@@ -302,14 +308,41 @@ func (t *MVService) historyGCRetentionConfig() (mviewRefreshRetention, mlogPurge
 	return mviewRefreshRetention, mlogPurgeRetention
 }
 
+// SetMViewRefreshHistMaxRecords sets the max retained records for mysql.tidb_mview_refresh_hist.
+// Zero disables count-based history GC.
+func (t *MVService) SetMViewRefreshHistMaxRecords(maxRecords uint64) {
+	if t == nil {
+		return
+	}
+	t.mviewRefreshHistMaxRecords.Store(maxRecords)
+	t.rescheduleHistoryGCEarlier(mvsNow(), t.historyGCInterval())
+}
+
+// SetMLogPurgeHistMaxRecords sets the max retained records for mysql.tidb_mlog_purge_hist.
+// Zero disables count-based history GC.
+func (t *MVService) SetMLogPurgeHistMaxRecords(maxRecords uint64) {
+	if t == nil {
+		return
+	}
+	t.mlogPurgeHistMaxRecords.Store(maxRecords)
+	t.rescheduleHistoryGCEarlier(mvsNow(), t.historyGCInterval())
+}
+
+// historyGCMaxRecordsConfig returns separate count caps for mview refresh and mlog purge history tables.
+func (t *MVService) historyGCMaxRecordsConfig() (mviewRefreshMaxRecords, mlogPurgeMaxRecords uint64) {
+	mviewRefreshMaxRecords = t.mviewRefreshHistMaxRecords.Load()
+	mlogPurgeMaxRecords = t.mlogPurgeHistMaxRecords.Load()
+	return mviewRefreshMaxRecords, mlogPurgeMaxRecords
+}
+
 func deriveHistoryGCInterval(mviewRefreshRetention, mlogPurgeRetention time.Duration) time.Duration {
 	intervalBase := min(mviewRefreshRetention, mlogPurgeRetention)
 	interval := intervalBase / 100
 	if interval < time.Second {
 		return time.Second
 	}
-	if interval > time.Hour {
-		return time.Hour
+	if interval > defaultMVHistoryGCInterval {
+		return defaultMVHistoryGCInterval
 	}
 	return interval
 }
