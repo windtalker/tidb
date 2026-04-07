@@ -214,6 +214,9 @@ func (w *worker) onDropSchema(jobCtx *jobContext, job *model.Job) (ver int64, _ 
 				if err = w.deleteCreateMaterializedViewRefreshInfo(jobCtx, tblInfo.ID); err != nil {
 					return ver, errors.Trace(err)
 				}
+				if err = w.deleteCreateMaterializedViewRefreshAlert(jobCtx, tblInfo.ID); err != nil {
+					return ver, errors.Trace(err)
+				}
 			}
 			if tblInfo.MaterializedViewLog != nil {
 				if err = w.deleteMaterializedViewLogPurgeInfo(jobCtx, tblInfo.ID); err != nil {

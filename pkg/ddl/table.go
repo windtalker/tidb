@@ -129,6 +129,9 @@ func (w *worker) onDropTableOrView(jobCtx *jobContext, job *model.Job) (ver int6
 			if err = w.deleteCreateMaterializedViewRefreshInfo(jobCtx, job.TableID); err != nil {
 				return ver, errors.Trace(err)
 			}
+			if err = w.deleteCreateMaterializedViewRefreshAlert(jobCtx, job.TableID); err != nil {
+				return ver, errors.Trace(err)
+			}
 		}
 		if tblInfo.MaterializedViewLog != nil {
 			if err = w.deleteMaterializedViewLogPurgeInfo(jobCtx, job.TableID); err != nil {

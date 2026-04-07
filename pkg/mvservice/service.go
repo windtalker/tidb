@@ -16,6 +16,7 @@ package mvservice
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"runtime/debug"
 	"strconv"
@@ -131,7 +132,9 @@ const (
 
 	mvHistoryGCOwnerKey = "gc-mv-op-hist"
 
-	historyGCRetryMaxAttempts = 8
+	historyGCRetryMaxAttempts  = 8
+	mvRefreshAlertLevelWarning = "warning"
+	mvRefreshAlertLevelOverdue = "overdue"
 )
 
 type mv struct {
@@ -145,8 +148,11 @@ type mv struct {
 	alertWarningSec    int64
 	alertOverdueSec    int64
 	// Suppress repeated overdue logs for the same lastSuccessReadTSO.
-	lastLoggedWarningTSO uint64
-	lastLoggedOverdueTSO uint64
+	lastLoggedWarningTSO   uint64
+	lastLoggedOverdueTSO   uint64
+	lastSyncedAlertLevel   string
+	lastSyncedAlertReadTSO uint64
+	alertStateInitialized  bool
 
 	orderTs    int64 // unix timestamp in milliseconds
 	retryCount atomic.Int64
@@ -231,20 +237,22 @@ func (t *MVService) refreshMV(mvToRefresh []*mv) {
 }
 
 type refreshAlertTask struct {
-	mviewID         int64
-	schemaName      string
-	mviewName       string
-	nextRefresh     time.Time
-	lastSuccessTime time.Time
-	alertWarningSec int64
-	alertOverdueSec int64
-	retryCount      int64
-	taskState       string
-	overdue         bool
+	mviewID            int64
+	schemaName         string
+	mviewName          string
+	nextRefresh        time.Time
+	lastSuccessTime    time.Time
+	lastSuccessReadTSO uint64
+	alertWarningSec    int64
+	alertOverdueSec    int64
+	retryCount         int64
+	taskState          string
+	overdue            bool
+	alertLevel         string
 }
 
-// maybeLogRefreshAlertTasks scans pending refresh tasks and logs warning/overdue alerts.
-// The scan runs on maintenanceTick and is rate-limited to once per minute.
+// maybeLogRefreshAlertTasks scans pending refresh tasks, persists alert states, and logs warning/overdue alerts.
+// The scan runs on maintenanceTick and is rate-limited by mvRefreshAlertScanInterval.
 func (t *MVService) maybeLogRefreshAlertTasks(now time.Time) {
 	nowMillis := now.UnixMilli()
 	if next := t.nextRefreshAlertScanMillis.Load(); next > nowMillis {
@@ -252,13 +260,81 @@ func (t *MVService) maybeLogRefreshAlertTasks(now time.Time) {
 	}
 	t.nextRefreshAlertScanMillis.Store(now.Add(mvRefreshAlertScanInterval).UnixMilli())
 
-	alertTasks, warningCount, overdueCount := t.collectRefreshAlertTasks(now)
+	alertStates, warningCount, overdueCount := t.collectRefreshAlertStates(now)
 	t.metrics.alertWarningCount.Store(warningCount)
 	t.metrics.alertOverdueCount.Store(overdueCount)
+	if t.syncRefreshAlertStates(now, alertStates) {
+		t.markRefreshAlertStatesSynced(alertStates)
+	}
+	t.cleanupStaleRefreshAlerts()
+
+	alertTasks, _, _ := t.collectRefreshAlertTasks(now)
 	if len(alertTasks) == 0 {
 		return
 	}
 	t.logMVRefreshAlerts(alertTasks)
+}
+
+func (t *MVService) collectRefreshAlertStates(now time.Time) ([]refreshAlertTask, int64, int64) {
+	t.mvRefreshMu.Lock()
+	defer t.mvRefreshMu.Unlock()
+
+	alertStates := make([]refreshAlertTask, 0, len(t.mvRefreshMu.pending))
+	var warningCount int64
+	var overdueCount int64
+	for mviewID, item := range t.mvRefreshMu.pending {
+		if item.Value == nil || item.Value.nextRefresh.IsZero() {
+			continue
+		}
+		alertLevel := classifyRefreshAlertLevel(now, item.Value.lastSuccessTime, item.Value.alertWarningSec, item.Value.alertOverdueSec)
+		switch alertLevel {
+		case mvRefreshAlertLevelOverdue:
+			overdueCount++
+		case mvRefreshAlertLevelWarning:
+			warningCount++
+		}
+		if item.Value.alertStateInitialized &&
+			item.Value.lastSyncedAlertLevel == alertLevel &&
+			item.Value.lastSyncedAlertReadTSO == item.Value.lastSuccessReadTSO {
+			continue
+		}
+		taskState := "queued"
+		if item.Value.orderTs == maxNextScheduleTs {
+			taskState = "running"
+		}
+		alertStates = append(alertStates, refreshAlertTask{
+			mviewID:            mviewID,
+			schemaName:         item.Value.schemaName,
+			mviewName:          item.Value.mviewName,
+			nextRefresh:        item.Value.nextRefresh,
+			lastSuccessTime:    item.Value.lastSuccessTime,
+			lastSuccessReadTSO: item.Value.lastSuccessReadTSO,
+			alertWarningSec:    item.Value.alertWarningSec,
+			alertOverdueSec:    item.Value.alertOverdueSec,
+			retryCount:         item.Value.retryCount.Load(),
+			taskState:          taskState,
+			overdue:            alertLevel == mvRefreshAlertLevelOverdue,
+			alertLevel:         alertLevel,
+		})
+	}
+	return alertStates, warningCount, overdueCount
+}
+
+func (t *MVService) markRefreshAlertStatesSynced(states []refreshAlertTask) {
+	if len(states) == 0 {
+		return
+	}
+	t.mvRefreshMu.Lock()
+	defer t.mvRefreshMu.Unlock()
+	for _, state := range states {
+		item, ok := t.mvRefreshMu.pending[state.mviewID]
+		if !ok || item.Value == nil {
+			continue
+		}
+		item.Value.lastSyncedAlertLevel = state.alertLevel
+		item.Value.lastSyncedAlertReadTSO = state.lastSuccessReadTSO
+		item.Value.alertStateInitialized = true
+	}
 }
 
 func (t *MVService) collectRefreshAlertTasks(now time.Time) ([]refreshAlertTask, int64, int64) {
@@ -273,21 +349,11 @@ func (t *MVService) collectRefreshAlertTasks(now time.Time) ([]refreshAlertTask,
 			continue
 		}
 		lastSuccessTime := item.Value.lastSuccessTime
-		if lastSuccessTime.IsZero() {
+		alertLevel := classifyRefreshAlertLevel(now, lastSuccessTime, item.Value.alertWarningSec, item.Value.alertOverdueSec)
+		if alertLevel == "" {
 			continue
 		}
-		if now.Before(lastSuccessTime) {
-			continue
-		}
-		overdueDuration := now.Sub(lastSuccessTime)
-		overdue := false
-		if item.Value.alertOverdueSec > 0 && overdueDuration >= time.Duration(item.Value.alertOverdueSec)*time.Second {
-			overdue = true
-		} else if item.Value.alertWarningSec > 0 && overdueDuration >= time.Duration(item.Value.alertWarningSec)*time.Second {
-			overdue = false
-		} else {
-			continue
-		}
+		overdue := alertLevel == mvRefreshAlertLevelOverdue
 		if overdue {
 			overdueCount++
 		} else {
@@ -312,19 +378,65 @@ func (t *MVService) collectRefreshAlertTasks(now time.Time) ([]refreshAlertTask,
 			taskState = "running"
 		}
 		alertTasks = append(alertTasks, refreshAlertTask{
-			mviewID:         mviewID,
-			schemaName:      item.Value.schemaName,
-			mviewName:       item.Value.mviewName,
-			nextRefresh:     item.Value.nextRefresh,
-			lastSuccessTime: lastSuccessTime,
-			alertWarningSec: item.Value.alertWarningSec,
-			alertOverdueSec: item.Value.alertOverdueSec,
-			retryCount:      item.Value.retryCount.Load(),
-			taskState:       taskState,
-			overdue:         overdue,
+			mviewID:            mviewID,
+			schemaName:         item.Value.schemaName,
+			mviewName:          item.Value.mviewName,
+			nextRefresh:        item.Value.nextRefresh,
+			lastSuccessTime:    lastSuccessTime,
+			lastSuccessReadTSO: item.Value.lastSuccessReadTSO,
+			alertWarningSec:    item.Value.alertWarningSec,
+			alertOverdueSec:    item.Value.alertOverdueSec,
+			retryCount:         item.Value.retryCount.Load(),
+			taskState:          taskState,
+			overdue:            overdue,
+			alertLevel:         alertLevel,
 		})
 	}
 	return alertTasks, warningCount, overdueCount
+}
+
+func classifyRefreshAlertLevel(now time.Time, lastSuccessTime time.Time, alertWarningSec, alertOverdueSec int64) string {
+	if lastSuccessTime.IsZero() || now.Before(lastSuccessTime) {
+		return ""
+	}
+	overdueDuration := now.Sub(lastSuccessTime)
+	if alertOverdueSec > 0 && overdueDuration >= time.Duration(alertOverdueSec)*time.Second {
+		return mvRefreshAlertLevelOverdue
+	}
+	if alertWarningSec > 0 && overdueDuration >= time.Duration(alertWarningSec)*time.Second {
+		return mvRefreshAlertLevelWarning
+	}
+	return ""
+}
+
+func (t *MVService) syncRefreshAlertStates(updatedAt time.Time, states []refreshAlertTask) bool {
+	if len(states) == 0 {
+		return true
+	}
+	if err := t.mh.SyncMVRefreshAlertStates(t.ctx, t.sysSessionPool, updatedAt, states); err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return false
+		}
+		fields := append(
+			t.runtimeLogFields(),
+			zap.Int("alert_state_count", len(states)),
+			zap.Time("updated_at", updatedAt),
+			zap.Error(err),
+		)
+		logutil.BgLogger().Warn("sync mv refresh alert states failed", fields...)
+		return false
+	}
+	return true
+}
+
+func (t *MVService) cleanupStaleRefreshAlerts() {
+	if err := t.mh.CleanupStaleMVRefreshAlerts(t.ctx, t.sysSessionPool); err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return
+		}
+		fields := append(t.runtimeLogFields(), zap.Error(err))
+		logutil.BgLogger().Warn("cleanup stale mv refresh alerts failed", fields...)
+	}
 }
 
 // logMVRefreshAlerts logs refresh alert task details with warning/overdue levels.
@@ -663,8 +775,7 @@ func (t *MVService) buildMVLogPurgeTasks(newPending map[int64]*mvLog) {
 
 // buildMVRefreshTasks rebuilds refresh task states from fetched metadata.
 func (t *MVService) buildMVRefreshTasks(newPending map[int64]*mv) {
-	t.mvRefreshMu.Lock()         // guard mv refresh queue
-	defer t.mvRefreshMu.Unlock() // release mv refresh queue guard
+	t.mvRefreshMu.Lock() // guard mv refresh queue
 
 	if t.mvRefreshMu.pending == nil {
 		t.mvRefreshMu.pending = make(map[int64]mvItem, len(newPending))
@@ -698,6 +809,7 @@ func (t *MVService) buildMVRefreshTasks(newPending map[int64]*mv) {
 	}
 
 	t.metrics.mvCount.Store(int64(len(t.mvRefreshMu.pending)))
+	t.mvRefreshMu.Unlock() // release mv refresh queue guard
 }
 
 // filterUnownedTasks removes tasks that are not owned by this server.
