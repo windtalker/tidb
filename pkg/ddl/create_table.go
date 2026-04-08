@@ -590,6 +590,9 @@ func (w *worker) rollbackCreateMaterializedView(jobCtx *jobContext, job *model.J
 	if err := w.deleteCreateMaterializedViewRefreshInfo(jobCtx, job.TableID); err != nil {
 		return ver, errors.Trace(err)
 	}
+	if err := w.deleteCreateMaterializedViewRefreshAlert(jobCtx, job.TableID); err != nil {
+		return ver, errors.Trace(err)
+	}
 
 	job.State = model.JobStateRollbackDone
 	job.SchemaState = model.StateNone
@@ -1147,6 +1150,25 @@ func (w *worker) deleteCreateMaterializedViewRefreshInfo(jobCtx *jobContext, mvi
 			err = infoschema.ErrTableNotExists.GenWithStackByArgs("mysql", "tidb_mview_refresh_info")
 		}
 	})
+	if infoschema.ErrTableNotExists.Equal(err) {
+		return nil
+	}
+	return errors.Trace(err)
+}
+
+func (w *worker) deleteCreateMaterializedViewRefreshAlert(jobCtx *jobContext, mviewID int64) error {
+	ctx := jobCtx.stepCtx
+	if ctx == nil {
+		ctx = w.workCtx
+	}
+	deleteSQL := sqlescape.MustEscapeSQL("DELETE FROM mysql.tidb_mview_refresh_alert WHERE MVIEW_ID = %?", mviewID)
+	var err error
+	failpoint.Inject("mockDeleteCreateMaterializedViewRefreshAlertErr", func(val failpoint.Value) {
+		err = errors.New(val.(string))
+	})
+	if err == nil {
+		_, err = w.sess.Execute(ctx, deleteSQL, "mview-refresh-alert-delete")
+	}
 	if infoschema.ErrTableNotExists.Equal(err) {
 		return nil
 	}
