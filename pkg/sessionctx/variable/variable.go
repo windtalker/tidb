@@ -72,8 +72,8 @@ func CaptureMViewExecutionSessionVars(sessVars *SessionVars) MViewExecutionSessi
 	}
 	return MViewExecutionSessionVars{
 		MaintainMemQuota:             sessVars.MVMaintainMemQuota,
-		AllowMPPExecution:            sessVars.IsMPPAllowed(),
-		EnforceMPPExecution:          sessVars.IsMPPEnforced(),
+		AllowMPPExecution:            sessVars.allowMPPExecution,
+		EnforceMPPExecution:          sessVars.enforceMPPExecution,
 		IsolationReadEngines:         captureMViewExecutionIsolationReadEngines(sessVars),
 		TiFlashMaxThreads:            sessVars.TiFlashMaxThreads,
 		TiFlashMaxBytesBeforeExtJoin: sessVars.TiFlashMaxBytesBeforeExternalJoin,
@@ -96,8 +96,8 @@ func CaptureAppliedMViewExecutionSessionVars(sessVars *SessionVars) MViewExecuti
 	}
 	return MViewExecutionSessionVars{
 		MaintainMemQuota:             sessVars.MemQuotaQuery,
-		AllowMPPExecution:            sessVars.IsMPPAllowed(),
-		EnforceMPPExecution:          sessVars.IsMPPEnforced(),
+		AllowMPPExecution:            sessVars.allowMPPExecution,
+		EnforceMPPExecution:          sessVars.enforceMPPExecution,
 		IsolationReadEngines:         captureMViewExecutionIsolationReadEngines(sessVars),
 		TiFlashMaxThreads:            sessVars.TiFlashMaxThreads,
 		TiFlashMaxBytesBeforeExtJoin: sessVars.TiFlashMaxBytesBeforeExternalJoin,
@@ -180,22 +180,15 @@ func buildMViewExecutionSessionVarAssignments(
 	target MViewExecutionSessionVars,
 	maintainMemQuotaVarName string,
 ) []mViewExecutionSessionVarAssignment {
-	return []mViewExecutionSessionVarAssignment{
+	assignments := []mViewExecutionSessionVarAssignment{
 		{
 			name:           maintainMemQuotaVarName,
 			value:          strconv.FormatInt(target.MaintainMemQuota, 10),
 			failureMessage: "mv execution: failed to apply maintain mem quota",
 		},
-		{
-			name:           TiDBAllowMPPExecution,
-			value:          BoolToOnOff(target.AllowMPPExecution),
-			failureMessage: "mv execution: failed to apply tidb_allow_mpp",
-		},
-		{
-			name:           TiDBEnforceMPPExecution,
-			value:          BoolToOnOff(target.EnforceMPPExecution),
-			failureMessage: "mv execution: failed to apply tidb_enforce_mpp",
-		},
+	}
+	assignments = append(assignments, buildMViewExecutionMPPVarAssignments(target)...)
+	assignments = append(assignments, []mViewExecutionSessionVarAssignment{
 		{
 			name:           TiDBIsolationReadEngines,
 			value:          target.IsolationReadEngines,
@@ -251,6 +244,60 @@ func buildMViewExecutionSessionVarAssignments(
 			value:          target.ImportDiskQuota,
 			failureMessage: "mv execution: failed to apply tidb_mview_maintain_import_disk_quota",
 		},
+	}...)
+	return assignments
+}
+
+func buildMViewExecutionMPPVarAssignments(target MViewExecutionSessionVars) []mViewExecutionSessionVarAssignment {
+	allowAssignment := mViewExecutionSessionVarAssignment{
+		name:           TiDBAllowMPPExecution,
+		value:          BoolToOnOff(target.AllowMPPExecution),
+		failureMessage: "mv execution: failed to apply tidb_allow_mpp",
+	}
+	enforceAssignment := mViewExecutionSessionVarAssignment{
+		name:           TiDBEnforceMPPExecution,
+		value:          BoolToOnOff(target.EnforceMPPExecution),
+		failureMessage: "mv execution: failed to apply tidb_enforce_mpp",
+	}
+	if target.EnforceMPPExecution && !target.AllowMPPExecution {
+		// Preserve the latent session state tidb_allow_mpp=OFF, tidb_enforce_mpp=ON.
+		// This must be restored via ON -> ON -> OFF because setting enforce=ON while allow=OFF is rejected.
+		return []mViewExecutionSessionVarAssignment{
+			{
+				name:           TiDBAllowMPPExecution,
+				value:          On,
+				failureMessage: "mv execution: failed to apply tidb_allow_mpp",
+			},
+			{
+				name:           TiDBEnforceMPPExecution,
+				value:          On,
+				failureMessage: "mv execution: failed to apply tidb_enforce_mpp",
+			},
+			allowAssignment,
+		}
+	}
+	return []mViewExecutionSessionVarAssignment{allowAssignment, enforceAssignment}
+}
+
+func buildMViewExecutionSessionVarValueMap(
+	target MViewExecutionSessionVars,
+	maintainMemQuotaVarName string,
+) map[string]string {
+	return map[string]string{
+		maintainMemQuotaVarName:                  strconv.FormatInt(target.MaintainMemQuota, 10),
+		TiDBAllowMPPExecution:                    BoolToOnOff(target.AllowMPPExecution),
+		TiDBEnforceMPPExecution:                  BoolToOnOff(target.EnforceMPPExecution),
+		TiDBIsolationReadEngines:                 target.IsolationReadEngines,
+		TiDBMaxTiFlashThreads:                    strconv.FormatInt(target.TiFlashMaxThreads, 10),
+		TiDBMaxBytesBeforeTiFlashExternalJoin:    strconv.FormatInt(target.TiFlashMaxBytesBeforeExtJoin, 10),
+		TiDBMaxBytesBeforeTiFlashExternalGroupBy: strconv.FormatInt(target.TiFlashMaxBytesBeforeExtAgg, 10),
+		TiDBMaxBytesBeforeTiFlashExternalSort:    strconv.FormatInt(target.TiFlashMaxBytesBeforeExtSort, 10),
+		TiFlashMemQuotaQueryPerNode:              strconv.FormatInt(target.TiFlashMemQuotaQueryPerNode, 10),
+		TiFlashQuerySpillRatio:                   strconv.FormatFloat(target.TiFlashQuerySpillRatio, 'f', -1, 64),
+		TiFlashFineGrainedShuffleStreamCount:     strconv.FormatInt(target.FineGrainedStreamCount, 10),
+		TiFlashFineGrainedShuffleBatchSize:       strconv.FormatUint(target.FineGrainedBatchSize, 10),
+		TiDBMViewMaintainImportThreads:           strconv.Itoa(target.ImportThreads),
+		TiDBMViewMaintainImportDiskQuota:         target.ImportDiskQuota,
 	}
 }
 
@@ -276,10 +323,14 @@ func restoreMViewExecutionSessionVars(
 	onRestoreError func(name, originValue, currentValue string, err error),
 ) {
 	originAssignments := buildMViewExecutionSessionVarAssignments(origin, maintainMemQuotaVarName)
-	currentAssignments := buildMViewExecutionSessionVarAssignments(current, maintainMemQuotaVarName)
-	for idx, assignment := range originAssignments {
+	currentValues := buildMViewExecutionSessionVarValueMap(current, maintainMemQuotaVarName)
+	for _, assignment := range originAssignments {
 		if err := sessVars.SetSystemVar(assignment.name, assignment.value); err != nil && onRestoreError != nil {
-			onRestoreError(assignment.name, assignment.value, currentAssignments[idx].value, err)
+			currentValue, ok := currentValues[assignment.name]
+			if !ok {
+				currentValue = ""
+			}
+			onRestoreError(assignment.name, assignment.value, currentValue, err)
 		}
 	}
 }

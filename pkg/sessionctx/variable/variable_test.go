@@ -726,24 +726,29 @@ func TestCaptureMViewExecutionSessionVarsIncludesMPPAndIsolationRead(t *testing.
 	sessVars := NewSessionVars(nil)
 	require.NoError(t, sessVars.SetSystemVar(TiDBAllowMPPExecution, On))
 	require.NoError(t, sessVars.SetSystemVar(TiDBEnforceMPPExecution, On))
+	require.NoError(t, sessVars.SetSystemVar(TiDBAllowMPPExecution, Off))
 	require.NoError(t, sessVars.SetSystemVar(TiDBIsolationReadEngines, "tikv,tiflash"))
+	requireRawMPPExecutionSessionVars(t, sessVars, Off, On)
+	require.False(t, sessVars.IsMPPEnforced())
 
 	captured := CaptureMViewExecutionSessionVars(sessVars)
-	require.True(t, captured.AllowMPPExecution)
+	require.False(t, captured.AllowMPPExecution)
 	require.True(t, captured.EnforceMPPExecution)
 	require.Equal(t, "tikv,tiflash", captured.IsolationReadEngines)
 
 	applied := CaptureAppliedMViewExecutionSessionVars(sessVars)
-	require.True(t, applied.AllowMPPExecution)
+	require.False(t, applied.AllowMPPExecution)
 	require.True(t, applied.EnforceMPPExecution)
 	require.Equal(t, "tikv,tiflash", applied.IsolationReadEngines)
 }
 
-func TestApplyMViewExecutionSessionVarsWithConfigIncludesMPPAndIsolationRead(t *testing.T) {
+func TestApplyMViewExecutionSessionVarsWithConfigRestoresLatentMPPState(t *testing.T) {
 	sessVars := NewSessionVars(nil)
+	require.NoError(t, sessVars.SetSystemVar(TiDBAllowMPPExecution, On))
+	require.NoError(t, sessVars.SetSystemVar(TiDBEnforceMPPExecution, On))
 	require.NoError(t, sessVars.SetSystemVar(TiDBAllowMPPExecution, Off))
-	require.NoError(t, sessVars.SetSystemVar(TiDBEnforceMPPExecution, Off))
 	require.NoError(t, sessVars.SetSystemVar(TiDBIsolationReadEngines, kv.TiKV.Name()))
+	requireRawMPPExecutionSessionVars(t, sessVars, Off, On)
 
 	target := CaptureMViewExecutionSessionVars(sessVars)
 	target.AllowMPPExecution = true
@@ -763,9 +768,40 @@ func TestApplyMViewExecutionSessionVarsWithConfigIncludesMPPAndIsolationRead(t *
 	require.Equal(t, "tikv,tiflash", isolationEngines)
 
 	restore()
+	requireRawMPPExecutionSessionVars(t, sessVars, Off, On)
 
 	restored := CaptureMViewExecutionSessionVars(sessVars)
 	require.False(t, restored.AllowMPPExecution)
-	require.False(t, restored.EnforceMPPExecution)
+	require.True(t, restored.EnforceMPPExecution)
 	require.Equal(t, kv.TiKV.Name(), restored.IsolationReadEngines)
+}
+
+func TestApplyMViewExecutionSessionVarsWithConfigAppliesLatentMPPState(t *testing.T) {
+	sessVars := NewSessionVars(nil)
+	requireRawMPPExecutionSessionVars(t, sessVars, On, Off)
+
+	target := CaptureMViewExecutionSessionVars(sessVars)
+	target.AllowMPPExecution = false
+	target.EnforceMPPExecution = true
+	target.IsolationReadEngines = "tikv,tiflash"
+
+	restore, err := ApplyMViewExecutionSessionVarsWithConfig(sessVars, target, MViewExecutionSessionVarsApplyConfig{})
+	require.NoError(t, err)
+	requireRawMPPExecutionSessionVars(t, sessVars, Off, On)
+	require.False(t, sessVars.IsMPPEnforced())
+
+	applied := CaptureMViewExecutionSessionVars(sessVars)
+	require.False(t, applied.AllowMPPExecution)
+	require.True(t, applied.EnforceMPPExecution)
+	require.Equal(t, "tikv,tiflash", applied.IsolationReadEngines)
+
+	restore()
+	requireRawMPPExecutionSessionVars(t, sessVars, On, Off)
+}
+
+func requireRawMPPExecutionSessionVars(t *testing.T, sessVars *SessionVars, expectedAllow, expectedEnforce string) {
+	t.Helper()
+
+	require.Equal(t, TiDBOptOn(expectedAllow), sessVars.allowMPPExecution)
+	require.Equal(t, TiDBOptOn(expectedEnforce), sessVars.enforceMPPExecution)
 }

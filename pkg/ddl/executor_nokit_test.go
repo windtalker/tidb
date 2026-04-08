@@ -226,6 +226,7 @@ func TestMViewExecutionSessionVarsRoundTripThroughDDLJob(t *testing.T) {
 	sessVars := variable.NewSessionVars(nil)
 	require.NoError(t, sessVars.SetSystemVar(variable.TiDBAllowMPPExecution, variable.On))
 	require.NoError(t, sessVars.SetSystemVar(variable.TiDBEnforceMPPExecution, variable.On))
+	require.NoError(t, sessVars.SetSystemVar(variable.TiDBAllowMPPExecution, variable.Off))
 	require.NoError(t, sessVars.SetSystemVar(variable.TiDBIsolationReadEngines, "tiflash"))
 
 	job := &model.Job{}
@@ -233,7 +234,7 @@ func TestMViewExecutionSessionVarsRoundTripThroughDDLJob(t *testing.T) {
 
 	target, err := MViewExecutionSessionVarsFromJob(job, variable.NewSessionVars(nil))
 	require.NoError(t, err)
-	require.True(t, target.AllowMPPExecution)
+	require.False(t, target.AllowMPPExecution)
 	require.True(t, target.EnforceMPPExecution)
 	require.Equal(t, "tiflash", target.IsolationReadEngines)
 }
