@@ -118,6 +118,9 @@ func AddMViewExecutionSessionVarsToJob(job *model.Job, sessVars *variable.Sessio
 	}
 	target := variable.CaptureMViewExecutionSessionVars(sessVars)
 	job.AddSessionVars(variable.TiDBMVMaintainMemQuota, strconv.FormatInt(target.MaintainMemQuota, 10))
+	job.AddSessionVars(variable.TiDBAllowMPPExecution, variable.BoolToOnOff(target.AllowMPPExecution))
+	job.AddSessionVars(variable.TiDBEnforceMPPExecution, variable.BoolToOnOff(target.EnforceMPPExecution))
+	job.AddSessionVars(variable.TiDBIsolationReadEngines, target.IsolationReadEngines)
 	job.AddSessionVars(variable.TiDBMaxTiFlashThreads, strconv.FormatInt(target.TiFlashMaxThreads, 10))
 	job.AddSessionVars(variable.TiDBMaxBytesBeforeTiFlashExternalJoin, strconv.FormatInt(target.TiFlashMaxBytesBeforeExtJoin, 10))
 	job.AddSessionVars(variable.TiDBMaxBytesBeforeTiFlashExternalGroupBy, strconv.FormatInt(target.TiFlashMaxBytesBeforeExtAgg, 10))
@@ -139,6 +142,15 @@ func MViewExecutionSessionVarsFromJob(job *model.Job, defaultSessVars *variable.
 
 	if val, ok := job.GetSessionVars(variable.TiDBMVMaintainMemQuota); ok {
 		target.MaintainMemQuota = variable.TidbOptInt64(val, target.MaintainMemQuota)
+	}
+	if val, ok := job.GetSessionVars(variable.TiDBAllowMPPExecution); ok {
+		target.AllowMPPExecution = variable.TiDBOptOn(val)
+	}
+	if val, ok := job.GetSessionVars(variable.TiDBEnforceMPPExecution); ok {
+		target.EnforceMPPExecution = variable.TiDBOptOn(val)
+	}
+	if val, ok := job.GetSessionVars(variable.TiDBIsolationReadEngines); ok {
+		target.IsolationReadEngines = val
 	}
 	if val, ok := job.GetSessionVars(variable.TiDBMaxTiFlashThreads); ok {
 		target.TiFlashMaxThreads = variable.TidbOptInt64(val, target.TiFlashMaxThreads)

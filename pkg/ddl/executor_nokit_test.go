@@ -22,6 +22,7 @@ import (
 
 	"github.com/pingcap/tidb/pkg/meta/model"
 	pmodel "github.com/pingcap/tidb/pkg/parser/model"
+	"github.com/pingcap/tidb/pkg/sessionctx/variable"
 	"github.com/stretchr/testify/require"
 )
 
@@ -219,4 +220,20 @@ func TestMergeCreateTableJobs(t *testing.T) {
 			"db5": {7, 7, 8},
 		}, schemaCnts)
 	})
+}
+
+func TestMViewExecutionSessionVarsRoundTripThroughDDLJob(t *testing.T) {
+	sessVars := variable.NewSessionVars(nil)
+	require.NoError(t, sessVars.SetSystemVar(variable.TiDBAllowMPPExecution, variable.On))
+	require.NoError(t, sessVars.SetSystemVar(variable.TiDBEnforceMPPExecution, variable.On))
+	require.NoError(t, sessVars.SetSystemVar(variable.TiDBIsolationReadEngines, "tiflash"))
+
+	job := &model.Job{}
+	AddMViewExecutionSessionVarsToJob(job, sessVars)
+
+	target, err := MViewExecutionSessionVarsFromJob(job, variable.NewSessionVars(nil))
+	require.NoError(t, err)
+	require.True(t, target.AllowMPPExecution)
+	require.True(t, target.EnforceMPPExecution)
+	require.Equal(t, "tiflash", target.IsolationReadEngines)
 }

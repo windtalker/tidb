@@ -721,3 +721,51 @@ func TestOrderByDependency(t *testing.T) {
 	require.Greater(t, slices.Index(names, TiDBEnablePlanReplayerContinuousCapture), slices.Index(names, TiDBEnableHistoricalStats))
 	require.Contains(t, names, "unknown")
 }
+
+func TestCaptureMViewExecutionSessionVarsIncludesMPPAndIsolationRead(t *testing.T) {
+	sessVars := NewSessionVars(nil)
+	require.NoError(t, sessVars.SetSystemVar(TiDBAllowMPPExecution, On))
+	require.NoError(t, sessVars.SetSystemVar(TiDBEnforceMPPExecution, On))
+	require.NoError(t, sessVars.SetSystemVar(TiDBIsolationReadEngines, "tikv,tiflash"))
+
+	captured := CaptureMViewExecutionSessionVars(sessVars)
+	require.True(t, captured.AllowMPPExecution)
+	require.True(t, captured.EnforceMPPExecution)
+	require.Equal(t, "tikv,tiflash", captured.IsolationReadEngines)
+
+	applied := CaptureAppliedMViewExecutionSessionVars(sessVars)
+	require.True(t, applied.AllowMPPExecution)
+	require.True(t, applied.EnforceMPPExecution)
+	require.Equal(t, "tikv,tiflash", applied.IsolationReadEngines)
+}
+
+func TestApplyMViewExecutionSessionVarsWithConfigIncludesMPPAndIsolationRead(t *testing.T) {
+	sessVars := NewSessionVars(nil)
+	require.NoError(t, sessVars.SetSystemVar(TiDBAllowMPPExecution, Off))
+	require.NoError(t, sessVars.SetSystemVar(TiDBEnforceMPPExecution, Off))
+	require.NoError(t, sessVars.SetSystemVar(TiDBIsolationReadEngines, kv.TiKV.Name()))
+
+	target := CaptureMViewExecutionSessionVars(sessVars)
+	target.AllowMPPExecution = true
+	target.EnforceMPPExecution = true
+	target.IsolationReadEngines = "tikv,tiflash"
+
+	restore, err := ApplyMViewExecutionSessionVarsWithConfig(sessVars, target, MViewExecutionSessionVarsApplyConfig{})
+	require.NoError(t, err)
+
+	applied := CaptureMViewExecutionSessionVars(sessVars)
+	require.True(t, applied.AllowMPPExecution)
+	require.True(t, applied.EnforceMPPExecution)
+	require.Equal(t, "tikv,tiflash", applied.IsolationReadEngines)
+
+	isolationEngines, err := sessVars.GetSessionOrGlobalSystemVar(context.Background(), TiDBIsolationReadEngines)
+	require.NoError(t, err)
+	require.Equal(t, "tikv,tiflash", isolationEngines)
+
+	restore()
+
+	restored := CaptureMViewExecutionSessionVars(sessVars)
+	require.False(t, restored.AllowMPPExecution)
+	require.False(t, restored.EnforceMPPExecution)
+	require.Equal(t, kv.TiKV.Name(), restored.IsolationReadEngines)
+}

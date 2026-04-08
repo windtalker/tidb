@@ -677,7 +677,6 @@ const (
 	TiDBEnableExtendedStats = "tidb_enable_extended_stats"
 
 	// TiDBIsolationReadEngines indicates the tidb only read from the stores whose engine type is involved in IsolationReadEngines.
-	// Now, only support TiKV and TiFlash.
 	TiDBIsolationReadEngines = "tidb_isolation_read_engines"
 
 	// TiDBStoreLimit indicates the limit of sending request to a store, 0 means without limit.
@@ -1381,6 +1380,7 @@ const (
 	DefBlockEncryptionMode                  = "aes-128-ecb"
 	DefTiDBAllowMPPExecution                = true
 	DefTiDBAllowTiFlashCop                  = false
+	allTiDBIsolationReadEngines             = "tikv,tiflash,tidb"
 	DefTiDBHashExchangeWithNewCollation     = true
 	DefTiDBEnforceMPPExecution              = false
 	DefTiFlashMaxThreads                    = -1

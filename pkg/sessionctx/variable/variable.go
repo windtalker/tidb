@@ -31,6 +31,9 @@ import (
 // refresh, and mvservice maintenance orchestration.
 type MViewExecutionSessionVars struct {
 	MaintainMemQuota             int64
+	AllowMPPExecution            bool
+	EnforceMPPExecution          bool
+	IsolationReadEngines         string
 	TiFlashMaxThreads            int64
 	TiFlashMaxBytesBeforeExtJoin int64
 	TiFlashMaxBytesBeforeExtAgg  int64
@@ -69,6 +72,9 @@ func CaptureMViewExecutionSessionVars(sessVars *SessionVars) MViewExecutionSessi
 	}
 	return MViewExecutionSessionVars{
 		MaintainMemQuota:             sessVars.MVMaintainMemQuota,
+		AllowMPPExecution:            sessVars.IsMPPAllowed(),
+		EnforceMPPExecution:          sessVars.IsMPPEnforced(),
+		IsolationReadEngines:         captureMViewExecutionIsolationReadEngines(sessVars),
 		TiFlashMaxThreads:            sessVars.TiFlashMaxThreads,
 		TiFlashMaxBytesBeforeExtJoin: sessVars.TiFlashMaxBytesBeforeExternalJoin,
 		TiFlashMaxBytesBeforeExtAgg:  sessVars.TiFlashMaxBytesBeforeExternalGroupBy,
@@ -90,6 +96,9 @@ func CaptureAppliedMViewExecutionSessionVars(sessVars *SessionVars) MViewExecuti
 	}
 	return MViewExecutionSessionVars{
 		MaintainMemQuota:             sessVars.MemQuotaQuery,
+		AllowMPPExecution:            sessVars.IsMPPAllowed(),
+		EnforceMPPExecution:          sessVars.IsMPPEnforced(),
+		IsolationReadEngines:         captureMViewExecutionIsolationReadEngines(sessVars),
 		TiFlashMaxThreads:            sessVars.TiFlashMaxThreads,
 		TiFlashMaxBytesBeforeExtJoin: sessVars.TiFlashMaxBytesBeforeExternalJoin,
 		TiFlashMaxBytesBeforeExtAgg:  sessVars.TiFlashMaxBytesBeforeExternalGroupBy,
@@ -178,6 +187,21 @@ func buildMViewExecutionSessionVarAssignments(
 			failureMessage: "mv execution: failed to apply maintain mem quota",
 		},
 		{
+			name:           TiDBAllowMPPExecution,
+			value:          BoolToOnOff(target.AllowMPPExecution),
+			failureMessage: "mv execution: failed to apply tidb_allow_mpp",
+		},
+		{
+			name:           TiDBEnforceMPPExecution,
+			value:          BoolToOnOff(target.EnforceMPPExecution),
+			failureMessage: "mv execution: failed to apply tidb_enforce_mpp",
+		},
+		{
+			name:           TiDBIsolationReadEngines,
+			value:          target.IsolationReadEngines,
+			failureMessage: "mv execution: failed to apply tidb_isolation_read_engines",
+		},
+		{
 			name:           TiDBMaxTiFlashThreads,
 			value:          strconv.FormatInt(target.TiFlashMaxThreads, 10),
 			failureMessage: "mv execution: failed to apply tidb_max_tiflash_threads",
@@ -228,6 +252,21 @@ func buildMViewExecutionSessionVarAssignments(
 			failureMessage: "mv execution: failed to apply tidb_mview_maintain_import_disk_quota",
 		},
 	}
+}
+
+func captureMViewExecutionIsolationReadEngines(sessVars *SessionVars) string {
+	if sessVars == nil {
+		return allMViewExecutionIsolationReadEngines()
+	}
+	val, err := sessVars.GetSessionOrGlobalSystemVar(context.Background(), TiDBIsolationReadEngines)
+	if err == nil {
+		return val
+	}
+	return allMViewExecutionIsolationReadEngines()
+}
+
+func allMViewExecutionIsolationReadEngines() string {
+	return allTiDBIsolationReadEngines
 }
 
 func restoreMViewExecutionSessionVars(
