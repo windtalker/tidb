@@ -467,8 +467,6 @@ func (m *mockMVServiceHelper) PurgeMVHistoryBeforeTSO(
 	currentTSO uint64,
 	mviewRefreshRetention time.Duration,
 	mlogPurgeRetention time.Duration,
-	mviewRefreshMaxRecords uint64,
-	mlogPurgeMaxRecords uint64,
 ) error {
 	if m.historyGCPanic {
 		panic("mock history gc panic")
@@ -477,8 +475,8 @@ func (m *mockMVServiceHelper) PurgeMVHistoryBeforeTSO(
 	m.lastHistoryGCCurrentTSO.Store(currentTSO)
 	m.lastMViewHistoryGCRetention.Store(int64(mviewRefreshRetention))
 	m.lastMLogHistoryGCRetention.Store(int64(mlogPurgeRetention))
-	m.lastMViewHistoryGCMaxRecords.Store(mviewRefreshMaxRecords)
-	m.lastMLogHistoryGCMaxRecords.Store(mlogPurgeMaxRecords)
+	m.lastMViewHistoryGCMaxRecords.Store(defaultMVHistoryGCMaxRecords)
+	m.lastMLogHistoryGCMaxRecords.Store(defaultMVHistoryGCMaxRecords)
 	return m.historyGCErr
 }
 
@@ -1620,27 +1618,22 @@ func TestServerHelperPurgeMVHistoryBeforeTSO(t *testing.T) {
 
 	buildExpectedSQL := func(
 		refreshExec, purgeExec int,
-		refreshCountEnabled, purgeCountEnabled bool,
 		refreshCountCapLimits, purgeCountCapLimits []uint64,
 	) []string {
 		sqls := make([]string, 0, refreshExec+purgeExec+len(refreshCountCapLimits)+len(purgeCountCapLimits)+2)
 		for i := 0; i < refreshExec; i++ {
 			sqls = append(sqls, testSQLDeleteMVRefreshHistBeforeTSO)
 		}
-		if refreshCountEnabled {
-			sqls = append(sqls, testSQLCountMVRefreshHist)
-			for _, limit := range refreshCountCapLimits {
-				sqls = append(sqls, testSQLDeleteMVRefreshHistByCount(limit))
-			}
+		sqls = append(sqls, testSQLCountMVRefreshHist)
+		for _, limit := range refreshCountCapLimits {
+			sqls = append(sqls, testSQLDeleteMVRefreshHistByCount(limit))
 		}
 		for i := 0; i < purgeExec; i++ {
 			sqls = append(sqls, testSQLDeleteMVLogPurgeHistBeforeTSO)
 		}
-		if purgeCountEnabled {
-			sqls = append(sqls, testSQLCountMVLogPurgeHist)
-			for _, limit := range purgeCountCapLimits {
-				sqls = append(sqls, testSQLDeleteMVLogPurgeHistByCount(limit))
-			}
+		sqls = append(sqls, testSQLCountMVLogPurgeHist)
+		for _, limit := range purgeCountCapLimits {
+			sqls = append(sqls, testSQLDeleteMVLogPurgeHistByCount(limit))
 		}
 		return sqls
 	}
@@ -1650,8 +1643,6 @@ func TestServerHelperPurgeMVHistoryBeforeTSO(t *testing.T) {
 		currentTSO               uint64
 		mviewRetention           time.Duration
 		mlogRetention            time.Duration
-		mviewMaxRecords          uint64
-		mlogMaxRecords           uint64
 		refreshTimeAffectedRows  []uint64
 		purgeTimeAffectedRows    []uint64
 		refreshCountRows         []chunk.Row
@@ -1711,21 +1702,19 @@ func TestServerHelperPurgeMVHistoryBeforeTSO(t *testing.T) {
 			expectPurgeExec:   1,
 		},
 		{
-			name:            "count_cap_delete_budget",
-			currentTSO:      987654321,
-			mviewRetention:  0,
-			mlogRetention:   0,
-			mviewMaxRecords: 100,
-			mlogMaxRecords:  50,
+			name:           "count_cap_delete_budget",
+			currentTSO:     987654321,
+			mviewRetention: 0,
+			mlogRetention:  0,
 			refreshCountRows: []chunk.Row{
 				chunk.MutRowFromDatums([]types.Datum{
-					types.NewIntDatum(10105),
+					types.NewIntDatum(int64(defaultMVHistoryGCMaxRecords + historyGCDeleteBatchSize + 5)),
 					types.NewUintDatum(500),
 				}).ToRow(),
 			},
 			purgeCountRows: []chunk.Row{
 				chunk.MutRowFromDatums([]types.Datum{
-					types.NewIntDatum(58),
+					types.NewIntDatum(int64(defaultMVHistoryGCMaxRecords + 8)),
 					types.NewUintDatum(900),
 				}).ToRow(),
 			},
@@ -1743,36 +1732,22 @@ func TestServerHelperPurgeMVHistoryBeforeTSO(t *testing.T) {
 			currentTSO:              987654321,
 			mviewRetention:          0,
 			mlogRetention:           0,
-			mviewMaxRecords:         100,
-			mlogMaxRecords:          50,
 			refreshTimeAffectedRows: []uint64{0},
 			purgeTimeAffectedRows:   []uint64{0},
 			refreshCountRows: []chunk.Row{
 				chunk.MutRowFromDatums([]types.Datum{
-					types.NewIntDatum(100),
+					types.NewIntDatum(int64(defaultMVHistoryGCMaxRecords)),
 					types.NewUintDatum(500),
 				}).ToRow(),
 			},
 			purgeCountRows: []chunk.Row{
 				chunk.MutRowFromDatums([]types.Datum{
-					types.NewIntDatum(49),
+					types.NewIntDatum(int64(defaultMVHistoryGCMaxRecords - 1)),
 					types.NewUintDatum(900),
 				}).ToRow(),
 			},
 			expectRefreshExec: 1,
 			expectPurgeExec:   1,
-		},
-		{
-			name:                    "count_cap_disabled",
-			currentTSO:              987654321,
-			mviewRetention:          0,
-			mlogRetention:           0,
-			mviewMaxRecords:         0,
-			mlogMaxRecords:          0,
-			refreshTimeAffectedRows: []uint64{0},
-			purgeTimeAffectedRows:   []uint64{0},
-			expectRefreshExec:       1,
-			expectPurgeExec:         1,
 		},
 		{
 			name:                  "continue_after_refresh_retention_error",
@@ -1838,8 +1813,6 @@ func TestServerHelperPurgeMVHistoryBeforeTSO(t *testing.T) {
 				tc.currentTSO,
 				tc.mviewRetention,
 				tc.mlogRetention,
-				tc.mviewMaxRecords,
-				tc.mlogMaxRecords,
 			)
 			if len(tc.expectErrContains) == 0 {
 				require.NoError(t, err)
@@ -1852,14 +1825,12 @@ func TestServerHelperPurgeMVHistoryBeforeTSO(t *testing.T) {
 			require.Equal(t, buildExpectedSQL(
 				tc.expectRefreshExec,
 				tc.expectPurgeExec,
-				tc.mviewMaxRecords > 0,
-				tc.mlogMaxRecords > 0,
 				tc.expectRefreshCountCap,
 				tc.expectPurgeCountCap,
 			), se.executedRestrictedSQL)
 			require.Len(t, se.executedRestrictedArg, len(se.executedRestrictedSQL))
 
-			purgeTimeArgPos := tc.expectRefreshExec + len(tc.expectRefreshCountCap) + btoi(tc.mviewMaxRecords > 0)
+			purgeTimeArgPos := tc.expectRefreshExec + len(tc.expectRefreshCountCap) + 1
 			if tc.assertArgsAreEqualTSO {
 				require.Equal(t, []any{tc.currentTSO}, se.executedRestrictedArg[0])
 				require.Equal(t, []any{tc.currentTSO}, se.executedRestrictedArg[purgeTimeArgPos])
@@ -1867,35 +1838,24 @@ func TestServerHelperPurgeMVHistoryBeforeTSO(t *testing.T) {
 			if tc.assertArgsNotEqual {
 				require.NotEqual(t, se.executedRestrictedArg[0][0], se.executedRestrictedArg[purgeTimeArgPos][0])
 			}
-			if tc.mviewMaxRecords > 0 {
-				require.Empty(t, se.executedRestrictedArg[tc.expectRefreshExec])
-				argBase := tc.expectRefreshExec + 1
-				if len(tc.refreshCountRows) > 0 {
-					minJobID := tc.refreshCountRows[0].GetUint64(1)
-					for i := range tc.expectRefreshCountCap {
-						require.Equal(t, []any{minJobID}, se.executedRestrictedArg[argBase+i])
-					}
+			require.Empty(t, se.executedRestrictedArg[tc.expectRefreshExec])
+			argBase := tc.expectRefreshExec + 1
+			if len(tc.refreshCountRows) > 0 {
+				minJobID := tc.refreshCountRows[0].GetUint64(1)
+				for i := range tc.expectRefreshCountCap {
+					require.Equal(t, []any{minJobID}, se.executedRestrictedArg[argBase+i])
 				}
 			}
-			if tc.mlogMaxRecords > 0 {
-				countPos := purgeTimeArgPos + tc.expectPurgeExec
-				require.Empty(t, se.executedRestrictedArg[countPos])
-				if len(tc.purgeCountRows) > 0 {
-					minJobID := tc.purgeCountRows[0].GetUint64(1)
-					for i := range tc.expectPurgeCountCap {
-						require.Equal(t, []any{minJobID}, se.executedRestrictedArg[countPos+1+i])
-					}
+			countPos := purgeTimeArgPos + tc.expectPurgeExec
+			require.Empty(t, se.executedRestrictedArg[countPos])
+			if len(tc.purgeCountRows) > 0 {
+				minJobID := tc.purgeCountRows[0].GetUint64(1)
+				for i := range tc.expectPurgeCountCap {
+					require.Equal(t, []any{minJobID}, se.executedRestrictedArg[countPos+1+i])
 				}
 			}
 		})
 	}
-}
-
-func btoi(v bool) int {
-	if v {
-		return 1
-	}
-	return 0
 }
 
 func TestServerHelperRefreshMVDeletedWhenMetaNotFound(t *testing.T) {

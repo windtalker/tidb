@@ -66,8 +66,6 @@ type MVService struct {
 	serverRefreshInterval           time.Duration
 	mviewRefreshHistRetentionMillis atomic.Int64
 	mlogPurgeHistRetentionMillis    atomic.Int64
-	mviewRefreshHistMaxRecords      atomic.Uint64
-	mlogPurgeHistMaxRecords         atomic.Uint64
 	nextHistoryGCAtMillis           atomic.Int64
 	historyGCRetryCount             atomic.Int64
 	historyGCRunning                atomic.Bool
@@ -943,7 +941,6 @@ func (t *MVService) maybeGCOperationHistory(now time.Time) {
 func (t *MVService) runGCOperationHistory(now time.Time, historyGCInterval time.Duration) {
 	defer t.historyGCRunning.Store(false)
 	mviewRefreshRetention, mlogPurgeRetention := t.historyGCRetentionConfig()
-	mviewRefreshMaxRecords, mlogPurgeMaxRecords := t.historyGCMaxRecordsConfig()
 	startAt := mvsNow()
 	result := mvDurationResultSuccess
 	defer func() {
@@ -974,8 +971,6 @@ func (t *MVService) runGCOperationHistory(now time.Time, historyGCInterval time.
 		currentTSO,
 		mviewRefreshRetention,
 		mlogPurgeRetention,
-		mviewRefreshMaxRecords,
-		mlogPurgeMaxRecords,
 	); err != nil {
 		result = mvDurationResultFailed
 		t.scheduleHistoryGCFailure(now, historyGCInterval)
@@ -983,8 +978,8 @@ func (t *MVService) runGCOperationHistory(now time.Time, historyGCInterval time.
 			zap.Uint64("current_tso", currentTSO),
 			zap.Duration("mview_refresh_hist_retention", mviewRefreshRetention),
 			zap.Duration("mlog_purge_hist_retention", mlogPurgeRetention),
-			zap.Uint64("mview_refresh_hist_max_records", mviewRefreshMaxRecords),
-			zap.Uint64("mlog_purge_hist_max_records", mlogPurgeMaxRecords),
+			zap.Uint64("mview_refresh_hist_max_records", defaultMVHistoryGCMaxRecords),
+			zap.Uint64("mlog_purge_hist_max_records", defaultMVHistoryGCMaxRecords),
 			zap.Error(err),
 		)
 		logutil.BgLogger().Warn("GC MV/MVLOG operation history failed", fields...)

@@ -52,10 +52,6 @@ func (do *Domain) initDomainSysVars() {
 	variable.SetMVServiceMViewRefreshHistRetention.Store(&setMVServiceMViewRefreshHistRetentionFunc)
 	setMVServiceMLogPurgeHistRetentionFunc := do.setMVServiceMLogPurgeHistRetention
 	variable.SetMVServiceMLogPurgeHistRetention.Store(&setMVServiceMLogPurgeHistRetentionFunc)
-	setMVServiceMViewRefreshHistMaxRecordsFunc := do.setMVServiceMViewRefreshHistMaxRecords
-	variable.SetMVServiceMViewRefreshHistMaxRecords.Store(&setMVServiceMViewRefreshHistMaxRecordsFunc)
-	setMVServiceMLogPurgeHistMaxRecordsFunc := do.setMVServiceMLogPurgeHistMaxRecords
-	variable.SetMVServiceMLogPurgeHistMaxRecords.Store(&setMVServiceMLogPurgeHistMaxRecordsFunc)
 
 	variable.ChangeSchemaCacheSize = do.changeSchemaCacheSize
 }
@@ -168,20 +164,6 @@ func (do *Domain) setMVServiceMLogPurgeHistRetention(retention time.Duration) {
 		return
 	}
 	_ = do.mvService.SetMLogPurgeHistRetention(retention)
-}
-
-func (do *Domain) setMVServiceMViewRefreshHistMaxRecords(maxRecords uint64) {
-	if do.GetMVService() == nil {
-		return
-	}
-	do.mvService.SetMViewRefreshHistMaxRecords(maxRecords)
-}
-
-func (do *Domain) setMVServiceMLogPurgeHistMaxRecords(maxRecords uint64) {
-	if do.GetMVService() == nil {
-		return
-	}
-	do.mvService.SetMLogPurgeHistMaxRecords(maxRecords)
 }
 
 // updatePDClient is used to set the dynamic option into the PD client.

@@ -440,9 +440,6 @@ func TestNewMVServiceConfig(t *testing.T) {
 		mviewRefreshRetention, mlogPurgeRetention := svc.historyGCRetentionConfig()
 		require.Equal(t, cfg.MViewRefreshHistRetention, mviewRefreshRetention)
 		require.Equal(t, cfg.MLogPurgeHistRetention, mlogPurgeRetention)
-		mviewRefreshMaxRecords, mlogPurgeMaxRecords := svc.historyGCMaxRecordsConfig()
-		require.Equal(t, cfg.MViewRefreshHistMaxRecords, mviewRefreshMaxRecords)
-		require.Equal(t, cfg.MLogPurgeHistMaxRecords, mlogPurgeMaxRecords)
 
 		backpressureCfg := svc.GetTaskBackpressureConfig()
 		require.Equal(t, cfg.TaskBackpressure, backpressureCfg)
@@ -470,9 +467,6 @@ func TestNewMVServiceConfig(t *testing.T) {
 		mviewRefreshRetention, mlogPurgeRetention := svc.historyGCRetentionConfig()
 		require.Equal(t, defaultMVHistoryGCRetention, mviewRefreshRetention)
 		require.Equal(t, defaultMVHistoryGCRetention, mlogPurgeRetention)
-		mviewRefreshMaxRecords, mlogPurgeMaxRecords := svc.historyGCMaxRecordsConfig()
-		require.Equal(t, defaultMVHistoryGCMaxRecords, mviewRefreshMaxRecords)
-		require.Equal(t, defaultMVHistoryGCMaxRecords, mlogPurgeMaxRecords)
 
 		backpressureCfg := svc.GetTaskBackpressureConfig()
 		require.Equal(t, cfg.TaskBackpressure, backpressureCfg)
@@ -573,24 +567,16 @@ func TestMVServiceUpdateConfigs(t *testing.T) {
 		mviewRefreshRetention, mlogPurgeRetention := svc.historyGCRetentionConfig()
 		require.Equal(t, defaultMVHistoryGCRetention, mviewRefreshRetention)
 		require.Equal(t, defaultMVHistoryGCRetention, mlogPurgeRetention)
-		mviewRefreshMaxRecords, mlogPurgeMaxRecords := svc.historyGCMaxRecordsConfig()
-		require.Equal(t, defaultMVHistoryGCMaxRecords, mviewRefreshMaxRecords)
-		require.Equal(t, defaultMVHistoryGCMaxRecords, mlogPurgeMaxRecords)
 
 		err := svc.SetMViewRefreshHistRetention(10 * 24 * time.Hour)
 		require.NoError(t, err)
 		err = svc.SetMLogPurgeHistRetention(20 * 24 * time.Hour)
 		require.NoError(t, err)
-		svc.SetMViewRefreshHistMaxRecords(123)
-		svc.SetMLogPurgeHistMaxRecords(456)
 		interval = svc.historyGCInterval()
 		require.Equal(t, 20*time.Minute, interval)
 		mviewRefreshRetention, mlogPurgeRetention = svc.historyGCRetentionConfig()
 		require.Equal(t, 10*24*time.Hour, mviewRefreshRetention)
 		require.Equal(t, 20*24*time.Hour, mlogPurgeRetention)
-		mviewRefreshMaxRecords, mlogPurgeMaxRecords = svc.historyGCMaxRecordsConfig()
-		require.Equal(t, uint64(123), mviewRefreshMaxRecords)
-		require.Equal(t, uint64(456), mlogPurgeMaxRecords)
 
 		err = svc.SetMViewRefreshHistRetention(30 * time.Second)
 		require.NoError(t, err)
@@ -603,12 +589,6 @@ func TestMVServiceUpdateConfigs(t *testing.T) {
 		require.Error(t, err)
 		err = svc.SetMLogPurgeHistRetention(0)
 		require.Error(t, err)
-
-		svc.SetMViewRefreshHistMaxRecords(0)
-		svc.SetMLogPurgeHistMaxRecords(0)
-		mviewRefreshMaxRecords, mlogPurgeMaxRecords = svc.historyGCMaxRecordsConfig()
-		require.Equal(t, uint64(0), mviewRefreshMaxRecords)
-		require.Equal(t, uint64(0), mlogPurgeMaxRecords)
 	})
 
 	t.Run("history_gc_reschedule_earlier_only", func(t *testing.T) {

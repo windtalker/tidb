@@ -160,10 +160,6 @@ const (
 	TiDBMViewRefreshHistTime = "tidb_mview_refresh_hist_time"
 	// TiDBMLogPurgeHistTime controls the retention time of mysql.tidb_mlog_purge_hist in hours.
 	TiDBMLogPurgeHistTime = "tidb_mlog_purge_hist_time"
-	// TiDBMViewRefreshHistMaxRecords controls the max retained records of mysql.tidb_mview_refresh_hist. 0 disables count-based GC.
-	TiDBMViewRefreshHistMaxRecords = "tidb_mview_refresh_hist_max_records"
-	// TiDBMLogPurgeHistMaxRecords controls the max retained records of mysql.tidb_mlog_purge_hist. 0 disables count-based GC.
-	TiDBMLogPurgeHistMaxRecords = "tidb_mlog_purge_hist_max_records"
 	// TiDBMemQuotaApplyCache controls the memory quota of a query.
 	TiDBMemQuotaApplyCache = "tidb_mem_quota_apply_cache"
 
@@ -1509,8 +1505,6 @@ const (
 	DefTiDBMViewTaskThresholdMemory                   = 0.8
 	DefTiDBMViewRefreshHistTime                       = 168
 	DefTiDBMLogPurgeHistTime                          = 168
-	DefTiDBMViewRefreshHistMaxRecords                 = 1000000
-	DefTiDBMLogPurgeHistMaxRecords                    = 1000000
 	DefTiDBStatsCacheMemQuota                         = 0
 	MaxTiDBStatsCacheMemQuota                         = 1024 * 1024 * 1024 * 1024 // 1TB
 	DefTiDBQueryLogMaxLen                             = 4096
@@ -1815,10 +1809,6 @@ var (
 	SetMVServiceMViewRefreshHistRetention atomic.Pointer[func(time.Duration)]
 	// SetMVServiceMLogPurgeHistRetention applies global tidb_mlog_purge_hist_time to the local MV service.
 	SetMVServiceMLogPurgeHistRetention atomic.Pointer[func(time.Duration)]
-	// SetMVServiceMViewRefreshHistMaxRecords applies global tidb_mview_refresh_hist_max_records to the local MV service.
-	SetMVServiceMViewRefreshHistMaxRecords atomic.Pointer[func(uint64)]
-	// SetMVServiceMLogPurgeHistMaxRecords applies global tidb_mlog_purge_hist_max_records to the local MV service.
-	SetMVServiceMLogPurgeHistMaxRecords atomic.Pointer[func(uint64)]
 	// ValidateCloudStorageURI validates the cloud storage URI.
 	ValidateCloudStorageURI func(ctx context.Context, uri string) error
 	// SetLowResolutionTSOUpdateInterval is the func registered by domain to set slow resolution tso update interval.

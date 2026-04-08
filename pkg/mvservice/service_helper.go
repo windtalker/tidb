@@ -878,8 +878,6 @@ func (*serviceHelper) PurgeMVHistoryBeforeTSO(
 	currentTSO uint64,
 	mviewRefreshRetention time.Duration,
 	mlogPurgeRetention time.Duration,
-	mviewRefreshMaxRecords uint64,
-	mlogPurgeMaxRecords uint64,
 ) error {
 	deleteMVRefreshHistSQL := fmt.Sprintf(
 		`DELETE FROM mysql.tidb_mview_refresh_hist WHERE REFRESH_STATUS <> 'running' AND REFRESH_JOB_ID < %%? ORDER BY REFRESH_JOB_ID LIMIT %d`,
@@ -926,13 +924,13 @@ func (*serviceHelper) PurgeMVHistoryBeforeTSO(
 	if err := purgeMVHistoryInBatches(ctx, sctx, deleteMVRefreshHistSQL, calcCutoffTSO(mviewRefreshRetention)); err != nil {
 		purgeErrs = append(purgeErrs, fmt.Errorf("purge mview refresh history by retention failed: %w", err))
 	}
-	if err := purgeMVHistoryByCountLimit(ctx, sctx, countMVRefreshHistSQL, deleteMVRefreshHistByCountSQL, mviewRefreshMaxRecords); err != nil {
+	if err := purgeMVHistoryByCountLimit(ctx, sctx, countMVRefreshHistSQL, deleteMVRefreshHistByCountSQL, defaultMVHistoryGCMaxRecords); err != nil {
 		purgeErrs = append(purgeErrs, fmt.Errorf("purge mview refresh history by count limit failed: %w", err))
 	}
 	if err := purgeMVHistoryInBatches(ctx, sctx, deleteMVLogPurgeHistSQL, calcCutoffTSO(mlogPurgeRetention)); err != nil {
 		purgeErrs = append(purgeErrs, fmt.Errorf("purge mlog purge history by retention failed: %w", err))
 	}
-	if err := purgeMVHistoryByCountLimit(ctx, sctx, countMVLogPurgeHistSQL, deleteMVLogPurgeHistByCountSQL, mlogPurgeMaxRecords); err != nil {
+	if err := purgeMVHistoryByCountLimit(ctx, sctx, countMVLogPurgeHistSQL, deleteMVLogPurgeHistByCountSQL, defaultMVHistoryGCMaxRecords); err != nil {
 		purgeErrs = append(purgeErrs, fmt.Errorf("purge mlog purge history by count limit failed: %w", err))
 	}
 	if len(purgeErrs) > 0 {
