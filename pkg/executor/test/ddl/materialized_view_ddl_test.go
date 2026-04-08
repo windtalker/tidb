@@ -1461,14 +1461,17 @@ func TestCreateMaterializedViewRetryAfterUpsertFailure(t *testing.T) {
 	tk.MustExec("create materialized view log on t (a, b) purge next date_add(now(), interval 1 hour)")
 
 	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/pkg/ddl/mockUpsertCreateMaterializedViewRefreshInfoTableNotExists", "1*return(true)"))
+	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/pkg/ddl/mockDeleteCreateMaterializedViewRefreshAlertErr", `return("mock rollback alert delete error")`))
 	defer func() {
 		require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/pkg/ddl/mockUpsertCreateMaterializedViewRefreshInfoTableNotExists"))
+		require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/pkg/ddl/mockDeleteCreateMaterializedViewRefreshAlertErr"))
 	}()
 
 	err := tk.ExecToErr("create materialized view mv_retry (a, s, cnt) refresh fast next date_add(now(), interval 1 hour) as select a, sum(b), count(1) from t group by a")
 	require.Error(t, err)
 	require.ErrorContains(t, err, "tidb_mview_refresh_info")
 	require.NotContains(t, err.Error(), "Information schema is changed")
+	require.NotContains(t, err.Error(), "mock rollback alert delete error")
 	tk.MustQuery("show tables like 'mv_retry'").Check(testkit.Rows())
 
 	tk.MustExec("create materialized view mv_retry (a, s, cnt) refresh fast next date_add(now(), interval 1 hour) as select a, sum(b), count(1) from t group by a")

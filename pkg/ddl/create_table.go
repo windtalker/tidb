@@ -591,7 +591,13 @@ func (w *worker) rollbackCreateMaterializedView(jobCtx *jobContext, job *model.J
 		return ver, errors.Trace(err)
 	}
 	if err := w.deleteCreateMaterializedViewRefreshAlert(jobCtx, job.TableID); err != nil {
-		return ver, errors.Trace(err)
+		logutil.DDLLogger().Warn(
+			"create materialized view rollback: failed to delete refresh alert",
+			zap.String("schemaName", job.SchemaName),
+			zap.String("tableName", mvTblInfo.Name.O),
+			zap.Int64("mviewID", job.TableID),
+			zap.Error(err),
+		)
 	}
 
 	job.State = model.JobStateRollbackDone

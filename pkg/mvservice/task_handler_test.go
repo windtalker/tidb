@@ -2271,6 +2271,10 @@ func TestServerHelperSyncMVRefreshAlertStates(t *testing.T) {
 			mviewID: 103,
 		},
 		{
+			mviewID:            104,
+			metadataUnresolved: true,
+		},
+		{
 			mviewID: 0,
 		},
 	}

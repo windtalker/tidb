@@ -186,6 +186,9 @@ func (*serviceHelper) SyncMVRefreshAlertStates(
 		if state.mviewID <= 0 {
 			continue
 		}
+		if state.metadataUnresolved {
+			continue
+		}
 		if state.alertLevel == "" {
 			deleteIDs = append(deleteIDs, state.mviewID)
 			continue
@@ -993,6 +996,8 @@ func (*serviceHelper) loadAllTiDBMVRefresh(ctx context.Context, sysSessionPool b
 			m.mviewName = mviewName
 			m.alertWarningSec = alertWarningSec
 			m.alertOverdueSec = alertOverdueSec
+		} else {
+			m.metadataUnresolved = true
 		}
 		m.orderTs = m.nextRefresh.UnixMilli()
 		newPending[mvID] = m

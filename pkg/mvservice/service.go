@@ -131,6 +131,9 @@ const (
 	mvRunEventHistoryGCGetTSOErr = "get_tso_error"
 
 	mvHistoryGCOwnerKey = "gc-mv-op-hist"
+	// A single hash-ring owner performs stale refresh-alert cleanup to avoid
+	// repeating the same global delete on every TiDB node.
+	mvRefreshAlertCleanupOwnerKey = "gc-mv-refresh-alert"
 
 	historyGCRetryMaxAttempts  = 8
 	mvRefreshAlertLevelWarning = "warning"
@@ -142,6 +145,8 @@ type mv struct {
 	nextRefresh time.Time
 	schemaName  string
 	mviewName   string
+
+	metadataUnresolved bool
 
 	lastSuccessReadTSO uint64
 	lastSuccessTime    time.Time
@@ -241,6 +246,7 @@ type refreshAlertTask struct {
 	schemaName         string
 	mviewName          string
 	nextRefresh        time.Time
+	metadataUnresolved bool
 	lastSuccessTime    time.Time
 	lastSuccessReadTSO uint64
 	alertWarningSec    int64
@@ -283,7 +289,7 @@ func (t *MVService) collectRefreshAlertStates(now time.Time) ([]refreshAlertTask
 	var warningCount int64
 	var overdueCount int64
 	for mviewID, item := range t.mvRefreshMu.pending {
-		if item.Value == nil || item.Value.nextRefresh.IsZero() {
+		if item.Value == nil || item.Value.nextRefresh.IsZero() || item.Value.metadataUnresolved {
 			continue
 		}
 		alertLevel := classifyRefreshAlertLevel(now, item.Value.lastSuccessTime, item.Value.alertWarningSec, item.Value.alertOverdueSec)
@@ -345,7 +351,7 @@ func (t *MVService) collectRefreshAlertTasks(now time.Time) ([]refreshAlertTask,
 	var warningCount int64
 	var overdueCount int64
 	for mviewID, item := range t.mvRefreshMu.pending {
-		if item.Value == nil || item.Value.nextRefresh.IsZero() {
+		if item.Value == nil || item.Value.nextRefresh.IsZero() || item.Value.metadataUnresolved {
 			continue
 		}
 		lastSuccessTime := item.Value.lastSuccessTime
@@ -430,6 +436,9 @@ func (t *MVService) syncRefreshAlertStates(updatedAt time.Time, states []refresh
 }
 
 func (t *MVService) cleanupStaleRefreshAlerts() {
+	if !t.isRefreshAlertCleanupOwner() {
+		return
+	}
 	if err := t.mh.CleanupStaleMVRefreshAlerts(t.ctx, t.sysSessionPool); err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return
@@ -437,6 +446,15 @@ func (t *MVService) cleanupStaleRefreshAlerts() {
 		fields := append(t.runtimeLogFields(), zap.Error(err))
 		logutil.BgLogger().Warn("cleanup stale mv refresh alerts failed", fields...)
 	}
+}
+
+func (t *MVService) isRefreshAlertCleanupOwner() bool {
+	t.sch.mu.RLock()
+	defer t.sch.mu.RUnlock()
+	if t.sch.ID == "" || len(t.sch.servers) == 0 {
+		return false
+	}
+	return t.sch.chash.GetNode([]byte(mvRefreshAlertCleanupOwnerKey)) == t.sch.ID
 }
 
 // logMVRefreshAlerts logs refresh alert task details with warning/overdue levels.
@@ -783,12 +801,15 @@ func (t *MVService) buildMVRefreshTasks(newPending map[int64]*mv) {
 	}
 	for id, nm := range newPending {
 		if om, ok := t.mvRefreshMu.pending[id]; ok {
-			om.Value.schemaName = nm.schemaName
-			om.Value.mviewName = nm.mviewName
+			om.Value.metadataUnresolved = nm.metadataUnresolved
+			if !nm.metadataUnresolved {
+				om.Value.schemaName = nm.schemaName
+				om.Value.mviewName = nm.mviewName
+				om.Value.alertWarningSec = nm.alertWarningSec
+				om.Value.alertOverdueSec = nm.alertOverdueSec
+			}
 			om.Value.lastSuccessReadTSO = nm.lastSuccessReadTSO
 			om.Value.lastSuccessTime = nm.lastSuccessTime
-			om.Value.alertWarningSec = nm.alertWarningSec
-			om.Value.alertOverdueSec = nm.alertOverdueSec
 			changed := om.Value.nextRefresh != nm.nextRefresh
 			om.Value.nextRefresh = nm.nextRefresh
 			if om.Value.orderTs != maxNextScheduleTs { // not running
