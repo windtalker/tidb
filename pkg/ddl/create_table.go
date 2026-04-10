@@ -435,6 +435,7 @@ func (w *worker) onCreateMaterializedView(jobCtx *jobContext, job *model.Job) (v
 		if err != nil {
 			return ver, errors.Trace(err)
 		}
+		args.CreatedSchemaVersion = ver
 		createTableEvent := notifier.NewCreateTableEvent(mvTblInfo)
 		err = asyncNotifyEvent(jobCtx, createTableEvent, job, noSubJob, w.sess)
 		if err != nil {
@@ -515,7 +516,10 @@ func (w *worker) onCreateMaterializedView(jobCtx *jobContext, job *model.Job) (v
 			}
 		})
 
-		if job.BinlogInfo != nil {
+		ver = args.CreatedSchemaVersion
+		if ver == 0 && job.BinlogInfo != nil {
+			// Compatibility fallback for jobs that reached build phase before CreatedSchemaVersion
+			// became part of the persisted ActionCreateMaterializedView job state.
 			ver = job.BinlogInfo.SchemaVersion
 		}
 		finishedTableInfos := make([]*model.TableInfo, 0, len(baseTableIDs)+1)
@@ -607,12 +611,15 @@ func (w *worker) rollbackCreateMaterializedView(jobCtx *jobContext, job *model.J
 		return ver, errors.Trace(err)
 	}
 	var mlogTableIDs []int64
+	var createdSchemaVersion int64
 	if args, ok := jobCtx.jobArgs.(*model.CreateMaterializedViewArgs); ok && args != nil {
 		mlogTableIDs = args.MLogTableIDs
+		createdSchemaVersion = args.CreatedSchemaVersion
 	}
 	job.FillArgs(&model.CreateMaterializedViewArgs{
-		TableInfo:    mvTblInfo,
-		MLogTableIDs: mlogTableIDs,
+		TableInfo:            mvTblInfo,
+		MLogTableIDs:         mlogTableIDs,
+		CreatedSchemaVersion: createdSchemaVersion,
 	})
 	return ver, nil
 }
