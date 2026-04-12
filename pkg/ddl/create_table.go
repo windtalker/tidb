@@ -517,11 +517,6 @@ func (w *worker) onCreateMaterializedView(jobCtx *jobContext, job *model.Job) (v
 		})
 
 		ver = args.CreatedSchemaVersion
-		if ver == 0 && job.BinlogInfo != nil {
-			// Compatibility fallback for jobs that reached build phase before CreatedSchemaVersion
-			// became part of the persisted ActionCreateMaterializedView job state.
-			ver = job.BinlogInfo.SchemaVersion
-		}
 		finishedTableInfos := make([]*model.TableInfo, 0, len(baseTableIDs)+1)
 		finishedTableInfos = append(finishedTableInfos, mvTblInfo)
 		for _, baseTableID := range baseTableIDs {
