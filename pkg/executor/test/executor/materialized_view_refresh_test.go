@@ -1900,7 +1900,7 @@ func TestMaterializedViewRefreshRunningHistHeartbeat(t *testing.T) {
 
 	tk.MustExec("insert into t values (2, 3), (3, 4)")
 
-	pollIntervalFailpoint := "github.com/pingcap/tidb/pkg/executor/mockMVTaskCancelWatchPollInterval"
+	pollIntervalFailpoint := "github.com/pingcap/tidb/pkg/executor/mockMVTaskMonitorPollInterval"
 	require.NoError(t, failpoint.Enable(pollIntervalFailpoint, "return(50)"))
 	defer func() {
 		require.NoError(t, failpoint.Disable(pollIntervalFailpoint))
@@ -2772,7 +2772,7 @@ func TestMaterializedViewRefreshCompleteOutOfPlaceCancelWatcherStopsBeforeCreate
 	require.NoError(t, err)
 	mviewID := mvTable.Meta().ID
 
-	pollIntervalFailpoint := "github.com/pingcap/tidb/pkg/executor/mockMVTaskCancelWatchPollInterval"
+	pollIntervalFailpoint := "github.com/pingcap/tidb/pkg/executor/mockMVTaskMonitorPollInterval"
 	require.NoError(t, failpoint.Enable(pollIntervalFailpoint, "return(50)"))
 	defer func() {
 		require.NoError(t, failpoint.Disable(pollIntervalFailpoint))
@@ -2998,7 +2998,7 @@ func TestMaterializedViewRefreshCancelWatcherUsesHistRequest(t *testing.T) {
 	require.NoError(t, err)
 	mviewID := mvTable.Meta().ID
 
-	pollIntervalFailpoint := "github.com/pingcap/tidb/pkg/executor/mockMVTaskCancelWatchPollInterval"
+	pollIntervalFailpoint := "github.com/pingcap/tidb/pkg/executor/mockMVTaskMonitorPollInterval"
 	require.NoError(t, failpoint.Enable(pollIntervalFailpoint, "return(50)"))
 	defer func() {
 		require.NoError(t, failpoint.Disable(pollIntervalFailpoint))
@@ -3082,7 +3082,7 @@ func TestCancelMaterializedViewRefreshJob(t *testing.T) {
 	require.NoError(t, err)
 	mviewID := mvTable.Meta().ID
 
-	pollIntervalFailpoint := "github.com/pingcap/tidb/pkg/executor/mockMVTaskCancelWatchPollInterval"
+	pollIntervalFailpoint := "github.com/pingcap/tidb/pkg/executor/mockMVTaskMonitorPollInterval"
 	require.NoError(t, failpoint.Enable(pollIntervalFailpoint, "return(50)"))
 	defer func() {
 		require.NoError(t, failpoint.Disable(pollIntervalFailpoint))
@@ -3169,15 +3169,15 @@ func TestMaterializedViewRefreshCancelWatcherStopsAfterTaskFinish(t *testing.T) 
 	tk.MustExec("create materialized view log on t_refresh_cancel_watch_stop (a, b) purge next date_add(now(), interval 1 hour)")
 	tk.MustExec("create materialized view mv_refresh_cancel_watch_stop (a, s, cnt) refresh fast next date_add(now(), interval 1 hour) as select a, sum(b), count(1) from t_refresh_cancel_watch_stop group by a")
 
-	pollIntervalFailpoint := "github.com/pingcap/tidb/pkg/executor/mockMVTaskCancelWatchPollInterval"
+	pollIntervalFailpoint := "github.com/pingcap/tidb/pkg/executor/mockMVTaskMonitorPollInterval"
 	require.NoError(t, failpoint.Enable(pollIntervalFailpoint, "return(50)"))
 	defer func() {
 		require.NoError(t, failpoint.Disable(pollIntervalFailpoint))
 	}()
 
 	var pollCount atomic.Int32
-	testfailpoint.EnableCall(t, "github.com/pingcap/tidb/pkg/executor/mvTaskCancelWatcherPolled", func(watchName string) {
-		if strings.HasPrefix(watchName, "refresh-") {
+	testfailpoint.EnableCall(t, "github.com/pingcap/tidb/pkg/executor/mvTaskMonitorPolled", func(monitorName string) {
+		if strings.HasPrefix(monitorName, "refresh-") {
 			pollCount.Add(1)
 		}
 	})

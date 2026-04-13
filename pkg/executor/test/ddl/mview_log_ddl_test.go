@@ -679,7 +679,7 @@ func TestPurgeMaterializedViewLogCancelWatcherUsesHistRequest(t *testing.T) {
 	require.NoError(t, err)
 	mlogID := mlogTable.Meta().ID
 
-	pollIntervalFailpoint := "github.com/pingcap/tidb/pkg/executor/mockMVTaskCancelWatchPollInterval"
+	pollIntervalFailpoint := "github.com/pingcap/tidb/pkg/executor/mockMVTaskMonitorPollInterval"
 	require.NoError(t, failpoint.Enable(pollIntervalFailpoint, "return(50)"))
 	defer func() {
 		require.NoError(t, failpoint.Disable(pollIntervalFailpoint))
@@ -762,7 +762,7 @@ func TestCancelMaterializedViewLogPurgeJob(t *testing.T) {
 	require.NoError(t, err)
 	mlogID := mlogTable.Meta().ID
 
-	pollIntervalFailpoint := "github.com/pingcap/tidb/pkg/executor/mockMVTaskCancelWatchPollInterval"
+	pollIntervalFailpoint := "github.com/pingcap/tidb/pkg/executor/mockMVTaskMonitorPollInterval"
 	require.NoError(t, failpoint.Enable(pollIntervalFailpoint, "return(50)"))
 	defer func() {
 		require.NoError(t, failpoint.Disable(pollIntervalFailpoint))
@@ -845,7 +845,7 @@ func TestPurgeMaterializedViewLogRunningHistHeartbeat(t *testing.T) {
 	require.NoError(t, err)
 	mlogID := mlogTable.Meta().ID
 
-	pollIntervalFailpoint := "github.com/pingcap/tidb/pkg/executor/mockMVTaskCancelWatchPollInterval"
+	pollIntervalFailpoint := "github.com/pingcap/tidb/pkg/executor/mockMVTaskMonitorPollInterval"
 	require.NoError(t, failpoint.Enable(pollIntervalFailpoint, "return(50)"))
 	defer func() {
 		require.NoError(t, failpoint.Disable(pollIntervalFailpoint))

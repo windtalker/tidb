@@ -86,11 +86,10 @@ const (
 	purgeHistStatusRunning          = "running"
 	purgeHistStatusSuccess          = "success"
 	purgeHistStatusFailed           = "failed"
-	purgeHistStatusOrphaned         = "orphaned"
 	mvRefreshAdvisoryLockTimeoutSec = int64(1)
 	mvRefreshShadowTablePrefix      = "__mv_shadow_"
 	mvRefreshImportIntoStoreName    = "TiKV"
-	mvTaskCancelWatchPollInterval   = 5 * time.Second
+	mvTaskMonitorPollInterval       = 5 * time.Second
 	mvTaskHistHeartbeatInterval     = 10 * time.Minute
 	mvTaskMonitorSQLTimeout         = 5 * time.Second
 )
@@ -204,62 +203,62 @@ func formatMVManualCancelRequester(user *auth.UserIdentity) string {
 type mvTaskCancelPoller func(context.Context, sqlexec.SQLExecutor) (requested bool, requester string, err error)
 type mvTaskHeartbeatWriter func(context.Context, sqlexec.SQLExecutor) error
 
-func startMVTaskCancelWatcher(
+func startMVTaskMonitor(
 	taskCtx context.Context,
 	getSysSession func() (sessionctx.Context, error),
 	releaseWatchSession func(sessionctx.Context),
 	taskCancelController *mvTaskCancelController,
-	watchName string,
+	monitorName string,
 	poller mvTaskCancelPoller,
 	heartbeatWriter mvTaskHeartbeatWriter,
 ) (func(), error) {
 	if taskCancelController == nil {
-		return func() {}, errors.New("mv task cancel watcher: task cancel controller is nil")
+		return func() {}, errors.New("mv task monitor: task cancel controller is nil")
 	}
 
-	watchSctx, err := getSysSession()
+	monitorSctx, err := getSysSession()
 	if err != nil {
 		return func() {}, err
 	}
 
-	watcherCtx, stopWatcher := context.WithCancel(taskCtx)
-	watcherDone := make(chan struct{})
+	monitorCtx, stopMonitor := context.WithCancel(taskCtx)
+	monitorDone := make(chan struct{})
 	go func() {
-		defer close(watcherDone)
-		defer releaseWatchSession(watchSctx)
+		defer close(monitorDone)
+		defer releaseWatchSession(monitorSctx)
 
-		sqlExec := watchSctx.GetSQLExecutor()
-		ticker := time.NewTicker(getMVTaskCancelWatchPollInterval())
+		sqlExec := monitorSctx.GetSQLExecutor()
+		ticker := time.NewTicker(getMVTaskMonitorPollInterval())
 		defer ticker.Stop()
 		nextHeartbeatAt := time.Now().Add(getMVTaskHistHeartbeatInterval())
 
 		for {
 			if heartbeatWriter != nil && !time.Now().Before(nextHeartbeatAt) {
-				heartbeatCtx, cancelHeartbeat := context.WithTimeout(watcherCtx, getMVTaskMonitorSQLTimeout())
+				heartbeatCtx, cancelHeartbeat := context.WithTimeout(monitorCtx, getMVTaskMonitorSQLTimeout())
 				err := heartbeatWriter(heartbeatCtx, sqlExec)
 				cancelHeartbeat()
 				nextHeartbeatAt = time.Now().Add(getMVTaskHistHeartbeatInterval())
 				if err != nil {
-					if watcherCtx.Err() != nil {
+					if monitorCtx.Err() != nil {
 						return
 					}
 					logutil.BgLogger().Warn("materialized view task heartbeat failed",
-						zap.String("watch", watchName),
+						zap.String("monitor", monitorName),
 						zap.Error(err),
 					)
 				}
 			}
 
-			pollCtx, cancelPoll := context.WithTimeout(watcherCtx, getMVTaskMonitorSQLTimeout())
+			pollCtx, cancelPoll := context.WithTimeout(monitorCtx, getMVTaskMonitorSQLTimeout())
 			requested, requester, err := poller(pollCtx, sqlExec)
 			cancelPoll()
-			failpoint.InjectCall("mvTaskCancelWatcherPolled", watchName)
+			failpoint.InjectCall("mvTaskMonitorPolled", monitorName)
 			if err != nil {
-				if watcherCtx.Err() != nil {
+				if monitorCtx.Err() != nil {
 					return
 				}
-				logutil.BgLogger().Warn("materialized view task cancel watcher poll failed",
-					zap.String("watch", watchName),
+				logutil.BgLogger().Warn("materialized view task monitor cancel poll failed",
+					zap.String("monitor", monitorName),
 					zap.Error(err),
 				)
 			} else if requested {
@@ -268,7 +267,7 @@ func startMVTaskCancelWatcher(
 			}
 
 			select {
-			case <-watcherCtx.Done():
+			case <-monitorCtx.Done():
 				return
 			case <-ticker.C:
 			}
@@ -276,14 +275,14 @@ func startMVTaskCancelWatcher(
 	}()
 
 	return func() {
-		stopWatcher()
-		<-watcherDone
+		stopMonitor()
+		<-monitorDone
 	}, nil
 }
 
-func getMVTaskCancelWatchPollInterval() time.Duration {
-	interval := mvTaskCancelWatchPollInterval
-	failpoint.Inject("mockMVTaskCancelWatchPollInterval", func(val failpoint.Value) {
+func getMVTaskMonitorPollInterval() time.Duration {
+	interval := mvTaskMonitorPollInterval
+	failpoint.Inject("mockMVTaskMonitorPollInterval", func(val failpoint.Value) {
 		switch v := val.(type) {
 		case int:
 			interval = time.Duration(v) * time.Millisecond
@@ -1622,9 +1621,9 @@ func (e *PurgeMaterializedViewLogExec) executePurgeMaterializedViewLog(
 		}
 		defer e.ReleaseSysSession(releaseCtx, scheduleEvalSctx)
 	}
-	stopCancelWatcher := func() {}
+	stopTaskMonitor := func() {}
 	defer func() {
-		stopCancelWatcher()
+		stopTaskMonitor()
 	}()
 
 	finalizeFailure := func(purgeErr error) error {
@@ -1741,7 +1740,7 @@ func (e *PurgeMaterializedViewLogExec) executePurgeMaterializedViewLog(
 					return errors.Trace(err)
 				}
 				purgeHistRunningInserted = true
-				stopCancelWatcher, err = startMVTaskCancelWatcher(
+				stopTaskMonitor, err = startMVTaskMonitor(
 					kctx,
 					e.GetSysSession,
 					func(sctx sessionctx.Context) {
@@ -2723,7 +2722,7 @@ func (e *RefreshMaterializedViewExec) executeRefreshMaterializedView(kctx contex
 			}
 			return errors.Trace(finalErr)
 		}
-		stopCancelWatcher, err := startMVTaskCancelWatcher(
+		stopTaskMonitor, err := startMVTaskMonitor(
 			kctx,
 			e.GetSysSession,
 			func(sctx sessionctx.Context) {
@@ -2741,7 +2740,7 @@ func (e *RefreshMaterializedViewExec) executeRefreshMaterializedView(kctx contex
 		if err != nil {
 			return finalizeFailure(err)
 		}
-		defer stopCancelWatcher()
+		defer stopTaskMonitor()
 		failpoint.InjectCall("refreshMaterializedViewAfterInsertRefreshHistRunning")
 		failpoint.Inject("pauseRefreshMaterializedViewAfterInsertRefreshHistRunning", func() {})
 
@@ -2926,7 +2925,7 @@ func (e *RefreshMaterializedViewExec) executeRefreshMaterializedView(kctx contex
 		}
 		return errors.Trace(finalErr)
 	}
-	stopCancelWatcher, err := startMVTaskCancelWatcher(
+	stopTaskMonitor, err := startMVTaskMonitor(
 		kctx,
 		e.GetSysSession,
 		func(sctx sessionctx.Context) {
@@ -2944,7 +2943,7 @@ func (e *RefreshMaterializedViewExec) executeRefreshMaterializedView(kctx contex
 	if err != nil {
 		return finalizeFailure(err)
 	}
-	defer stopCancelWatcher()
+	defer stopTaskMonitor()
 
 	failpoint.InjectCall("refreshMaterializedViewAfterInsertRefreshHistRunning")
 	failpoint.Inject("pauseRefreshMaterializedViewAfterInsertRefreshHistRunning", func() {})
@@ -4166,7 +4165,6 @@ const (
 	refreshHistStatusRunning  = "running"
 	refreshHistStatusSuccess  = "success"
 	refreshHistStatusFailed   = "failed"
-	refreshHistStatusOrphaned = "orphaned"
 )
 
 func insertRefreshHistRunning(
