@@ -31,6 +31,7 @@ import (
 // refresh, and mvservice maintenance orchestration.
 type MViewExecutionSessionVars struct {
 	MaintainMemQuota             int64
+	IsolationReadEngines         string
 	TiFlashMaxThreads            int64
 	TiFlashMaxBytesBeforeExtJoin int64
 	TiFlashMaxBytesBeforeExtAgg  int64
@@ -47,12 +48,13 @@ type MViewExecutionSessionVars struct {
 // session. The caller chooses which mem-quota sysvar should receive MaintainMemQuota and how apply
 // / restore errors should be reported.
 type MViewExecutionSessionVarsApplyConfig struct {
-	MaintainMemQuotaVarName string
-	CaptureAppliedVars      func(*SessionVars) MViewExecutionSessionVars
-	BestEffort              bool
-	InjectApplyError        func(string) error
-	OnApplyError            func(name, value string, err error)
-	OnRestoreError          func(name, originValue, currentValue string, err error)
+	MaintainMemQuotaVarName             string
+	MaintainIsolationReadEnginesVarName string
+	CaptureAppliedVars                  func(*SessionVars) MViewExecutionSessionVars
+	BestEffort                          bool
+	InjectApplyError                    func(string) error
+	OnApplyError                        func(name, value string, err error)
+	OnRestoreError                      func(name, originValue, currentValue string, err error)
 }
 
 type mViewExecutionSessionVarAssignment struct {
@@ -69,6 +71,7 @@ func CaptureMViewExecutionSessionVars(sessVars *SessionVars) MViewExecutionSessi
 	}
 	return MViewExecutionSessionVars{
 		MaintainMemQuota:             sessVars.MVMaintainMemQuota,
+		IsolationReadEngines:         sessVars.MVMaintainIsolationReadEngines,
 		TiFlashMaxThreads:            sessVars.TiFlashMaxThreads,
 		TiFlashMaxBytesBeforeExtJoin: sessVars.TiFlashMaxBytesBeforeExternalJoin,
 		TiFlashMaxBytesBeforeExtAgg:  sessVars.TiFlashMaxBytesBeforeExternalGroupBy,
@@ -83,13 +86,15 @@ func CaptureMViewExecutionSessionVars(sessVars *SessionVars) MViewExecutionSessi
 }
 
 // CaptureAppliedMViewExecutionSessionVars captures the execution-related values that are currently
-// in effect on a session after MV execution vars have been applied to tidb_mem_quota_query.
+// in effect on a session after MV execution vars have been applied to tidb_mem_quota_query and
+// tidb_isolation_read_engines.
 func CaptureAppliedMViewExecutionSessionVars(sessVars *SessionVars) MViewExecutionSessionVars {
 	if sessVars == nil {
 		return MViewExecutionSessionVars{}
 	}
 	return MViewExecutionSessionVars{
 		MaintainMemQuota:             sessVars.MemQuotaQuery,
+		IsolationReadEngines:         GetSessionOrGlobalSystemVarOrDefault(context.Background(), sessVars, TiDBIsolationReadEngines),
 		TiFlashMaxThreads:            sessVars.TiFlashMaxThreads,
 		TiFlashMaxBytesBeforeExtJoin: sessVars.TiFlashMaxBytesBeforeExternalJoin,
 		TiFlashMaxBytesBeforeExtAgg:  sessVars.TiFlashMaxBytesBeforeExternalGroupBy,
@@ -101,6 +106,37 @@ func CaptureAppliedMViewExecutionSessionVars(sessVars *SessionVars) MViewExecuti
 		ImportThreads:                sessVars.MViewMaintainImportThreads,
 		ImportDiskQuota:              sessVars.MViewMaintainImportDiskQuota,
 	}
+}
+
+// GetSessionSystemVarOrDefault returns the current session value of a system variable, or the
+// sysvar default when the session has not loaded a value yet.
+func GetSessionSystemVarOrDefault(sessVars *SessionVars, name string) string {
+	if sessVars != nil {
+		if val, ok := sessVars.GetSystemVar(name); ok {
+			return val
+		}
+	}
+	if sv := GetSysVar(name); sv != nil {
+		return sv.Value
+	}
+	return ""
+}
+
+// GetSessionOrGlobalSystemVarOrDefault returns the effective session/global value of a system
+// variable, or the sysvar default if the value cannot be loaded.
+func GetSessionOrGlobalSystemVarOrDefault(ctx context.Context, sessVars *SessionVars, name string) string {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if sessVars != nil {
+		if val, err := sessVars.GetSessionOrGlobalSystemVar(ctx, name); err == nil {
+			return val
+		}
+	}
+	if sv := GetSysVar(name); sv != nil {
+		return sv.Value
+	}
+	return ""
 }
 
 // ApplyMViewExecutionSessionVarsWithConfig applies MV execution vars onto a session and returns a
@@ -123,13 +159,17 @@ func ApplyMViewExecutionSessionVarsWithConfig(
 	if maintainMemQuotaVarName == "" {
 		maintainMemQuotaVarName = TiDBMVMaintainMemQuota
 	}
+	maintainIsolationReadEnginesVarName := cfg.MaintainIsolationReadEnginesVarName
+	if maintainIsolationReadEnginesVarName == "" {
+		maintainIsolationReadEnginesVarName = TiDBMVMaintainIsolationReadEngines
+	}
 
 	origin := captureApplied(sessVars)
 	if origin == target {
 		return func() {}, nil
 	}
 
-	for _, assignment := range buildMViewExecutionSessionVarAssignments(target, maintainMemQuotaVarName) {
+	for _, assignment := range buildMViewExecutionSessionVarAssignments(target, maintainMemQuotaVarName, maintainIsolationReadEnginesVarName) {
 		err := error(nil)
 		if cfg.InjectApplyError != nil {
 			err = cfg.InjectApplyError(assignment.name)
@@ -146,6 +186,7 @@ func ApplyMViewExecutionSessionVarsWithConfig(
 				origin,
 				captureApplied(sessVars),
 				maintainMemQuotaVarName,
+				maintainIsolationReadEnginesVarName,
 				cfg.OnRestoreError,
 			)
 			return nil, errors.Annotate(err, assignment.failureMessage)
@@ -162,6 +203,7 @@ func ApplyMViewExecutionSessionVarsWithConfig(
 			origin,
 			applied,
 			maintainMemQuotaVarName,
+			maintainIsolationReadEnginesVarName,
 			cfg.OnRestoreError,
 		)
 	}, nil
@@ -170,12 +212,18 @@ func ApplyMViewExecutionSessionVarsWithConfig(
 func buildMViewExecutionSessionVarAssignments(
 	target MViewExecutionSessionVars,
 	maintainMemQuotaVarName string,
+	maintainIsolationReadEnginesVarName string,
 ) []mViewExecutionSessionVarAssignment {
 	return []mViewExecutionSessionVarAssignment{
 		{
 			name:           maintainMemQuotaVarName,
 			value:          strconv.FormatInt(target.MaintainMemQuota, 10),
 			failureMessage: "mv execution: failed to apply maintain mem quota",
+		},
+		{
+			name:           maintainIsolationReadEnginesVarName,
+			value:          target.IsolationReadEngines,
+			failureMessage: "mv execution: failed to apply tidb_isolation_read_engines",
 		},
 		{
 			name:           TiDBMaxTiFlashThreads,
@@ -234,10 +282,11 @@ func restoreMViewExecutionSessionVars(
 	sessVars *SessionVars,
 	origin, current MViewExecutionSessionVars,
 	maintainMemQuotaVarName string,
+	maintainIsolationReadEnginesVarName string,
 	onRestoreError func(name, originValue, currentValue string, err error),
 ) {
-	originAssignments := buildMViewExecutionSessionVarAssignments(origin, maintainMemQuotaVarName)
-	currentAssignments := buildMViewExecutionSessionVarAssignments(current, maintainMemQuotaVarName)
+	originAssignments := buildMViewExecutionSessionVarAssignments(origin, maintainMemQuotaVarName, maintainIsolationReadEnginesVarName)
+	currentAssignments := buildMViewExecutionSessionVarAssignments(current, maintainMemQuotaVarName, maintainIsolationReadEnginesVarName)
 	for idx, assignment := range originAssignments {
 		if err := sessVars.SetSystemVar(assignment.name, assignment.value); err != nil && onRestoreError != nil {
 			onRestoreError(assignment.name, assignment.value, currentAssignments[idx].value, err)
