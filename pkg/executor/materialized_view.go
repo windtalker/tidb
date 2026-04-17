@@ -1593,7 +1593,7 @@ func (e *PurgeMaterializedViewLogExec) executePurgeMaterializedViewLog(
 	failpoint.InjectCall("mvMaintainMemQuotaAppliedOnPurgeSession", purgeSessVars.MemQuotaQuery, targetMaintainMemQuota)
 	failpoint.InjectCall(
 		"mvMaintainIsolationReadEnginesAppliedOnPurgeSession",
-		variable.GetSessionSystemVarOrDefault(purgeSessVars, variable.TiDBIsolationReadEngines),
+		variable.GetIsolationReadEnginesString(purgeSessVars),
 		targetMaintainIsolationReadEngines,
 	)
 	sqlExec := purgeSctx.GetSQLExecutor()
@@ -2613,7 +2613,7 @@ func (e *RefreshMaterializedViewExec) executeRefreshMaterializedView(kctx contex
 	failpoint.InjectCall("mvMaintainMemQuotaAppliedOnRefreshSession", sessVars.MemQuotaQuery, refreshExecutionVars.MaintainMemQuota)
 	failpoint.InjectCall(
 		"refreshMaterializedViewIsolationReadEnginesApplied",
-		variable.GetSessionSystemVarOrDefault(sessVars, variable.TiDBIsolationReadEngines),
+		variable.GetIsolationReadEnginesString(sessVars),
 		refreshExecutionVars.IsolationReadEngines,
 	)
 
@@ -3096,7 +3096,7 @@ func (e *RefreshMaterializedViewExec) executeRefreshMaterializedViewCompleteOutO
 	failpoint.InjectCall("mvMaintainMemQuotaAppliedOnRefreshOutOfPlaceBuildSession", buildSessVars.MemQuotaQuery, targetExecutionVars.MaintainMemQuota)
 	failpoint.InjectCall(
 		"refreshMaterializedViewOutOfPlaceBuildIsolationReadEnginesApplied",
-		variable.GetSessionSystemVarOrDefault(buildSessVars, variable.TiDBIsolationReadEngines),
+		variable.GetIsolationReadEnginesString(buildSessVars),
 		targetExecutionVars.IsolationReadEngines,
 	)
 	failpoint.InjectCall(
@@ -3357,7 +3357,7 @@ func applyMVMaintenanceIsolationReadEngines(
 	if sessVars == nil {
 		return nil, errors.New("mv maintenance: session vars is nil")
 	}
-	originIsolationReadEngines := variable.GetSessionOrGlobalSystemVarOrDefault(context.Background(), sessVars, variable.TiDBIsolationReadEngines)
+	originIsolationReadEngines := variable.GetIsolationReadEnginesString(sessVars)
 	if originIsolationReadEngines == targetIsolationReadEngines {
 		return func() {}, nil
 	}

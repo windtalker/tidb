@@ -230,7 +230,7 @@ func (s *recordingSessionContext) ExecRestrictedSQL(_ context.Context, _ []sqlex
 	copy(argsCopy, args)
 	s.executedRestrictedArg = append(s.executedRestrictedArg, argsCopy)
 	s.restrictedMaintainQuota = append(s.restrictedMaintainQuota, s.GetSessionVars().MVMaintainMemQuota)
-	s.restrictedMaintainIsolationReadEngines = append(s.restrictedMaintainIsolationReadEngines, variable.GetSessionSystemVarOrDefault(s.GetSessionVars(), variable.TiDBMVMaintainIsolationReadEngines))
+	s.restrictedMaintainIsolationReadEngines = append(s.restrictedMaintainIsolationReadEngines, s.GetSessionVars().MVMaintainIsolationReadEngines)
 	s.restrictedMaxThreads = append(s.restrictedMaxThreads, s.GetSessionVars().TiFlashMaxThreads)
 	s.restrictedMaxBytesBeforeExternalJoin = append(s.restrictedMaxBytesBeforeExternalJoin, s.GetSessionVars().TiFlashMaxBytesBeforeExternalJoin)
 	s.restrictedMaxBytesBeforeExternalAgg = append(s.restrictedMaxBytesBeforeExternalAgg, s.GetSessionVars().TiFlashMaxBytesBeforeExternalGroupBy)
@@ -2129,8 +2129,8 @@ func TestServerHelperRefreshMVUsesGlobalRefreshSessionVars(t *testing.T) {
 	require.Equal(t, uint64(1024), vars.TiFlashFineGrainedShuffleBatchSize)
 	require.Equal(t, 3, vars.MViewMaintainImportThreads)
 	require.Equal(t, "8gib", vars.MViewMaintainImportDiskQuota)
-	require.Equal(t, "tidb", variable.GetSessionSystemVarOrDefault(vars, variable.TiDBIsolationReadEngines))
-	require.Equal(t, "tidb", variable.GetSessionSystemVarOrDefault(vars, variable.TiDBMVMaintainIsolationReadEngines))
+	require.Equal(t, "tidb", variable.GetIsolationReadEnginesString(vars))
+	require.Equal(t, "tidb", vars.MVMaintainIsolationReadEngines)
 }
 
 func TestServerHelperRefreshMVBestEffortWhenGlobalSessionVarsUnavailable(t *testing.T) {
@@ -2220,8 +2220,8 @@ func TestServerHelperRefreshMVBestEffortWhenGlobalSessionVarsUnavailable(t *test
 	require.Equal(t, uint64(1024), vars.TiFlashFineGrainedShuffleBatchSize)
 	require.Equal(t, 3, vars.MViewMaintainImportThreads)
 	require.Equal(t, "8gib", vars.MViewMaintainImportDiskQuota)
-	require.Equal(t, "tikv", variable.GetSessionSystemVarOrDefault(vars, variable.TiDBIsolationReadEngines))
-	require.Equal(t, "tidb", variable.GetSessionSystemVarOrDefault(vars, variable.TiDBMVMaintainIsolationReadEngines))
+	require.Equal(t, "tikv", variable.GetIsolationReadEnginesString(vars))
+	require.Equal(t, variable.GetSysVar(variable.TiDBMVMaintainIsolationReadEngines).Value, vars.MVMaintainIsolationReadEngines)
 }
 
 func TestServerHelperRefreshMVDeletedWhenNextTimeNotFound(t *testing.T) {
@@ -2324,8 +2324,8 @@ func TestServerHelperPurgeMVLogUsesGlobalMaintainMemQuota(t *testing.T) {
 	require.Equal(t, []int64{536870912, 536870912}, se.restrictedMaintainQuota)
 	require.Equal(t, []string{"tikv", "tikv"}, se.restrictedMaintainIsolationReadEngines)
 	require.Equal(t, int64(268435456), vars.MVMaintainMemQuota)
-	require.Equal(t, "tidb", variable.GetSessionSystemVarOrDefault(vars, variable.TiDBIsolationReadEngines))
-	require.Equal(t, "tidb", variable.GetSessionSystemVarOrDefault(vars, variable.TiDBMVMaintainIsolationReadEngines))
+	require.Equal(t, "tidb", variable.GetIsolationReadEnginesString(vars))
+	require.Equal(t, "tidb", vars.MVMaintainIsolationReadEngines)
 }
 
 func TestServerHelperPurgeMVLogBestEffortWhenGlobalMaintainMemQuotaUnavailable(t *testing.T) {
@@ -2365,8 +2365,8 @@ func TestServerHelperPurgeMVLogBestEffortWhenGlobalMaintainMemQuotaUnavailable(t
 	require.Equal(t, []int64{268435456, 268435456}, se.restrictedMaintainQuota)
 	require.Equal(t, []string{"tidb", "tidb"}, se.restrictedMaintainIsolationReadEngines)
 	require.Equal(t, int64(268435456), vars.MVMaintainMemQuota)
-	require.Equal(t, "tikv", variable.GetSessionSystemVarOrDefault(vars, variable.TiDBIsolationReadEngines))
-	require.Equal(t, "tidb", variable.GetSessionSystemVarOrDefault(vars, variable.TiDBMVMaintainIsolationReadEngines))
+	require.Equal(t, "tikv", variable.GetIsolationReadEnginesString(vars))
+	require.Equal(t, variable.GetSysVar(variable.TiDBMVMaintainIsolationReadEngines).Value, vars.MVMaintainIsolationReadEngines)
 }
 
 func TestPurgeMVLogSkipWhenAutoPurge(t *testing.T) {

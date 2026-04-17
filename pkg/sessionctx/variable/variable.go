@@ -94,7 +94,7 @@ func CaptureAppliedMViewExecutionSessionVars(sessVars *SessionVars) MViewExecuti
 	}
 	return MViewExecutionSessionVars{
 		MaintainMemQuota:             sessVars.MemQuotaQuery,
-		IsolationReadEngines:         GetSessionOrGlobalSystemVarOrDefault(context.Background(), sessVars, TiDBIsolationReadEngines),
+		IsolationReadEngines:         GetIsolationReadEnginesString(sessVars),
 		TiFlashMaxThreads:            sessVars.TiFlashMaxThreads,
 		TiFlashMaxBytesBeforeExtJoin: sessVars.TiFlashMaxBytesBeforeExternalJoin,
 		TiFlashMaxBytesBeforeExtAgg:  sessVars.TiFlashMaxBytesBeforeExternalGroupBy,
@@ -108,32 +108,15 @@ func CaptureAppliedMViewExecutionSessionVars(sessVars *SessionVars) MViewExecuti
 	}
 }
 
-// GetSessionSystemVarOrDefault returns the current session value of a system variable, or the
-// sysvar default when the session has not loaded a value yet.
-func GetSessionSystemVarOrDefault(sessVars *SessionVars, name string) string {
+// GetIsolationReadEnginesString returns the current session string value of
+// tidb_isolation_read_engines, or its default when the session has not loaded it yet.
+func GetIsolationReadEnginesString(sessVars *SessionVars) string {
 	if sessVars != nil {
-		if val, ok := sessVars.GetSystemVar(name); ok {
+		if val, ok := sessVars.GetSystemVar(TiDBIsolationReadEngines); ok {
 			return val
 		}
 	}
-	if sv := GetSysVar(name); sv != nil {
-		return sv.Value
-	}
-	return ""
-}
-
-// GetSessionOrGlobalSystemVarOrDefault returns the effective session/global value of a system
-// variable, or the sysvar default if the value cannot be loaded.
-func GetSessionOrGlobalSystemVarOrDefault(ctx context.Context, sessVars *SessionVars, name string) string {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	if sessVars != nil {
-		if val, err := sessVars.GetSessionOrGlobalSystemVar(ctx, name); err == nil {
-			return val
-		}
-	}
-	if sv := GetSysVar(name); sv != nil {
+	if sv := GetSysVar(TiDBIsolationReadEngines); sv != nil {
 		return sv.Value
 	}
 	return ""
