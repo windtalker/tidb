@@ -1536,7 +1536,11 @@ func (b *PlanBuilder) buildAdmin(ctx context.Context, as *ast.AdminStmt) (base.P
 	case ast.AdminChecksumTable:
 		tnWs := make([]*resolve.TableNameW, 0, len(as.Tables))
 		for _, tn := range as.Tables {
-			tnWs = append(tnWs, b.resolveCtx.GetTableName(tn))
+			tnW := b.resolveCtx.GetTableName(tn)
+			if err := CheckMViewReadable(b.ctx.GetSessionVars(), tnW.TableInfo, tn.Name.O); err != nil {
+				return nil, err
+			}
+			tnWs = append(tnWs, tnW)
 		}
 		p := &ChecksumTable{Tables: tnWs}
 		p.setSchemaAndNames(buildChecksumTableSchema())
@@ -1874,6 +1878,9 @@ func (b *PlanBuilder) buildAdminCheckTable(ctx context.Context, as *ast.AdminStm
 	tblName := as.Tables[0]
 	tnW := b.resolveCtx.GetTableName(tblName)
 	tableInfo := tnW.TableInfo
+	if err := CheckMViewReadable(b.ctx.GetSessionVars(), tableInfo, tblName.Name.O); err != nil {
+		return nil, err
+	}
 	tbl, ok := b.is.TableByID(ctx, tableInfo.ID)
 	if !ok {
 		return nil, infoschema.ErrTableNotExists.FastGenByArgs(tnW.DBInfo.Name.O, tableInfo.Name.O)
@@ -2863,6 +2870,9 @@ func (b *PlanBuilder) buildAnalyzeTable(as *ast.AnalyzeTableStmt, opts map[ast.A
 		if tnW.TableInfo.IsSequence() {
 			return nil, errors.Errorf("analyze sequence %s is not supported now", tbl.Name.O)
 		}
+		if err := CheckMViewReadable(b.ctx.GetSessionVars(), tnW.TableInfo, tbl.Name.O); err != nil {
+			return nil, err
+		}
 
 		idxInfo, colInfo := b.getColsInfo(tbl)
 		physicalIDs, partitionNames, err := GetPhysicalIDsAndPartitionNames(tnW.TableInfo, as.PartitionNames)
@@ -2937,6 +2947,9 @@ func (b *PlanBuilder) buildAnalyzeIndex(as *ast.AnalyzeTableStmt, opts map[ast.A
 	}
 	tnW := b.resolveCtx.GetTableName(as.TableNames[0])
 	tblInfo := tnW.TableInfo
+	if err := CheckMViewReadable(b.ctx.GetSessionVars(), tblInfo, as.TableNames[0].Name.O); err != nil {
+		return nil, err
+	}
 	physicalIDs, names, err := GetPhysicalIDsAndPartitionNames(tblInfo, as.PartitionNames)
 	if err != nil {
 		return nil, err
@@ -2993,6 +3006,9 @@ func (b *PlanBuilder) buildAnalyzeAllIndex(as *ast.AnalyzeTableStmt, opts map[as
 	}
 	tnW := b.resolveCtx.GetTableName(as.TableNames[0])
 	tblInfo := tnW.TableInfo
+	if err := CheckMViewReadable(b.ctx.GetSessionVars(), tblInfo, as.TableNames[0].Name.O); err != nil {
+		return nil, err
+	}
 	physicalIDs, names, err := GetPhysicalIDsAndPartitionNames(tblInfo, as.PartitionNames)
 	if err != nil {
 		return nil, err

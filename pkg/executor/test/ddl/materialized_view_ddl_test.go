@@ -1165,6 +1165,12 @@ func TestCreateMaterializedViewBlocksReadAndRefreshBeforeReady(t *testing.T) {
 	require.ErrorContains(t, err, "initial build is in progress")
 	err = tk.ExecToErr("select * from mv_not_ready where a in (1, 2)")
 	require.ErrorContains(t, err, "initial build is in progress")
+	err = tk.ExecToErr("analyze table mv_not_ready")
+	require.ErrorContains(t, err, "initial build is in progress")
+	err = tk.ExecToErr("admin check table mv_not_ready")
+	require.ErrorContains(t, err, "initial build is in progress")
+	err = tk.ExecToErr("admin checksum table mv_not_ready")
+	require.ErrorContains(t, err, "initial build is in progress")
 	err = tk.ExecToErr("refresh materialized view mv_not_ready fast")
 	require.ErrorContains(t, err, "initial build is in progress")
 
