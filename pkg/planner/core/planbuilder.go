@@ -1525,11 +1525,17 @@ func (b *PlanBuilder) buildAdmin(ctx context.Context, as *ast.AdminStmt) (base.P
 		}
 	case ast.AdminRecoverIndex:
 		tnW := b.resolveCtx.GetTableName(as.Tables[0])
+		if err := CheckMViewReadable(b.ctx.GetSessionVars(), tnW.TableInfo, tnW.Name.O); err != nil {
+			return nil, err
+		}
 		p := &RecoverIndex{Table: tnW, IndexName: as.Index}
 		p.setSchemaAndNames(buildRecoverIndexFields())
 		ret = p
 	case ast.AdminCleanupIndex:
 		tnW := b.resolveCtx.GetTableName(as.Tables[0])
+		if err := CheckMViewReadable(b.ctx.GetSessionVars(), tnW.TableInfo, tnW.Name.O); err != nil {
+			return nil, err
+		}
 		p := &CleanupIndex{Table: tnW, IndexName: as.Index}
 		p.setSchemaAndNames(buildCleanupIndexFields())
 		ret = p
