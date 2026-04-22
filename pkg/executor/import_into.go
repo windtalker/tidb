@@ -79,7 +79,7 @@ func newImportIntoExec(b exec.BaseExecutor, selectExec exec.Executor, userSctx s
 	}, nil
 }
 
-func inheritImportIntoChildSessionMViewMaintenanceFlag(parent, child sessionctx.Context) {
+func inheritMViewMaintenanceFlag(parent, child sessionctx.Context) {
 	if parent == nil || child == nil {
 		return
 	}
@@ -87,8 +87,7 @@ func inheritImportIntoChildSessionMViewMaintenanceFlag(parent, child sessionctx.
 	childVars := child.GetSessionVars()
 	childVars.InMaterializedViewMaintenance = parentVars.InMaterializedViewMaintenance
 	failpoint.InjectCall(
-		"importIntoChildSessionCreated",
-		childVars.InRestrictedSQL,
+		"inheritMViewMaintenanceFlagApplied",
 		childVars.InMaterializedViewMaintenance,
 	)
 }
@@ -131,7 +130,7 @@ func (e *ImportIntoExec) Next(ctx context.Context, req *chunk.Chunk) (err error)
 		return err2
 	}
 	defer CloseSession(newSCtx)
-	inheritImportIntoChildSessionMViewMaintenanceFlag(e.userSctx, newSCtx)
+	inheritMViewMaintenanceFlag(e.userSctx, newSCtx)
 	sqlExec := newSCtx.GetSQLExecutor()
 	if err2 = e.controller.CheckRequirements(ctx, sqlExec); err2 != nil {
 		return err2
@@ -268,7 +267,7 @@ func (e *ImportIntoExec) importFromSelect(ctx context.Context) error {
 		return err2
 	}
 	defer CloseSession(newSCtx)
-	inheritImportIntoChildSessionMViewMaintenanceFlag(e.userSctx, newSCtx)
+	inheritMViewMaintenanceFlag(e.userSctx, newSCtx)
 
 	sqlExec := newSCtx.GetSQLExecutor()
 	if err2 = e.controller.CheckRequirements(ctx, sqlExec); err2 != nil {
