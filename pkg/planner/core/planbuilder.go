@@ -1525,17 +1525,11 @@ func (b *PlanBuilder) buildAdmin(ctx context.Context, as *ast.AdminStmt) (base.P
 		}
 	case ast.AdminRecoverIndex:
 		tnW := b.resolveCtx.GetTableName(as.Tables[0])
-		if err := CheckMViewReadable(b.ctx.GetSessionVars(), tnW.TableInfo, tnW.Name.O); err != nil {
-			return nil, err
-		}
 		p := &RecoverIndex{Table: tnW, IndexName: as.Index}
 		p.setSchemaAndNames(buildRecoverIndexFields())
 		ret = p
 	case ast.AdminCleanupIndex:
 		tnW := b.resolveCtx.GetTableName(as.Tables[0])
-		if err := CheckMViewReadable(b.ctx.GetSessionVars(), tnW.TableInfo, tnW.Name.O); err != nil {
-			return nil, err
-		}
 		p := &CleanupIndex{Table: tnW, IndexName: as.Index}
 		p.setSchemaAndNames(buildCleanupIndexFields())
 		ret = p
@@ -1543,9 +1537,6 @@ func (b *PlanBuilder) buildAdmin(ctx context.Context, as *ast.AdminStmt) (base.P
 		tnWs := make([]*resolve.TableNameW, 0, len(as.Tables))
 		for _, tn := range as.Tables {
 			tnW := b.resolveCtx.GetTableName(tn)
-			if err := CheckMViewReadable(b.ctx.GetSessionVars(), tnW.TableInfo, tn.Name.O); err != nil {
-				return nil, err
-			}
 			tnWs = append(tnWs, tnW)
 		}
 		p := &ChecksumTable{Tables: tnWs}
@@ -1884,9 +1875,6 @@ func (b *PlanBuilder) buildAdminCheckTable(ctx context.Context, as *ast.AdminStm
 	tblName := as.Tables[0]
 	tnW := b.resolveCtx.GetTableName(tblName)
 	tableInfo := tnW.TableInfo
-	if err := CheckMViewReadable(b.ctx.GetSessionVars(), tableInfo, tblName.Name.O); err != nil {
-		return nil, err
-	}
 	tbl, ok := b.is.TableByID(ctx, tableInfo.ID)
 	if !ok {
 		return nil, infoschema.ErrTableNotExists.FastGenByArgs(tnW.DBInfo.Name.O, tableInfo.Name.O)
