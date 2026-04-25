@@ -458,9 +458,9 @@ func TestMaterializedViewRefreshCompleteBasic(t *testing.T) {
 	tk.MustQuery(fmt.Sprintf(
 		"select REFRESH_STATUS, REFRESH_METHOD = 'complete delta apply manual', REFRESH_ENDTIME is not null, REFRESH_ROWS is null, "+
 			"REFRESH_DURATION_SEC = cast(timestampdiff(microsecond, REFRESH_TIME, REFRESH_ENDTIME) as decimal(18,6)) / 1000000, REFRESH_DURATION_SEC >= 0, "+
-			"REFRESH_READ_TSO > 0, REFRESH_FAILED_REASON is null from mysql.tidb_mview_refresh_hist where MVIEW_ID = %d",
+			"REFRESH_READ_TSO > 0, REFRESH_COMMIT_TSO > REFRESH_READ_TSO, REFRESH_FAILED_REASON is null from mysql.tidb_mview_refresh_hist where MVIEW_ID = %d",
 		mviewID,
-	)).Check(testkit.Rows("success 1 1 1 1 1 1 1"))
+	)).Check(testkit.Rows("success 1 1 1 1 1 1 1 1"))
 }
 
 func TestMaterializedViewRefreshFastStatementResult(t *testing.T) {
