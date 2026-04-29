@@ -1413,6 +1413,103 @@ func TestMaterializedViewRefreshFastAsOfTimestampOuterSemantics(t *testing.T) {
 	)).Check(testkit.Rows("success bounded fast manual 1"))
 }
 
+func TestMaterializedViewRefreshFastRejectsRefreshFenceTSO(t *testing.T) {
+	store, _ := testkit.CreateMockStoreAndDomain(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("create table t_mv_refresh_fence (a int not null, b int not null)")
+	tk.MustExec("create materialized view log on t_mv_refresh_fence (a, b) purge next date_add(now(), interval 1 hour)")
+	tk.MustExec("create materialized view mv_refresh_fence (a, s, cnt) refresh fast as select a, sum(b), count(1) from t_mv_refresh_fence group by a")
+
+	mvIDRow := tk.MustQuery("select tidb_table_id from information_schema.tables where table_schema = 'test' and table_name = 'mv_refresh_fence'").Rows()
+	require.Len(t, mvIDRow, 1)
+	mvID, err := strconv.ParseInt(fmt.Sprintf("%v", mvIDRow[0][0]), 10, 64)
+	require.NoError(t, err)
+
+	mlogIDRow := tk.MustQuery("select tidb_table_id from information_schema.tables where table_schema = 'test' and table_name = '$mlog$t_mv_refresh_fence'").Rows()
+	require.Len(t, mlogIDRow, 1)
+	mlogID, err := strconv.ParseInt(fmt.Sprintf("%v", mlogIDRow[0][0]), 10, 64)
+	require.NoError(t, err)
+
+	lastSuccessTSORow := tk.MustQuery(fmt.Sprintf(
+		"select LAST_SUCCESS_READ_TSO from mysql.tidb_mview_refresh_info where MVIEW_ID = %d",
+		mvID,
+	)).Rows()
+	require.Len(t, lastSuccessTSORow, 1)
+	lastSuccessTSO, err := strconv.ParseUint(fmt.Sprintf("%v", lastSuccessTSORow[0][0]), 10, 64)
+	require.NoError(t, err)
+	require.NotZero(t, lastSuccessTSO)
+
+	tk.MustExec(fmt.Sprintf(
+		"update mysql.tidb_mlog_purge_info set REFRESH_FENCE_TSO = %d where MLOG_ID = %d",
+		lastSuccessTSO+1,
+		mlogID,
+	))
+
+	err = tk.ExecToErr("refresh materialized view mv_refresh_fence fast")
+	require.ErrorContains(t, err, "refresh fence tso")
+	require.ErrorContains(t, err, "LAST_SUCCESS_READ_TSO")
+	tk.MustQuery(fmt.Sprintf(
+		"select REFRESH_STATUS, REFRESH_METHOD, REFRESH_FAILED_REASON like '%%refresh fence tso%%' from mysql.tidb_mview_refresh_hist where MVIEW_ID = %d order by REFRESH_JOB_ID desc limit 1",
+		mvID,
+	)).Check(testkit.Rows("failed fast manual 1"))
+}
+
+func TestMaterializedViewRefreshFastAsOfTimestampNoOpIgnoresRefreshFenceTSO(t *testing.T) {
+	store, _ := testkit.CreateMockStoreAndDomain(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("set time_zone = '+00:00'")
+	tk.MustExec("create table t_mv_refresh_asof_noop_fence (a int not null, b int not null)")
+	tk.MustExec("insert into t_mv_refresh_asof_noop_fence values (1, 10), (2, 20)")
+	tk.MustExec("create materialized view log on t_mv_refresh_asof_noop_fence (a, b) purge next date_add(now(), interval 1 hour)")
+	tk.MustExec("create materialized view mv_refresh_asof_noop_fence (a, s, cnt) refresh fast as select a, sum(b), count(1) from t_mv_refresh_asof_noop_fence group by a")
+
+	mvIDRow := tk.MustQuery("select tidb_table_id from information_schema.tables where table_schema = 'test' and table_name = 'mv_refresh_asof_noop_fence'").Rows()
+	require.Len(t, mvIDRow, 1)
+	mvID, err := strconv.ParseInt(fmt.Sprintf("%v", mvIDRow[0][0]), 10, 64)
+	require.NoError(t, err)
+
+	mlogIDRow := tk.MustQuery("select tidb_table_id from information_schema.tables where table_schema = 'test' and table_name = '$mlog$t_mv_refresh_asof_noop_fence'").Rows()
+	require.Len(t, mlogIDRow, 1)
+	mlogID, err := strconv.ParseInt(fmt.Sprintf("%v", mlogIDRow[0][0]), 10, 64)
+	require.NoError(t, err)
+
+	fromTime := time.Now().UTC().Add(-time.Hour).Truncate(time.Millisecond)
+	fromTSO := oracle.GoTimeToTS(fromTime)
+	mustSetMockGCSafePoint(t, tk, fromTime.Add(-time.Hour))
+	tk.MustExec(fmt.Sprintf(
+		"update mysql.tidb_mview_refresh_info set LAST_SUCCESS_READ_TSO = %d where MVIEW_ID = %d",
+		fromTSO,
+		mvID,
+	))
+	tk.MustExec(fmt.Sprintf(
+		"update mysql.tidb_mlog_purge_info set REFRESH_FENCE_TSO = %d where MLOG_ID = %d",
+		fromTSO+1,
+		mlogID,
+	))
+
+	histCountBeforeRows := tk.MustQuery(fmt.Sprintf(
+		"select count(*) from mysql.tidb_mview_refresh_hist where MVIEW_ID = %d",
+		mvID,
+	)).Rows()
+	require.Len(t, histCountBeforeRows, 1)
+	histCountBefore := fmt.Sprintf("%v", histCountBeforeRows[0][0])
+
+	tk.MustExec(fmt.Sprintf(
+		"refresh materialized view mv_refresh_asof_noop_fence fast as of timestamp '%s'",
+		fromTime.Format("2006-01-02 15:04:05.000"),
+	))
+	tk.MustQuery(fmt.Sprintf(
+		"select LAST_SUCCESS_READ_TSO from mysql.tidb_mview_refresh_info where MVIEW_ID = %d",
+		mvID,
+	)).Check(testkit.Rows(strconv.FormatUint(fromTSO, 10)))
+	tk.MustQuery(fmt.Sprintf(
+		"select count(*) from mysql.tidb_mview_refresh_hist where MVIEW_ID = %d",
+		mvID,
+	)).Check(testkit.Rows(histCountBefore))
+}
+
 func TestMaterializedViewRefreshFastAsOfTimestampAdvancesWatermarkInWindows(t *testing.T) {
 	store, _ := testkit.CreateMockStoreAndDomain(t)
 	tk := testkit.NewTestKit(t, store)

@@ -1549,6 +1549,7 @@ func (e *PurgeMaterializedViewLogExec) executePurgeMaterializedViewLog(
 	safePurgeTSO := uint64(0)
 	lockedLastPurgedTSO := uint64(0)
 	lockedLastPurgedTSOReady := false
+	refreshFenceWritten := false
 	purgeJobID := uint64(0)
 	purgeHistRunningInserted := false
 	defer func() {
@@ -1677,7 +1678,7 @@ func (e *PurgeMaterializedViewLogExec) executePurgeMaterializedViewLog(
 			return errors.Trace(err)
 		}
 
-		lastPurgedTSO, hasLastPurgedTSO, err := acquireMaterializedViewLogPurgeLock(kctx, sqlExec, schemaName, s.Table.Name, mlogID)
+		lockState, err := lockMaterializedViewLogPurgeInfoRow(kctx, sqlExec, schemaName, s.Table.Name, mlogID)
 		if err != nil {
 			_, _ = sqlExec.ExecuteInternal(kctx, "ROLLBACK")
 			if isMLogPurgeLockConflict(err) && totalPurgeRows > 0 {
@@ -1706,8 +1707,8 @@ func (e *PurgeMaterializedViewLogExec) executePurgeMaterializedViewLog(
 
 		// Calculate safe purge tso once at the first successful lock acquisition.
 		if !safePurgeTSOReady {
-			lockedLastPurgedTSO = lastPurgedTSO
-			lockedLastPurgedTSOReady = hasLastPurgedTSO
+			lockedLastPurgedTSO = lockState.lastPurgedTSO
+			lockedLastPurgedTSOReady = lockState.hasLastPurgedTSO
 
 			txn, err := purgeSctx.Txn(true)
 			if err != nil {
@@ -1785,6 +1786,13 @@ func (e *PurgeMaterializedViewLogExec) executePurgeMaterializedViewLog(
 				safePurgeTSO,
 				batchSize,
 			)
+		}
+		if batchErr == nil && !refreshFenceWritten && batchPurgeRows > 0 {
+			if err := updateMaterializedViewLogRefreshFenceTSO(kctx, sqlExec, mlogID, safePurgeTSO); err != nil {
+				batchErr = err
+			} else {
+				refreshFenceWritten = true
+			}
 		}
 		if batchErr == nil && batchPurgeRows < batchSize {
 			nextTime, shouldUpdateNextTime, deriveErr := deriveRuntimeMaterializedScheduleNextTime(
@@ -1988,6 +1996,27 @@ func acquireMaterializedViewLogPurgeLock(
 	baseTableName pmodel.CIStr,
 	mlogID int64,
 ) (lastPurgedTSO uint64, hasLastPurgedTSO bool, _ error) {
+	lockState, err := lockMaterializedViewLogPurgeInfoRow(kctx, sqlExec, schemaName, baseTableName, mlogID)
+	if err != nil {
+		return 0, false, err
+	}
+	return lockState.lastPurgedTSO, lockState.hasLastPurgedTSO, nil
+}
+
+type lockedMaterializedViewLogPurgeInfo struct {
+	lastPurgedTSO      uint64
+	hasLastPurgedTSO   bool
+	refreshFenceTSO    uint64
+	hasRefreshFenceTSO bool
+}
+
+func lockMaterializedViewLogPurgeInfoRow(
+	kctx context.Context,
+	sqlExec sqlexec.SQLExecutor,
+	schemaName pmodel.CIStr,
+	baseTableName pmodel.CIStr,
+	mlogID int64,
+) (lockedMaterializedViewLogPurgeInfo, error) {
 	forceConflict := false
 	failpoint.Inject("mockPurgeMaterializedViewLogLockConflict", func(val failpoint.Value) {
 		if v, ok := val.(bool); ok && v {
@@ -1995,7 +2024,7 @@ func acquireMaterializedViewLogPurgeLock(
 		}
 	})
 	if forceConflict {
-		return 0, false, errors.Annotatef(
+		return lockedMaterializedViewLogPurgeInfo{}, errors.Annotatef(
 			errMLogPurgeLockConflict,
 			"another purge is running for materialized view log on %s.%s, please retry later",
 			schemaName.O,
@@ -2004,11 +2033,11 @@ func acquireMaterializedViewLogPurgeLock(
 	}
 
 	// Acquire the mutual exclusion lock row for this MLOG_ID. NOWAIT ensures we fail fast if another purge is running.
-	lockSQL := sqlescape.MustEscapeSQL("SELECT LAST_PURGED_TSO FROM mysql.tidb_mlog_purge_info WHERE MLOG_ID = %? FOR UPDATE NOWAIT", mlogID)
+	lockSQL := sqlescape.MustEscapeSQL("SELECT LAST_PURGED_TSO, REFRESH_FENCE_TSO FROM mysql.tidb_mlog_purge_info WHERE MLOG_ID = %? FOR UPDATE NOWAIT", mlogID)
 	rows, err := sqlexec.ExecSQL(kctx, sqlExec, lockSQL)
 	if err != nil {
 		if storeerr.ErrLockAcquireFailAndNoWaitSet.Equal(err) {
-			return 0, false, errors.Annotatef(
+			return lockedMaterializedViewLogPurgeInfo{}, errors.Annotatef(
 				errMLogPurgeLockConflict,
 				"another purge is running for materialized view log on %s.%s, please retry later",
 				schemaName.O,
@@ -2016,17 +2045,23 @@ func acquireMaterializedViewLogPurgeLock(
 			)
 		}
 		if infoschema.ErrTableNotExists.Equal(err) {
-			return 0, false, errors.New("required system table mysql.tidb_mlog_purge_info does not exist")
+			return lockedMaterializedViewLogPurgeInfo{}, errors.New("required system table mysql.tidb_mlog_purge_info does not exist")
 		}
-		return 0, false, errors.Trace(err)
+		return lockedMaterializedViewLogPurgeInfo{}, errors.Trace(err)
 	}
 	if len(rows) == 0 {
-		return 0, false, errors.Errorf("mlog purge lock row does not exist for mlog id %d", mlogID)
+		return lockedMaterializedViewLogPurgeInfo{}, errors.Errorf("mlog purge lock row does not exist for mlog id %d", mlogID)
 	}
-	if rows[0].IsNull(0) {
-		return 0, false, nil
+	state := lockedMaterializedViewLogPurgeInfo{}
+	if !rows[0].IsNull(0) {
+		state.lastPurgedTSO = rows[0].GetUint64(0)
+		state.hasLastPurgedTSO = true
 	}
-	return rows[0].GetUint64(0), true, nil
+	if !rows[0].IsNull(1) {
+		state.refreshFenceTSO = rows[0].GetUint64(1)
+		state.hasRefreshFenceTSO = true
+	}
+	return state, nil
 }
 
 func isMLogPurgeLockConflict(err error) bool {
@@ -2167,6 +2202,27 @@ WHERE MLOG_ID = %?`
 			}
 			return errors.Trace(err)
 		}
+	}
+	return nil
+}
+
+func updateMaterializedViewLogRefreshFenceTSO(
+	kctx context.Context,
+	sqlExec sqlexec.SQLExecutor,
+	mlogID int64,
+	refreshFenceTSO uint64,
+) error {
+	updateRefreshFenceTSOSQL := `UPDATE mysql.tidb_mlog_purge_info
+SET
+	REFRESH_FENCE_TSO = %?
+WHERE MLOG_ID = %?
+	AND (REFRESH_FENCE_TSO IS NULL OR REFRESH_FENCE_TSO < %?)`
+	_, err := sqlExec.ExecuteInternal(kctx, updateRefreshFenceTSOSQL, refreshFenceTSO, mlogID, refreshFenceTSO)
+	if err != nil {
+		if infoschema.ErrTableNotExists.Equal(err) {
+			return errors.New("required system table mysql.tidb_mlog_purge_info does not exist")
+		}
+		return errors.Trace(err)
 	}
 	return nil
 }
@@ -2838,6 +2894,18 @@ func (e *RefreshMaterializedViewExec) executeRefreshMaterializedView(kctx contex
 	if refreshMode == ast.RefreshMaterializedViewModeFast && !lockedReadTSONull && targetRefreshReadTSO > 0 && targetRefreshReadTSO == lockedReadTSO {
 		applyMVRefreshStmtResult(e.Ctx().GetSessionVars().StmtCtx, newMVRefreshStmtResultFromWriteCounts(0, 0, 0))
 		return nil
+	}
+	if refreshMode == ast.RefreshMaterializedViewModeFast && !lockedReadTSONull {
+		if err := validateFastRefreshMaterializedViewLogFence(
+			kctx,
+			sqlExec,
+			e.Ctx().GetDomainInfoSchema().(infoschema.InfoSchema),
+			schemaName,
+			tblInfo,
+			lockedReadTSO,
+		); err != nil {
+			return err
+		}
 	}
 	boundedFastRefresh := refreshMode == ast.RefreshMaterializedViewModeFast &&
 		!lockedReadTSONull &&
@@ -3788,6 +3856,54 @@ func acquireMVRefreshAdvisoryLock(
 
 func isMVRefreshAdvisoryLockConflict(err error) bool {
 	return err != nil && storeerr.ErrLockWaitTimeout.Equal(err)
+}
+
+func validateFastRefreshMaterializedViewLogFence(
+	kctx context.Context,
+	sqlExec sqlexec.SQLExecutor,
+	is infoschema.InfoSchema,
+	mvSchemaName pmodel.CIStr,
+	mvInfo *model.TableInfo,
+	lastSuccessfulRefreshReadTSO uint64,
+) error {
+	if mvInfo == nil || mvInfo.MaterializedView == nil {
+		return errors.New("refresh materialized view fast: target table is not a materialized view")
+	}
+	if len(mvInfo.MaterializedView.BaseTableIDs) != 1 {
+		return errors.Errorf(
+			"refresh materialized view fast: materialized view %s has invalid base table list size %d",
+			mvInfo.Name.O,
+			len(mvInfo.MaterializedView.BaseTableIDs),
+		)
+	}
+	baseTableID := mvInfo.MaterializedView.BaseTableIDs[0]
+	baseTableInfo, ok := is.TableInfoByID(baseTableID)
+	if !ok {
+		return errors.Errorf("refresh materialized view fast: base table id %d not found in infoschema", baseTableID)
+	}
+	if baseTableInfo.MaterializedViewBase == nil || baseTableInfo.MaterializedViewBase.MLogID == 0 {
+		return errors.Errorf("refresh materialized view fast: base table %s has no materialized view log", baseTableInfo.Name.O)
+	}
+	lockState, err := lockMaterializedViewLogPurgeInfoRow(
+		kctx,
+		sqlExec,
+		mvSchemaName,
+		baseTableInfo.Name,
+		baseTableInfo.MaterializedViewBase.MLogID,
+	)
+	if err != nil {
+		return err
+	}
+	if lockState.hasRefreshFenceTSO && lockState.refreshFenceTSO > lastSuccessfulRefreshReadTSO {
+		return errors.Errorf(
+			"refresh materialized view fast: materialized view log refresh fence tso %d is newer than LAST_SUCCESS_READ_TSO %d for base table %s.%s",
+			lockState.refreshFenceTSO,
+			lastSuccessfulRefreshReadTSO,
+			mvSchemaName.O,
+			baseTableInfo.Name.O,
+		)
+	}
+	return nil
 }
 
 func releaseMVRefreshAdvisoryLockFully(refreshSctx sessionctx.Context, lockName string) int {

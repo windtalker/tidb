@@ -774,6 +774,7 @@ const (
 		MLOG_ID bigint NOT NULL,
 		NEXT_TIME datetime DEFAULT NULL,
 		LAST_PURGED_TSO bigint unsigned DEFAULT NULL,
+		REFRESH_FENCE_TSO bigint unsigned DEFAULT NULL,
 		PRIMARY KEY(MLOG_ID))`
 
 	// CreateTiDBMViewRefreshHistTable is a table to store mview refresh history.
@@ -1305,12 +1306,16 @@ const (
 	// Add REFRESH_COMMIT_TSO and lookup index to MV refresh history table.
 	version226 = 226
 
-	// next version should start with 227
+	// version 227
+	// Add REFRESH_FENCE_TSO to MV log purge info table.
+	version227 = 227
+
+	// next version should start with 228
 )
 
 // currentBootstrapVersion is defined as a variable, so we can modify its value for testing.
 // please make sure this is the largest version
-var currentBootstrapVersion int64 = version226
+var currentBootstrapVersion int64 = version227
 
 // DDL owner key's expired time is ManagerSessionTTL seconds, we should wait the time and give more time to have a chance to finish it.
 var internalSQLTimeout = owner.ManagerSessionTTL + 15
@@ -1492,6 +1497,7 @@ var (
 		upgradeToVer224,
 		upgradeToVer225,
 		upgradeToVer226,
+		upgradeToVer227,
 	}
 )
 
@@ -3429,6 +3435,13 @@ func upgradeToVer226(s sessiontypes.Session, ver int64) {
 	}
 	doReentrantDDL(s, "ALTER TABLE mysql.tidb_mview_refresh_hist ADD COLUMN `REFRESH_COMMIT_TSO` bigint unsigned DEFAULT NULL AFTER `REFRESH_READ_TSO`", infoschema.ErrColumnExists)
 	doReentrantDDL(s, "ALTER TABLE mysql.tidb_mview_refresh_hist ADD INDEX idx_mv_name_commit_tso (MV_SCHEMA, MV_NAME, REFRESH_COMMIT_TSO)", dbterror.ErrDupKeyName)
+}
+
+func upgradeToVer227(s sessiontypes.Session, ver int64) {
+	if ver >= version227 {
+		return
+	}
+	doReentrantDDL(s, "ALTER TABLE mysql.tidb_mlog_purge_info ADD COLUMN `REFRESH_FENCE_TSO` bigint unsigned DEFAULT NULL AFTER `LAST_PURGED_TSO`", infoschema.ErrColumnExists)
 }
 
 // initGlobalVariableIfNotExists initialize a global variable with specific val if it does not exist.

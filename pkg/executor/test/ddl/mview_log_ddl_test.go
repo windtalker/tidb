@@ -1129,8 +1129,8 @@ func TestPurgeMaterializedViewLogBatchDelete(t *testing.T) {
 		Check(testkit.Rows("test t_purge_batch_delete"))
 	tk.MustQuery(fmt.Sprintf("select count(*) from mysql.tidb_mlog_purge_hist where BASE_TABLE_SCHEMA = 'TEST' and BASE_TABLE_NAME = 'T_PURGE_BATCH_DELETE' and MLOG_ID = %d", mlogID)).
 		Check(testkit.Rows("1"))
-	tk.MustQuery(fmt.Sprintf("select LAST_PURGED_TSO is not null, LAST_PURGED_TSO >= %d from mysql.tidb_mlog_purge_info where MLOG_ID = %d", maxCommitTS, mlogID)).
-		Check(testkit.Rows("1 1"))
+	tk.MustQuery(fmt.Sprintf("select LAST_PURGED_TSO is not null, LAST_PURGED_TSO >= %d, REFRESH_FENCE_TSO is not null, REFRESH_FENCE_TSO >= %d from mysql.tidb_mlog_purge_info where MLOG_ID = %d", maxCommitTS, maxCommitTS, mlogID)).
+		Check(testkit.Rows("1 1 1 1"))
 }
 
 func TestPurgeMaterializedViewLogLastPurgedTSOShortCircuit(t *testing.T) {
@@ -1198,6 +1198,8 @@ func TestPurgeMaterializedViewLogDeleteErrorNoDirtyWrite(t *testing.T) {
 	require.ErrorContains(t, err, "mock purge mlog delete error")
 
 	tk.MustQuery("select count(*) from `$mlog$t_purge_delete_err`").Check(testkit.Rows("3"))
+	tk.MustQuery(fmt.Sprintf("select REFRESH_FENCE_TSO is null from mysql.tidb_mlog_purge_info where MLOG_ID = %d", mlogID)).
+		Check(testkit.Rows("1"))
 	tk.MustQuery(fmt.Sprintf("select PURGE_STATUS, PURGE_ROWS, PURGE_ENDTIME is not null, PURGE_FAILED_REASON like '%%mock purge mlog delete error%%' from mysql.tidb_mlog_purge_hist where MLOG_ID = %d order by PURGE_JOB_ID desc limit 1", mlogID)).
 		Check(testkit.Rows("failed 0 1 1"))
 }
@@ -1380,6 +1382,8 @@ func TestPurgeMaterializedViewLogLockConflictAfterPartialSuccess(t *testing.T) {
 	tk.MustQuery("show warnings").CheckContain("lock conflict after deleting 1 rows")
 
 	tk.MustQuery("select count(*) from `$mlog$t_purge_partial_conflict`").Check(testkit.Rows("2"))
+	tk.MustQuery(fmt.Sprintf("select LAST_PURGED_TSO is null, REFRESH_FENCE_TSO is not null from mysql.tidb_mlog_purge_info where MLOG_ID = %d", mlogID)).
+		Check(testkit.Rows("1 1"))
 	tk.MustQuery(fmt.Sprintf("select PURGE_STATUS, PURGE_ROWS from mysql.tidb_mlog_purge_hist where MLOG_ID = %d order by PURGE_JOB_ID desc limit 1", mlogID)).
 		Check(testkit.Rows("success 1"))
 }

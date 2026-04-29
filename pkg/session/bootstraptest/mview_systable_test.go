@@ -47,6 +47,8 @@ func TestBootstrapMaterializedViewSystemTables(t *testing.T) {
 		Check(testkit.Rows("bigint(20) unsigned"))
 	tk.MustQuery("select lower(column_type) from information_schema.columns where table_schema='mysql' and table_name='tidb_mlog_purge_info' and column_name='LAST_PURGED_TSO'").
 		Check(testkit.Rows("bigint(20) unsigned"))
+	tk.MustQuery("select lower(column_type) from information_schema.columns where table_schema='mysql' and table_name='tidb_mlog_purge_info' and column_name='REFRESH_FENCE_TSO'").
+		Check(testkit.Rows("bigint(20) unsigned"))
 
 	tk.MustQuery("select lower(column_name) from information_schema.statistics where table_schema='mysql' and table_name='tidb_mview_refresh_hist' and index_name='PRIMARY' order by seq_in_index").
 		Check(testkit.Rows("refresh_job_id"))
@@ -175,6 +177,8 @@ func TestUpgradeToVer221MaterializedViewSystemTables(t *testing.T) {
 	tk.MustQuery("select lower(column_type) from information_schema.columns where table_schema='mysql' and table_name='tidb_mview_refresh_info' and column_name='LAST_SUCCESS_READ_TSO'").
 		Check(testkit.Rows("bigint(20) unsigned"))
 	tk.MustQuery("select lower(column_type) from information_schema.columns where table_schema='mysql' and table_name='tidb_mlog_purge_info' and column_name='LAST_PURGED_TSO'").
+		Check(testkit.Rows("bigint(20) unsigned"))
+	tk.MustQuery("select lower(column_type) from information_schema.columns where table_schema='mysql' and table_name='tidb_mlog_purge_info' and column_name='REFRESH_FENCE_TSO'").
 		Check(testkit.Rows("bigint(20) unsigned"))
 	tk.MustQuery("select lower(column_type) from information_schema.columns where table_schema='mysql' and table_name='tidb_mview_refresh_hist' and column_name='REFRESH_JOB_ID'").
 		Check(testkit.Rows("bigint(20) unsigned"))
@@ -595,4 +599,43 @@ func TestUpgradeToVer226MaterializedViewRefreshCommitTSO(t *testing.T) {
 		Check(testkit.Rows("bigint(20) unsigned"))
 	tk.MustQuery("select lower(column_name) from information_schema.statistics where table_schema='mysql' and table_name='tidb_mview_refresh_hist' and index_name='idx_mv_name_commit_tso' order by seq_in_index").
 		Check(testkit.Rows("mv_schema", "mv_name", "refresh_commit_tso"))
+}
+
+func TestUpgradeToVer227MaterializedViewLogRefreshFenceTSO(t *testing.T) {
+	ctx := context.Background()
+	store, dom := session.CreateStoreAndBootstrap(t)
+	defer func() { require.NoError(t, store.Close()) }()
+
+	seV226 := session.CreateSessionAndSetID(t, store)
+
+	txn, err := store.Begin()
+	require.NoError(t, err)
+	m := meta.NewMutator(txn)
+	require.NoError(t, m.FinishBootstrap(int64(226)))
+	require.NoError(t, txn.Commit(ctx))
+
+	revertVersionAndVariables(t, seV226, 226)
+	session.MustExec(t, seV226, "drop table if exists mysql.tidb_mlog_purge_info")
+	session.MustExec(t, seV226, `create table mysql.tidb_mlog_purge_info (
+		MLOG_ID bigint NOT NULL,
+		NEXT_TIME datetime DEFAULT NULL,
+		LAST_PURGED_TSO bigint unsigned DEFAULT NULL,
+		PRIMARY KEY(MLOG_ID))`)
+	session.MustExec(t, seV226, "commit")
+
+	session.UnsetStoreBootstrapped(store.UUID())
+	ver, err := session.GetBootstrapVersion(seV226)
+	require.NoError(t, err)
+	require.Equal(t, int64(226), ver)
+
+	dom.Close()
+	domUpgraded, err := session.BootstrapSession(store)
+	require.NoError(t, err)
+	defer domUpgraded.Close()
+
+	tk := testkit.NewTestKit(t, store)
+	tk.MustQuery("select lower(column_name) from information_schema.columns where table_schema='mysql' and table_name='tidb_mlog_purge_info' order by ordinal_position").
+		Check(testkit.Rows("mlog_id", "next_time", "last_purged_tso", "refresh_fence_tso"))
+	tk.MustQuery("select lower(column_type) from information_schema.columns where table_schema='mysql' and table_name='tidb_mlog_purge_info' and column_name='REFRESH_FENCE_TSO'").
+		Check(testkit.Rows("bigint(20) unsigned"))
 }

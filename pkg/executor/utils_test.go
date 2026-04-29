@@ -232,3 +232,22 @@ func TestUpdateMaterializedViewLogPurgeInfoOnSuccessMonotonicCheckpoint(t *testi
 	require.Contains(t, exec.calls[1].sql, "NEXT_TIME = %?")
 	require.Equal(t, []any{"2026-03-08 00:00:00", int64(123)}, exec.calls[1].args)
 }
+
+func TestUpdateMaterializedViewLogRefreshFenceTSOMonotonic(t *testing.T) {
+	exec := &mockSQLExecutor{}
+
+	require.NoError(
+		t,
+		updateMaterializedViewLogRefreshFenceTSO(
+			context.Background(),
+			exec,
+			int64(456),
+			uint64(300),
+		),
+	)
+
+	require.Len(t, exec.calls, 1)
+	require.Contains(t, exec.calls[0].sql, "REFRESH_FENCE_TSO = %?")
+	require.Contains(t, exec.calls[0].sql, "REFRESH_FENCE_TSO IS NULL OR REFRESH_FENCE_TSO < %?")
+	require.Equal(t, []any{uint64(300), int64(456), uint64(300)}, exec.calls[0].args)
+}
