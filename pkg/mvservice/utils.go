@@ -17,7 +17,14 @@ package mvservice
 import (
 	"container/heap"
 	"sync/atomic"
+	"time"
+
+	"github.com/tikv/client-go/v2/oracle"
 )
+
+func timeFromTSO(tso uint64) time.Time {
+	return oracle.GetTimeFromTS(tso)
+}
 
 // Notifier provides a multi-producer, single-consumer wake-up primitive.
 type Notifier struct {

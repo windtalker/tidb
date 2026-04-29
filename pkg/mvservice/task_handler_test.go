@@ -380,6 +380,7 @@ type mockMVServiceHelper struct {
 	purgePanic                        bool
 	currentTSO                        uint64
 	currentTSOErr                     error
+	currentTSOCalls                   atomic.Int32
 	historyGCErr                      error
 	historyGCPanic                    bool
 	fetchLogs                         map[int64]*mvLog
@@ -496,6 +497,7 @@ func (m *mockMVServiceHelper) loadAllTiDBMVRefresh(context.Context, basic.Sessio
 }
 
 func (m *mockMVServiceHelper) GetCurrentTSO(context.Context, basic.SessionPool) (uint64, error) {
+	m.currentTSOCalls.Add(1)
 	if m.currentTSOErr != nil {
 		return 0, m.currentTSOErr
 	}
@@ -976,6 +978,83 @@ func TestMVServiceMaybeGCMVHistoryReportsMetrics(t *testing.T) {
 		require.Eventually(t, func() bool {
 			return !svc.historyGCRunning.Load()
 		}, testEventuallyWait, testEventuallyTick)
+	})
+}
+
+func TestMVServiceMaybeCheckClockSkewAgainstTSO(t *testing.T) {
+	installMockTimeForTest(t)
+
+	t.Run("clock_skew_detected", func(t *testing.T) {
+		now := mvsNow()
+		helper := &mockMVServiceHelper{
+			currentTSO: oracle.ComposeTS(now.Add(2*time.Minute).UnixMilli(), 0),
+		}
+		cfg := DefaultMVServiceConfig()
+		svc := NewMVService(context.Background(), mockSessionPool{}, helper, cfg)
+
+		svc.maybeCheckClockSkewAgainstTSO()
+		require.Equal(t, int32(1), helper.currentTSOCalls.Load())
+		require.Equal(t, 1, helper.runEventCount(mvRunEventClockSkewDetected))
+	})
+
+	t.Run("get_tso_error_records_event", func(t *testing.T) {
+		helper := &mockMVServiceHelper{currentTSOErr: errors.New("get tso failed")}
+		cfg := DefaultMVServiceConfig()
+		svc := NewMVService(context.Background(), mockSessionPool{}, helper, cfg)
+
+		svc.maybeCheckClockSkewAgainstTSO()
+		require.Equal(t, int32(1), helper.currentTSOCalls.Load())
+		require.Equal(t, 1, helper.runEventCount(mvRunEventClockSkewGetTSOErr))
+		require.Equal(t, 0, helper.runEventCount(mvRunEventClockSkewDetected))
+	})
+
+	t.Run("small_clock_skew_ignored", func(t *testing.T) {
+		now := mvsNow()
+		helper := &mockMVServiceHelper{
+			currentTSO: oracle.ComposeTS(now.UnixMilli(), 0),
+		}
+		cfg := DefaultMVServiceConfig()
+		svc := NewMVService(context.Background(), mockSessionPool{}, helper, cfg)
+
+		svc.maybeCheckClockSkewAgainstTSO()
+		require.Equal(t, int32(1), helper.currentTSOCalls.Load())
+		require.Equal(t, 0, helper.runEventCount(mvRunEventClockSkewGetTSOErr))
+		require.Equal(t, 0, helper.runEventCount(mvRunEventClockSkewDetected))
+	})
+}
+
+func TestMVServiceShouldRunClockSkewCheckOnTick(t *testing.T) {
+	installMockTimeForTest(t)
+
+	t.Run("default_interval", func(t *testing.T) {
+		cfg := DefaultMVServiceConfig()
+		cfg.BasicInterval = time.Second
+		svc := NewMVService(context.Background(), mockSessionPool{}, &mockMVServiceHelper{}, cfg)
+
+		for i := 1; i <= 120; i++ {
+			got := svc.shouldRunClockSkewCheckOnTick()
+			require.Equal(t, i%60 == 0, got)
+		}
+	})
+
+	t.Run("basic_interval_larger_than_check_interval", func(t *testing.T) {
+		cfg := DefaultMVServiceConfig()
+		cfg.BasicInterval = 2 * mvClockSkewCheckInterval
+		svc := NewMVService(context.Background(), mockSessionPool{}, &mockMVServiceHelper{}, cfg)
+
+		require.True(t, svc.shouldRunClockSkewCheckOnTick())
+		require.True(t, svc.shouldRunClockSkewCheckOnTick())
+	})
+
+	t.Run("preserve_remainder", func(t *testing.T) {
+		cfg := DefaultMVServiceConfig()
+		cfg.BasicInterval = 40 * time.Second
+		svc := NewMVService(context.Background(), mockSessionPool{}, &mockMVServiceHelper{}, cfg)
+
+		require.False(t, svc.shouldRunClockSkewCheckOnTick()) // 40s
+		require.True(t, svc.shouldRunClockSkewCheckOnTick())  // 80s >= 60s, keep 20s remainder
+		require.True(t, svc.shouldRunClockSkewCheckOnTick())  // 20s + 40s = 60s
+		require.False(t, svc.shouldRunClockSkewCheckOnTick()) // remainder reset, next is 40s
 	})
 }
 
@@ -1950,7 +2029,7 @@ func TestServerHelperPurgeMVHistoryBeforeTSOReconcilesStaleRunningHistRows(t *te
 	installMockTimeForTest(t)
 
 	currentTSO := oracle.ComposeTS(int64(36*time.Hour/time.Millisecond), 0)
-	expectedCutoffTime := oracle.GetTimeFromTS(oracle.ComposeTS(int64(12*time.Hour/time.Millisecond), 0))
+	expectedCutoffTime := timeFromTSO(oracle.ComposeTS(int64(12*time.Hour/time.Millisecond), 0))
 
 	se := newRecordingSessionContext()
 	se.restrictedAffectedRows[testSQLMarkStaleMVRefreshHistOrphaned] = []uint64{2}

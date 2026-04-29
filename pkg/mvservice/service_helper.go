@@ -1023,7 +1023,7 @@ LIMIT %d`,
 	}
 	calcHeartbeatCutoffTime := func(timeout time.Duration) time.Time {
 		cutoffPhysical := max(oracle.ExtractPhysical(currentTSO)-int64(timeout/time.Millisecond), 0)
-		return oracle.GetTimeFromTS(oracle.ComposeTS(cutoffPhysical, 0))
+		return timeFromTSO(oracle.ComposeTS(cutoffPhysical, 0))
 	}
 
 	se, err := sysSessionPool.Get()

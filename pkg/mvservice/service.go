@@ -54,6 +54,7 @@ type MVService struct {
 	sch                 *ServerConsistentHash
 
 	nextRefreshAlertScanMillis atomic.Int64
+	clockSkewCheckElapsed      time.Duration
 
 	executor *TaskExecutor
 	notifier Notifier
@@ -108,6 +109,8 @@ const (
 	defaultMVTaskRetryMax        = 120 * time.Second
 	manualCancelBackoffDelay     = 2 * time.Minute
 	mvRefreshAlertScanInterval   = 30 * time.Second
+	mvClockSkewCheckInterval     = time.Minute
+	mvClockSkewMaxDiff           = 10 * time.Second
 	maxNextScheduleTs            = 9e18
 
 	defaultCHReplicas = 100
@@ -130,6 +133,8 @@ const (
 	mvRunEventFetchByDDL         = "fetch_meta_by_ddl"
 	mvRunEventFetchByInterval    = "fetch_meta_by_interval"
 	mvRunEventHistoryGCGetTSOErr = "get_tso_error"
+	mvRunEventClockSkewGetTSOErr = "clock_skew_get_tso_error"
+	mvRunEventClockSkewDetected  = "clock_skew_detected"
 
 	mvHistoryGCOwnerKey = "gc-mv-op-hist"
 	// A single hash-ring owner performs stale refresh-alert cleanup to avoid
@@ -938,6 +943,53 @@ func (t *MVService) maybeGCOperationHistory(now time.Time) {
 	go t.runGCOperationHistory(now, historyGCInterval)
 }
 
+func (t *MVService) maybeCheckClockSkewAgainstTSO() {
+	now := mvsNow()
+
+	currentTSO, err := t.mh.GetCurrentTSO(t.ctx, t.sysSessionPool)
+	if err != nil {
+		t.mh.observeRunEvent(mvRunEventClockSkewGetTSOErr)
+		fields := append(t.runtimeLogFields(), zap.Error(err))
+		logutil.BgLogger().Warn("get current tso failed when checking mv service clock skew", fields...)
+		return
+	}
+	pdNow := timeFromTSO(currentTSO)
+	skew := now.Sub(pdNow)
+	if skew < 0 {
+		skew = -skew
+	}
+	if skew < mvClockSkewMaxDiff {
+		return
+	}
+	t.mh.observeRunEvent(mvRunEventClockSkewDetected)
+	fields := append(
+		t.runtimeLogFields(),
+		zap.Time("local_time", now),
+		zap.Time("pd_tso_time", pdNow),
+		zap.Duration("clock_skew", skew),
+		zap.Duration("max_allowed_clock_skew", mvClockSkewMaxDiff),
+		zap.Uint64("current_tso", currentTSO),
+	)
+	logutil.BgLogger().Error("mv service detected large local clock skew against pd tso", fields...)
+}
+
+func (t *MVService) shouldRunClockSkewCheckOnTick() bool {
+	interval := mvClockSkewCheckInterval
+	if interval <= 0 {
+		interval = time.Minute
+	}
+	basic := t.basicInterval
+	if basic <= 0 {
+		basic = defaultMVBasicInterval
+	}
+	t.clockSkewCheckElapsed += basic
+	if t.clockSkewCheckElapsed < interval {
+		return false
+	}
+	t.clockSkewCheckElapsed -= interval
+	return true
+}
+
 func (t *MVService) runGCOperationHistory(now time.Time, historyGCInterval time.Duration) {
 	defer t.historyGCRunning.Store(false)
 	mviewRefreshRetention, mlogPurgeRetention := t.historyGCRetentionConfig()
@@ -1093,6 +1145,9 @@ func (t *MVService) Run() {
 		if maintenanceTick {
 			t.mh.reportMetrics(t)
 			t.maybeGCOperationHistory(now)
+			if t.shouldRunClockSkewCheckOnTick() {
+				t.maybeCheckClockSkewAgainstTSO()
+			}
 			t.maybeLogRefreshAlertTasks(now)
 			resetTimer(maintenanceTimer, t.basicInterval)
 		}
