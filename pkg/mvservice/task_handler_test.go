@@ -850,7 +850,7 @@ func TestMVServiceMaybeGCMVHistorySkipsWhenNotOwner(t *testing.T) {
 
 	svc.maybeGCOperationHistory(mvsNow())
 	require.Equal(t, int32(0), helper.historyGCCalls.Load())
-	require.Equal(t, 0, helper.runEventCount(mvRunEventHistoryGCGetTSOErr))
+	require.Equal(t, 0, helper.runEventCount(mvRunEventGetTSOErr))
 	require.Equal(t, 0, helper.taskDurationCount(mvTaskDurationTypeHistoryGC, mvDurationResultSuccess))
 	require.Equal(t, 0, helper.taskDurationCount(mvTaskDurationTypeHistoryGC, mvDurationResultFailed))
 	require.Equal(t, int64(0), svc.historyGCRetryCount.Load())
@@ -885,7 +885,7 @@ func TestMVServiceMaybeGCMVHistoryReportsMetrics(t *testing.T) {
 		svc.maybeGCOperationHistory(mvsNow())
 		require.Equal(t, int32(0), helper.historyGCCalls.Load())
 		require.Eventually(t, func() bool {
-			return helper.runEventCount(mvRunEventHistoryGCGetTSOErr) > 0
+			return helper.runEventCount(mvRunEventGetTSOErr) > 0
 		}, testEventuallyWait, testEventuallyTick)
 		require.Eventually(t, func() bool {
 			return helper.taskDurationCount(mvTaskDurationTypeHistoryGC, mvDurationResultFailed) > 0
@@ -923,7 +923,7 @@ func TestMVServiceMaybeGCMVHistoryReportsMetrics(t *testing.T) {
 		svc.maybeGCOperationHistory(startAt)
 		require.Equal(t, int32(0), helper.historyGCCalls.Load())
 		require.Eventually(t, func() bool {
-			return helper.runEventCount(mvRunEventHistoryGCGetTSOErr) > 0
+			return helper.runEventCount(mvRunEventGetTSOErr) > 0
 		}, testEventuallyWait, testEventuallyTick)
 
 		helper.currentTSOErr = nil
@@ -1021,7 +1021,7 @@ func TestMVServiceMaybeCheckClockSkewAgainstTSO(t *testing.T) {
 			svc.maybeCheckClockSkewAgainstTSO()
 
 			require.Equal(t, int32(1), helper.currentTSOCalls.Load())
-			require.Equal(t, tc.wantGetTSOErrEvt, helper.runEventCount(mvRunEventClockSkewGetTSOErr))
+			require.Equal(t, tc.wantGetTSOErrEvt, helper.runEventCount(mvRunEventGetTSOErr))
 			require.Equal(t, tc.wantDetectedEvt, helper.runEventCount(mvRunEventClockSkewDetected))
 		})
 	}

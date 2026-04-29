@@ -132,8 +132,7 @@ const (
 	mvRunEventServerRefreshError = "server_refresh_error"
 	mvRunEventFetchByDDL         = "fetch_meta_by_ddl"
 	mvRunEventFetchByInterval    = "fetch_meta_by_interval"
-	mvRunEventHistoryGCGetTSOErr = "get_tso_error"
-	mvRunEventClockSkewGetTSOErr = "clock_skew_get_tso_error"
+	mvRunEventGetTSOErr          = "get_tso_error"
 	mvRunEventClockSkewDetected  = "clock_skew_detected"
 
 	mvHistoryGCOwnerKey = "gc-mv-op-hist"
@@ -943,12 +942,15 @@ func (t *MVService) maybeGCOperationHistory(now time.Time) {
 	go t.runGCOperationHistory(now, historyGCInterval)
 }
 
+// maybeCheckClockSkewAgainstTSO compares local wall-clock time with PD TSO
+// physical time. It reports only large skews to avoid noisy logs from small
+// scheduling jitters.
 func (t *MVService) maybeCheckClockSkewAgainstTSO() {
 	now := mvsNow()
 
 	currentTSO, err := t.mh.GetCurrentTSO(t.ctx, t.sysSessionPool)
 	if err != nil {
-		t.mh.observeRunEvent(mvRunEventClockSkewGetTSOErr)
+		t.mh.observeRunEvent(mvRunEventGetTSOErr)
 		fields := append(t.runtimeLogFields(), zap.Error(err))
 		logutil.BgLogger().Warn("get current tso failed when checking mv service clock skew", fields...)
 		return
@@ -973,6 +975,9 @@ func (t *MVService) maybeCheckClockSkewAgainstTSO() {
 	logutil.BgLogger().Error("mv service detected large local clock skew against pd tso", fields...)
 }
 
+// shouldRunClockSkewCheckOnTick controls skew-check cadence using maintenance
+// ticks instead of wall-clock scheduling. This keeps check frequency stable
+// even when local wall clock jumps.
 func (t *MVService) shouldRunClockSkewCheckOnTick() bool {
 	interval := mvClockSkewCheckInterval
 	if interval <= 0 {
@@ -1012,7 +1017,7 @@ func (t *MVService) runGCOperationHistory(now time.Time, historyGCInterval time.
 	if err != nil {
 		result = mvDurationResultFailed
 		t.scheduleHistoryGCFailure(now, historyGCInterval)
-		t.mh.observeRunEvent(mvRunEventHistoryGCGetTSOErr)
+		t.mh.observeRunEvent(mvRunEventGetTSOErr)
 		fields := append(t.runtimeLogFields(), zap.Error(err))
 		logutil.BgLogger().Warn("get current tso failed when GC MV/MVLOG operation history", fields...)
 		return
@@ -1145,6 +1150,8 @@ func (t *MVService) Run() {
 		if maintenanceTick {
 			t.mh.reportMetrics(t)
 			t.maybeGCOperationHistory(now)
+			// Keep PD TSO probing low-frequency, because it is not required on
+			// every maintenance tick and may add avoidable pressure under load.
 			if t.shouldRunClockSkewCheckOnTick() {
 				t.maybeCheckClockSkewAgainstTSO()
 			}
