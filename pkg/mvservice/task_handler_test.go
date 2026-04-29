@@ -983,79 +983,100 @@ func TestMVServiceMaybeGCMVHistoryReportsMetrics(t *testing.T) {
 
 func TestMVServiceMaybeCheckClockSkewAgainstTSO(t *testing.T) {
 	installMockTimeForTest(t)
+	now := mvsNow()
+	testCases := []struct {
+		name             string
+		currentTSO       uint64
+		currentTSOErr    error
+		wantGetTSOErrEvt int
+		wantDetectedEvt  int
+	}{
+		{
+			name:             "clock_skew_detected",
+			currentTSO:       oracle.ComposeTS(now.Add(2*time.Minute).UnixMilli(), 0),
+			wantGetTSOErrEvt: 0,
+			wantDetectedEvt:  1,
+		},
+		{
+			name:             "get_tso_error_records_event",
+			currentTSOErr:    errors.New("get tso failed"),
+			wantGetTSOErrEvt: 1,
+			wantDetectedEvt:  0,
+		},
+		{
+			name:             "small_clock_skew_ignored",
+			currentTSO:       oracle.ComposeTS(now.UnixMilli(), 0),
+			wantGetTSOErrEvt: 0,
+			wantDetectedEvt:  0,
+		},
+	}
 
-	t.Run("clock_skew_detected", func(t *testing.T) {
-		now := mvsNow()
-		helper := &mockMVServiceHelper{
-			currentTSO: oracle.ComposeTS(now.Add(2*time.Minute).UnixMilli(), 0),
-		}
-		cfg := DefaultMVServiceConfig()
-		svc := NewMVService(context.Background(), mockSessionPool{}, helper, cfg)
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			helper := &mockMVServiceHelper{
+				currentTSO:    tc.currentTSO,
+				currentTSOErr: tc.currentTSOErr,
+			}
+			svc := NewMVService(context.Background(), mockSessionPool{}, helper, DefaultMVServiceConfig())
+			svc.maybeCheckClockSkewAgainstTSO()
 
-		svc.maybeCheckClockSkewAgainstTSO()
-		require.Equal(t, int32(1), helper.currentTSOCalls.Load())
-		require.Equal(t, 1, helper.runEventCount(mvRunEventClockSkewDetected))
-	})
-
-	t.Run("get_tso_error_records_event", func(t *testing.T) {
-		helper := &mockMVServiceHelper{currentTSOErr: errors.New("get tso failed")}
-		cfg := DefaultMVServiceConfig()
-		svc := NewMVService(context.Background(), mockSessionPool{}, helper, cfg)
-
-		svc.maybeCheckClockSkewAgainstTSO()
-		require.Equal(t, int32(1), helper.currentTSOCalls.Load())
-		require.Equal(t, 1, helper.runEventCount(mvRunEventClockSkewGetTSOErr))
-		require.Equal(t, 0, helper.runEventCount(mvRunEventClockSkewDetected))
-	})
-
-	t.Run("small_clock_skew_ignored", func(t *testing.T) {
-		now := mvsNow()
-		helper := &mockMVServiceHelper{
-			currentTSO: oracle.ComposeTS(now.UnixMilli(), 0),
-		}
-		cfg := DefaultMVServiceConfig()
-		svc := NewMVService(context.Background(), mockSessionPool{}, helper, cfg)
-
-		svc.maybeCheckClockSkewAgainstTSO()
-		require.Equal(t, int32(1), helper.currentTSOCalls.Load())
-		require.Equal(t, 0, helper.runEventCount(mvRunEventClockSkewGetTSOErr))
-		require.Equal(t, 0, helper.runEventCount(mvRunEventClockSkewDetected))
-	})
+			require.Equal(t, int32(1), helper.currentTSOCalls.Load())
+			require.Equal(t, tc.wantGetTSOErrEvt, helper.runEventCount(mvRunEventClockSkewGetTSOErr))
+			require.Equal(t, tc.wantDetectedEvt, helper.runEventCount(mvRunEventClockSkewDetected))
+		})
+	}
 }
 
 func TestMVServiceShouldRunClockSkewCheckOnTick(t *testing.T) {
 	installMockTimeForTest(t)
+	testCases := []struct {
+		name          string
+		basicInterval time.Duration
+		steps         int
+		expectAt      map[int]bool // 1-based step -> expected result
+	}{
+		{
+			name:          "default_interval",
+			basicInterval: time.Second,
+			steps:         120,
+			expectAt: map[int]bool{
+				60:  true,
+				120: true,
+			},
+		},
+		{
+			name:          "basic_interval_larger_than_check_interval",
+			basicInterval: 2 * mvClockSkewCheckInterval,
+			steps:         2,
+			expectAt: map[int]bool{
+				1: true,
+				2: true,
+			},
+		},
+		{
+			name:          "preserve_remainder",
+			basicInterval: 40 * time.Second,
+			steps:         4,
+			expectAt: map[int]bool{
+				1: false, // 40s
+				2: true,  // 80s >= 60s, keep 20s remainder
+				3: true,  // 20s + 40s = 60s
+				4: false, // remainder reset, next is 40s
+			},
+		},
+	}
 
-	t.Run("default_interval", func(t *testing.T) {
-		cfg := DefaultMVServiceConfig()
-		cfg.BasicInterval = time.Second
-		svc := NewMVService(context.Background(), mockSessionPool{}, &mockMVServiceHelper{}, cfg)
-
-		for i := 1; i <= 120; i++ {
-			got := svc.shouldRunClockSkewCheckOnTick()
-			require.Equal(t, i%60 == 0, got)
-		}
-	})
-
-	t.Run("basic_interval_larger_than_check_interval", func(t *testing.T) {
-		cfg := DefaultMVServiceConfig()
-		cfg.BasicInterval = 2 * mvClockSkewCheckInterval
-		svc := NewMVService(context.Background(), mockSessionPool{}, &mockMVServiceHelper{}, cfg)
-
-		require.True(t, svc.shouldRunClockSkewCheckOnTick())
-		require.True(t, svc.shouldRunClockSkewCheckOnTick())
-	})
-
-	t.Run("preserve_remainder", func(t *testing.T) {
-		cfg := DefaultMVServiceConfig()
-		cfg.BasicInterval = 40 * time.Second
-		svc := NewMVService(context.Background(), mockSessionPool{}, &mockMVServiceHelper{}, cfg)
-
-		require.False(t, svc.shouldRunClockSkewCheckOnTick()) // 40s
-		require.True(t, svc.shouldRunClockSkewCheckOnTick())  // 80s >= 60s, keep 20s remainder
-		require.True(t, svc.shouldRunClockSkewCheckOnTick())  // 20s + 40s = 60s
-		require.False(t, svc.shouldRunClockSkewCheckOnTick()) // remainder reset, next is 40s
-	})
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := DefaultMVServiceConfig()
+			cfg.BasicInterval = tc.basicInterval
+			svc := NewMVService(context.Background(), mockSessionPool{}, &mockMVServiceHelper{}, cfg)
+			for step := 1; step <= tc.steps; step++ {
+				want := tc.expectAt[step]
+				require.Equal(t, want, svc.shouldRunClockSkewCheckOnTick(), "step=%d", step)
+			}
+		})
+	}
 }
 
 func TestMVServiceMarkFetchFailureRetryCadence(t *testing.T) {
