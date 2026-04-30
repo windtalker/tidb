@@ -460,7 +460,7 @@ func buildLocal(
 		return nil, err
 	}
 
-	groupKeyOffsets, err := extractGroupKeyOffsetsFromMVSelect(mvSel)
+	groupKeyOffsets, err := extractGroupKeyOffsetsFromMVSelect(sctx, mvSel)
 	if err != nil {
 		return nil, err
 	}
@@ -857,33 +857,125 @@ func restoreExprStrict(expr ast.ExprNode) (string, error) {
 	return sb.String(), nil
 }
 
-// extractGroupKeyOffsetsFromMVSelect maps GROUP BY columns back to their offsets in SELECT output.
-// Those offsets define join keys between stage-1 deltas and MV snapshot rows.
-func extractGroupKeyOffsetsFromMVSelect(sel *ast.SelectStmt) ([]int, error) {
+// extractGroupKeyOffsetsFromMVSelect maps GROUP BY expressions back to their offsets in SELECT
+// output. Those offsets define join keys between stage-1 deltas and MV snapshot rows.
+func extractGroupKeyOffsetsFromMVSelect(sctx planctx.PlanContext, sel *ast.SelectStmt) ([]int, error) {
 	if sel.GroupBy == nil || len(sel.GroupBy.Items) == 0 {
 		return nil, errors.New("materialized view definition must have GROUP BY")
 	}
-	offsetByColName := make(map[string]int, 8)
+	offsetByExprKey := make(map[string]int, len(sel.Fields.Fields))
 	for i, f := range sel.Fields.Fields {
-		col, ok := f.Expr.(*ast.ColumnNameExpr)
-		if !ok {
+		if f == nil || f.Expr == nil {
 			continue
 		}
-		offsetByColName[col.Name.Name.L] = i
+		if _, ok := f.Expr.(*ast.AggregateFuncExpr); ok {
+			continue
+		}
+		exprKey, err := normalizeGroupKeyMatchExpr(sctx, f.Expr)
+		if err != nil {
+			return nil, err
+		}
+		prev, exists := offsetByExprKey[exprKey]
+		if exists && prev >= 0 {
+			offsetByExprKey[exprKey] = -1
+			continue
+		}
+		if !exists {
+			offsetByExprKey[exprKey] = i
+		}
 	}
 	groupOffsets := make([]int, 0, len(sel.GroupBy.Items))
 	for _, item := range sel.GroupBy.Items {
-		col, ok := item.Expr.(*ast.ColumnNameExpr)
-		if !ok {
-			return nil, errors.New("GROUP BY expression must be a column name for mvmerge")
+		if item == nil || item.Expr == nil {
+			return nil, errors.New("GROUP BY expression is nil for mvmerge")
 		}
-		off, ok := offsetByColName[col.Name.Name.L]
+		exprKey, err := normalizeGroupKeyMatchExpr(sctx, item.Expr)
+		if err != nil {
+			return nil, err
+		}
+		off, ok := offsetByExprKey[exprKey]
 		if !ok {
-			return nil, errors.Errorf("GROUP BY column %s must appear in SELECT list", col.Name.Name.O)
+			return nil, errors.Errorf(
+				"GROUP BY expression %s must appear in SELECT list for mvmerge",
+				restoreExpr(item.Expr),
+			)
+		}
+		if off < 0 {
+			return nil, errors.Errorf(
+				"GROUP BY expression %s must appear exactly once in SELECT list for mvmerge",
+				restoreExpr(item.Expr),
+			)
 		}
 		groupOffsets = append(groupOffsets, off)
 	}
 	return groupOffsets, nil
+}
+
+func normalizeGroupKeyMatchExpr(sctx planctx.PlanContext, expr ast.ExprNode) (string, error) {
+	strippedExpr, err := strippedGroupKeyExprClone(sctx, expr)
+	if err != nil {
+		return "", err
+	}
+	return restoreExprWithoutQualifier(strippedExpr)
+}
+
+func groupKeyExprCloneAtOffset(
+	sctx planctx.PlanContext,
+	mvSel *ast.SelectStmt,
+	mvOffset int,
+) (ast.ExprNode, error) {
+	if mvSel == nil || mvSel.Fields == nil {
+		return nil, errors.New("mv select fields are nil")
+	}
+	if mvOffset < 0 || mvOffset >= len(mvSel.Fields.Fields) {
+		return nil, errors.Errorf("invalid mv offset %d", mvOffset)
+	}
+	f := mvSel.Fields.Fields[mvOffset]
+	if f == nil || f.Expr == nil {
+		return nil, errors.Errorf("mv field at offset %d is nil", mvOffset)
+	}
+	if _, ok := f.Expr.(*ast.AggregateFuncExpr); ok {
+		return nil, errors.Errorf("mv field at offset %d is not a group key expression", mvOffset)
+	}
+	return cloneExprByRestore(sctx, f.Expr)
+}
+
+func strippedGroupKeyExprAtOffset(
+	sctx planctx.PlanContext,
+	mvSel *ast.SelectStmt,
+	mvOffset int,
+) (ast.ExprNode, error) {
+	groupExpr, err := groupKeyExprCloneAtOffset(sctx, mvSel, mvOffset)
+	if err != nil {
+		return nil, err
+	}
+	return stripColumnQualifier(groupExpr), nil
+}
+
+func strippedGroupKeyExprClone(sctx planctx.PlanContext, expr ast.ExprNode) (ast.ExprNode, error) {
+	groupExpr, err := cloneExprByRestore(sctx, expr)
+	if err != nil {
+		return nil, err
+	}
+	return stripColumnQualifier(groupExpr), nil
+}
+
+func restoreExprWithoutQualifier(expr ast.ExprNode) (string, error) {
+	if expr == nil {
+		return "", errors.New("expression is nil")
+	}
+	var sb strings.Builder
+	ctx := format.NewRestoreCtx(
+		format.DefaultRestoreFlags|
+			format.RestoreStringWithoutCharset|
+			format.RestoreWithoutSchemaName|
+			format.RestoreWithoutTableName,
+		&sb,
+	)
+	if err := expr.Restore(ctx); err != nil {
+		return "", err
+	}
+	return sb.String(), nil
 }
 
 // extractAggInfosFromMVSelect parses supported aggregate expressions in MV SELECT list and
@@ -1327,22 +1419,24 @@ func buildMLogDeltaSelect(
 		return where, nil
 	}
 
-	groupKeyBaseColByMVOffset := make(map[int]string, len(groupKeyOffsets))
 	groupBy := &ast.GroupByClause{Items: make([]*ast.ByItem, 0, len(groupKeyOffsets))}
 	for _, mvOffset := range groupKeyOffsets {
-		baseColExpr, err := groupKeyBaseColExprAtOffset(mvSel, mvOffset)
+		groupExpr, err := strippedGroupKeyExprAtOffset(sctx, mvSel, mvOffset)
 		if err != nil {
 			return nil, err
 		}
-		groupKeyBaseColByMVOffset[mvOffset] = baseColExpr.Name.Name.O
-		groupBy.Items = append(groupBy.Items, &ast.ByItem{Expr: baseColExpr, NullOrder: true})
+		groupBy.Items = append(groupBy.Items, &ast.ByItem{Expr: groupExpr, NullOrder: true})
 	}
 
 	phase1Fields := make([]*ast.SelectField, 0, len(groupKeyOffsets)+1+len(aggCols)+1)
 	for _, mvOffset := range groupKeyOffsets {
 		mvColName := mvCols[mvOffset].Name
+		groupExpr, err := strippedGroupKeyExprAtOffset(sctx, mvSel, mvOffset)
+		if err != nil {
+			return nil, err
+		}
 		phase1Fields = append(phase1Fields, &ast.SelectField{
-			Expr:   colExpr(groupKeyBaseColByMVOffset[mvOffset]),
+			Expr:   groupExpr,
 			AsName: mvColName,
 		})
 	}
@@ -1602,7 +1696,7 @@ func buildFullUpdateLookupTemplateSelect(
 	groupKeyOffsets []int,
 	aggCols []aggColInfo,
 ) (*ast.SelectStmt, []int, error) {
-	outerSel, outerGKAliasByMVOffset, err := buildFullUpdateLookupOuterSelect(
+	outerSel, err := buildFullUpdateLookupOuterSelect(
 		sctx,
 		dbName,
 		baseTable,
@@ -1611,14 +1705,6 @@ func buildFullUpdateLookupTemplateSelect(
 	)
 	if err != nil {
 		return nil, nil, err
-	}
-	groupKeyBaseColByMVOffset := make(map[int]string, len(groupKeyOffsets))
-	for _, mvOffset := range groupKeyOffsets {
-		baseColExpr, err := groupKeyBaseColExprAtOffset(mvSel, mvOffset)
-		if err != nil {
-			return nil, nil, err
-		}
-		groupKeyBaseColByMVOffset[mvOffset] = baseColExpr.Name.Name.O
 	}
 	aggKindByMVOffset := make(map[int]AggKind, len(aggCols))
 	for _, ac := range aggCols {
@@ -1632,7 +1718,6 @@ func buildFullUpdateLookupTemplateSelect(
 		mvCols,
 		groupKeySet,
 		groupKeyOffsets,
-		groupKeyBaseColByMVOffset,
 		aggCols,
 	)
 	if err != nil {
@@ -1644,8 +1729,8 @@ func buildFullUpdateLookupTemplateSelect(
 
 	var onExpr ast.ExprNode
 	for _, mvOffset := range groupKeyOffsets {
-		outerGK := qualColExpr(fullUpdateOuterAlias, outerGKAliasByMVOffset[mvOffset])
-		innerGK := qualColExpr(fullUpdateInnerAlias, groupKeyBaseColByMVOffset[mvOffset])
+		outerGK := qualColExpr(fullUpdateOuterAlias, groupKeyAliasForMVOffset(mvOffset))
+		innerGK := qualColExpr(fullUpdateInnerAlias, groupKeyAliasForMVOffset(mvOffset))
 		// Group keys can be NULL, so full-update lookup must use null-safe equality.
 		onExpr = andExpr(onExpr, binary(opcode.NullEQ, outerGK, innerGK))
 	}
@@ -1661,8 +1746,8 @@ func buildFullUpdateLookupTemplateSelect(
 			continue
 		}
 		outColName := mvCol.Name.O
-		if baseColName, ok := groupKeyBaseColByMVOffset[mvOffset]; ok {
-			outColName = baseColName
+		if _, ok := groupKeySet[mvOffset]; ok {
+			outColName = groupKeyAliasForMVOffset(mvOffset)
 		}
 		fields = append(fields, &ast.SelectField{
 			Expr:   qualColExpr(fullUpdateInnerAlias, outColName),
@@ -1701,26 +1786,23 @@ func buildFullUpdateLookupOuterSelect(
 	baseTable *model.TableInfo,
 	mvSel *ast.SelectStmt,
 	groupKeyOffsets []int,
-) (*ast.SelectStmt, map[int]string, error) {
+) (*ast.SelectStmt, error) {
 	if baseTable == nil {
-		return nil, nil, errors.New("mvmerge: base table is nil")
+		return nil, errors.New("mvmerge: base table is nil")
 	}
 	if len(groupKeyOffsets) == 0 {
-		return nil, nil, errors.New("mvmerge: empty group key offsets for full-update lookup template")
+		return nil, errors.New("mvmerge: empty group key offsets for full-update lookup template")
 	}
 
 	fields := make([]*ast.SelectField, 0, len(groupKeyOffsets))
-	groupKeyAliasByMVOffset := make(map[int]string, len(groupKeyOffsets))
 	for _, mvOffset := range groupKeyOffsets {
-		baseColExpr, err := groupKeyBaseColExprAtOffset(mvSel, mvOffset)
+		groupExpr, err := strippedGroupKeyExprAtOffset(sctx, mvSel, mvOffset)
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
-		alias := fmt.Sprintf("__mvmerge_full_outer_gk_%d", mvOffset)
-		groupKeyAliasByMVOffset[mvOffset] = alias
 		fields = append(fields, &ast.SelectField{
-			Expr:   baseColExpr,
-			AsName: pmodel.NewCIStr(alias),
+			Expr:   groupExpr,
+			AsName: pmodel.NewCIStr(groupKeyAliasForMVOffset(mvOffset)),
 		})
 	}
 
@@ -1728,7 +1810,7 @@ func buildFullUpdateLookupOuterSelect(
 	if mvSel.Where != nil {
 		mvWhere, err := cloneExprByRestore(sctx, mvSel.Where)
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 		mvWhere.Accept(&columnQualifierStripper{})
 		where = stripAllParentheses(mvWhere)
@@ -1742,7 +1824,7 @@ func buildFullUpdateLookupOuterSelect(
 		Where: where,
 		// Outer side only provides one probe key tuple; runtime will refill real keys per changed group.
 		Limit: &ast.Limit{Count: ast.NewValueExpr(int64(1), "", "")},
-	}, groupKeyAliasByMVOffset, nil
+	}, nil
 }
 
 func buildFullUpdateLookupInnerSelect(
@@ -1753,7 +1835,6 @@ func buildFullUpdateLookupInnerSelect(
 	mvCols []*model.ColumnInfo,
 	groupKeySet map[int]struct{},
 	groupKeyOffsets []int,
-	groupKeyBaseColByMVOffset map[int]string,
 	aggCols []aggColInfo,
 ) (*ast.SelectStmt, error) {
 	if baseTable == nil {
@@ -1771,13 +1852,13 @@ func buildFullUpdateLookupInnerSelect(
 	fields := make([]*ast.SelectField, 0, len(mvCols))
 	for i, mvCol := range mvCols {
 		if _, ok := groupKeySet[i]; ok {
-			baseColExpr, err := groupKeyBaseColExprAtOffset(mvSel, i)
+			groupExpr, err := strippedGroupKeyExprAtOffset(sctx, mvSel, i)
 			if err != nil {
 				return nil, err
 			}
 			fields = append(fields, &ast.SelectField{
-				Expr:   baseColExpr,
-				AsName: pmodel.NewCIStr(groupKeyBaseColByMVOffset[i]),
+				Expr:   groupExpr,
+				AsName: pmodel.NewCIStr(groupKeyAliasForMVOffset(i)),
 			})
 			continue
 		}
@@ -1808,12 +1889,12 @@ func buildFullUpdateLookupInnerSelect(
 
 	groupBy := &ast.GroupByClause{Items: make([]*ast.ByItem, 0, len(groupKeyOffsets))}
 	for _, mvOffset := range groupKeyOffsets {
-		baseColExpr, err := groupKeyBaseColExprAtOffset(mvSel, mvOffset)
+		groupExpr, err := strippedGroupKeyExprAtOffset(sctx, mvSel, mvOffset)
 		if err != nil {
 			return nil, err
 		}
 		groupBy.Items = append(groupBy.Items, &ast.ByItem{
-			Expr:      baseColExpr,
+			Expr:      groupExpr,
 			NullOrder: true,
 		})
 	}
@@ -1867,19 +1948,8 @@ func buildFullUpdateAggExpr(sctx planctx.PlanContext, ac aggColInfo) (ast.ExprNo
 	}
 }
 
-// groupKeyBaseColExprAtOffset returns the underlying base-table column expression for one MV
-// output offset. buildMLogDeltaSelect uses it to keep stage-1 GROUP BY aligned with MV layout.
-func groupKeyBaseColExprAtOffset(mvSel *ast.SelectStmt, mvOffset int) (*ast.ColumnNameExpr, error) {
-	if mvOffset < 0 || mvOffset >= len(mvSel.Fields.Fields) {
-		return nil, errors.Errorf("invalid mv offset %d", mvOffset)
-	}
-	f := mvSel.Fields.Fields[mvOffset]
-	col, ok := f.Expr.(*ast.ColumnNameExpr)
-	if !ok {
-		return nil, errors.Errorf("mv field at offset %d is not a group key column", mvOffset)
-	}
-	// Return a stripped (unqualified) column name expression.
-	return colExpr(col.Name.Name.O), nil
+func groupKeyAliasForMVOffset(mvOffset int) string {
+	return fmt.Sprintf("__mvmerge_gk_%d", mvOffset)
 }
 
 func dbNameByTableID(is infoschema.InfoSchema, tableID int64) (pmodel.CIStr, error) {
@@ -2067,7 +2137,7 @@ func BuildCompleteDiffSource(
 		f.AsName = mv.Columns[i].Name
 	}
 
-	groupKeyOffsets, err := extractGroupKeyOffsetsFromMVSelect(mvSel)
+	groupKeyOffsets, err := extractGroupKeyOffsetsFromMVSelect(sctx, mvSel)
 	if err != nil {
 		return nil, err
 	}

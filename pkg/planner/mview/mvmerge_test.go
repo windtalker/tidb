@@ -274,6 +274,89 @@ func TestBuildCountExprSumExpr(t *testing.T) {
 	})
 }
 
+func TestBuildGroupByExpression(t *testing.T) {
+	sctx := core.MockContext()
+
+	baseID := int64(41)
+	mlogID := int64(42)
+	mvID := int64(43)
+
+	base := &model.TableInfo{
+		ID:    baseID,
+		Name:  pmodel.NewCIStr("t"),
+		State: model.StatePublic,
+		Columns: []*model.ColumnInfo{
+			mkCol(1, "a", 0, mysql.TypeLong),
+			mkCol(2, "ts", 1, mysql.TypeDatetime),
+			mkCol(3, "v", 2, mysql.TypeLong),
+		},
+		MaterializedViewBase: &model.MaterializedViewBaseInfo{MLogID: mlogID},
+	}
+	base.Columns[2].FieldType.AddFlag(mysql.NotNullFlag)
+	mlog := &model.TableInfo{
+		ID:    mlogID,
+		Name:  pmodel.NewCIStr("$mlog$t"),
+		State: model.StatePublic,
+		Columns: []*model.ColumnInfo{
+			mkCol(1, "a", 0, mysql.TypeLong),
+			mkCol(2, "ts", 1, mysql.TypeDatetime),
+			mkCol(3, "v", 2, mysql.TypeLong),
+			mkCol(4, model.MaterializedViewLogDMLTypeColumnName, 3, mysql.TypeVarchar),
+			mkCol(5, model.MaterializedViewLogOldNewColumnName, 4, mysql.TypeTiny),
+		},
+		MaterializedViewLog: &model.MaterializedViewLogInfo{
+			BaseTableID: baseID,
+			Columns: []pmodel.CIStr{
+				pmodel.NewCIStr("a"),
+				pmodel.NewCIStr("ts"),
+				pmodel.NewCIStr("v"),
+			},
+		},
+	}
+	mv := &model.TableInfo{
+		ID:    mvID,
+		Name:  pmodel.NewCIStr("mv_group_expr_tbl"),
+		State: model.StatePublic,
+		Columns: []*model.ColumnInfo{
+			mkCol(1, "d", 0, mysql.TypeDate),
+			mkCol(2, "x", 1, mysql.TypeLong),
+			mkCol(3, "cnt", 2, mysql.TypeLonglong),
+			mkCol(4, "s", 3, mysql.TypeLonglong),
+		},
+		MaterializedView: &model.MaterializedViewInfo{
+			BaseTableIDs: []int64{baseID},
+			SQLContent:   "select date(ts), a, count(1), sum(v) from t group by a, date(ts)",
+		},
+	}
+
+	is := infoschema.MockInfoSchema([]*model.TableInfo{base, mlog, mv})
+	domain.GetDomain(sctx).MockInfoCacheAndLoadInfoSchema(is)
+
+	res, err := mvmerge.Build(
+		sctx.GetPlanCtx(),
+		is,
+		mv,
+		mvmerge.BuildOptions{FromTS: 10},
+		nil,
+	)
+	require.NoError(t, err)
+	require.Equal(t, []int{1, 0}, res.GroupKeyMVOffsets)
+
+	deltaSrc, ok := res.MergeSourceSelect.From.TableRefs.Left.(*ast.TableSource)
+	require.True(t, ok)
+	deltaSel, ok := deltaSrc.Source.(*ast.SelectStmt)
+	require.True(t, ok)
+	require.Len(t, deltaSel.Fields.Fields, 4)
+	require.Len(t, deltaSel.GroupBy.Items, 2)
+
+	require.Equal(t, "x", deltaSel.Fields.Fields[0].AsName.O)
+	require.Equal(t, "`a`", restoreNodeForTest(t, deltaSel.Fields.Fields[0].Expr))
+	require.Equal(t, "d", deltaSel.Fields.Fields[1].AsName.O)
+	require.Equal(t, "DATE(`ts`)", restoreNodeForTest(t, deltaSel.Fields.Fields[1].Expr))
+	require.Equal(t, "`a`", restoreNodeForTest(t, deltaSel.GroupBy.Items[0].Expr))
+	require.Equal(t, "DATE(`ts`)", restoreNodeForTest(t, deltaSel.GroupBy.Items[1].Expr))
+}
+
 func TestBuildMLogDeltaSelectTiFlashHint(t *testing.T) {
 	sctx := core.MockContext()
 
@@ -1282,6 +1365,66 @@ func TestBuildCompleteDiffSourceNullableGroupKeyUsesNullEQ(t *testing.T) {
 	require.Equal(t, leftCol, rightCol)
 	require.Equal(t, "a", rightCol)
 	require.Equal(t, opcode.NullEQ, joinPredicates[0].Op)
+}
+
+func TestBuildCompleteDiffSourceGroupByExpressionOffsets(t *testing.T) {
+	sctx := core.MockContext()
+
+	baseID := int64(23)
+	mvID := int64(24)
+
+	base := &model.TableInfo{
+		ID:    baseID,
+		Name:  pmodel.NewCIStr("t"),
+		State: model.StatePublic,
+		Columns: []*model.ColumnInfo{
+			mkCol(1, "a", 0, mysql.TypeLong),
+			mkCol(2, "ts", 1, mysql.TypeDatetime),
+		},
+	}
+
+	mv := &model.TableInfo{
+		ID:    mvID,
+		Name:  pmodel.NewCIStr("mv_tbl_diff_group_expr"),
+		State: model.StatePublic,
+		Columns: []*model.ColumnInfo{
+			mkCol(1, "d", 0, mysql.TypeDate),
+			mkCol(2, "a", 1, mysql.TypeLong),
+			mkCol(3, "cnt", 2, mysql.TypeLonglong),
+		},
+		MaterializedView: &model.MaterializedViewInfo{
+			BaseTableIDs: []int64{baseID},
+			SQLContent:   "select date(ts), a, count(1) from t group by a, date(ts)",
+		},
+	}
+	mv.Columns[1].FieldType.AddFlag(mysql.NotNullFlag)
+	mv.Columns[2].FieldType.AddFlag(mysql.NotNullFlag)
+
+	is := infoschema.MockInfoSchema([]*model.TableInfo{base, mv})
+	domain.GetDomain(sctx).MockInfoCacheAndLoadInfoSchema(is)
+
+	res, err := mvmerge.BuildCompleteDiffSource(sctx.GetPlanCtx(), is, mv)
+	require.NoError(t, err)
+	require.Equal(t, []int{1, 0}, res.GroupKeyMVOffsets)
+	require.NotNil(t, res.DiffSourceSelect.From)
+	require.NotNil(t, res.DiffSourceSelect.From.TableRefs)
+	require.NotNil(t, res.DiffSourceSelect.From.TableRefs.On)
+
+	joinPredicates := collectAndPredicates(t, res.DiffSourceSelect.From.TableRefs.On.Expr)
+	require.Len(t, joinPredicates, 2)
+	opByMVCol := make(map[string]opcode.Op, len(joinPredicates))
+	for _, pred := range joinPredicates {
+		leftTable, leftCol := columnNameRef(t, pred.L)
+		rightTable, rightCol := columnNameRef(t, pred.R)
+		require.Equal(t, diffQAlias, leftTable)
+		require.Equal(t, diffMAlias, rightTable)
+		require.Equal(t, leftCol, rightCol)
+		opByMVCol[rightCol] = pred.Op
+	}
+	require.Equal(t, map[string]opcode.Op{
+		"a": opcode.EQ,
+		"d": opcode.NullEQ,
+	}, opByMVCol)
 }
 
 func TestBuildCompleteDiffSourceCommonHandleReusesOldRowImage(t *testing.T) {
