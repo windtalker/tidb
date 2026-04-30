@@ -4007,16 +4007,6 @@ func (b *PlanBuilder) buildRefreshMaterializedViewImplement(ctx context.Context,
 				}
 				fullUpdateLookupIS = fullUpdateSnapshot.InfoSchema
 			}
-			if err := validateMVFullUpdateSupportingIndex(
-				ctx,
-				fullUpdateLookupIS,
-				res.BaseTableID,
-				res.FullUpdateLookupTemplateSelect,
-				res.FullUpdateLookupMVOffsets,
-				res.GroupKeyMVOffsets,
-			); err != nil {
-				return nil, err
-			}
 			// The lookup template relies on index-join inner-child pattern (Selection/Agg on probe side),
 			// so force-enable the switch during this one-shot optimization and restore it afterward.
 			savedEnableINLJoinInnerMultiPattern := b.ctx.GetSessionVars().EnableINLJoinInnerMultiPattern
@@ -4119,75 +4109,6 @@ type mvFullUpdateLookupTemplate struct {
 	KeyOff2IdxOff     []int
 	KeyResultColIdxes []int
 	OutputMVOffsets   []int
-}
-
-func validateMVFullUpdateSupportingIndex(
-	ctx context.Context,
-	is infoschema.InfoSchema,
-	baseTableID int64,
-	lookupSel *ast.SelectStmt,
-	outputMVOffsets []int,
-	groupKeyMVOffsets []int,
-) error {
-	if lookupSel == nil {
-		return errors.New("mvmerge full-update lookup template: lookup select is nil")
-	}
-	baseTable, ok := is.TableByID(ctx, baseTableID)
-	if !ok || baseTable == nil {
-		return errors.Errorf("mvmerge full-update lookup template: base table id %d not found in infoschema", baseTableID)
-	}
-	groupKeyBaseCols, err := extractMVFullUpdateGroupKeyBaseCols(lookupSel, outputMVOffsets, groupKeyMVOffsets)
-	if err != nil {
-		return err
-	}
-	if !mvmerge.HasVisibleIndexWithPrefixCoveringColumns(baseTable.Meta(), groupKeyBaseCols) {
-		return errors.New("refresh materialized view fast with MIN/MAX requires base table index whose leading columns cover all GROUP BY columns")
-	}
-	return nil
-}
-
-func extractMVFullUpdateGroupKeyBaseCols(
-	lookupSel *ast.SelectStmt,
-	outputMVOffsets []int,
-	groupKeyMVOffsets []int,
-) ([]string, error) {
-	if lookupSel == nil || lookupSel.Fields == nil {
-		return nil, errors.New("mvmerge full-update lookup template: lookup select fields are nil")
-	}
-	if len(lookupSel.Fields.Fields) != len(outputMVOffsets) {
-		return nil, errors.Errorf(
-			"mvmerge full-update lookup template: unexpected field count: got %d, expected %d",
-			len(lookupSel.Fields.Fields),
-			len(outputMVOffsets),
-		)
-	}
-	groupKeySet := make(map[int]struct{}, len(groupKeyMVOffsets))
-	for _, mvOffset := range groupKeyMVOffsets {
-		groupKeySet[mvOffset] = struct{}{}
-	}
-	groupKeyBaseCols := make([]string, 0, len(groupKeyMVOffsets))
-	for i, mvOffset := range outputMVOffsets {
-		if _, ok := groupKeySet[mvOffset]; !ok {
-			continue
-		}
-		colExpr, ok := lookupSel.Fields.Fields[i].Expr.(*ast.ColumnNameExpr)
-		if !ok {
-			return nil, errors.Errorf(
-				"mvmerge full-update lookup template: field %d for group key mv offset %d is not a column",
-				i,
-				mvOffset,
-			)
-		}
-		groupKeyBaseCols = append(groupKeyBaseCols, colExpr.Name.Name.L)
-	}
-	if len(groupKeyBaseCols) != len(groupKeyMVOffsets) {
-		return nil, errors.Errorf(
-			"mvmerge full-update lookup template: extracted %d group key base columns, expected %d",
-			len(groupKeyBaseCols),
-			len(groupKeyMVOffsets),
-		)
-	}
-	return groupKeyBaseCols, nil
 }
 
 func extractMVFullUpdateLookupTemplate(

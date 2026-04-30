@@ -1934,13 +1934,27 @@ func buildFullUpdateAggExpr(sctx planctx.PlanContext, ac aggColInfo) (ast.ExprNo
 		}
 		return aggSum(argExpr), nil
 	case AggMax:
+		if ac.argExpr != nil {
+			argExpr, err := cloneExprByRestore(sctx, ac.argExpr)
+			if err != nil {
+				return nil, err
+			}
+			return aggMax(argExpr), nil
+		}
 		if ac.info.ArgColName == "" {
-			return nil, errors.New("MAX aggregate argument column is empty for full-update")
+			return nil, errors.New("MAX aggregate argument is empty for full-update")
 		}
 		return aggMax(colExpr(ac.info.ArgColName)), nil
 	case AggMin:
+		if ac.argExpr != nil {
+			argExpr, err := cloneExprByRestore(sctx, ac.argExpr)
+			if err != nil {
+				return nil, err
+			}
+			return aggMin(argExpr), nil
+		}
 		if ac.info.ArgColName == "" {
-			return nil, errors.New("MIN aggregate argument column is empty for full-update")
+			return nil, errors.New("MIN aggregate argument is empty for full-update")
 		}
 		return aggMin(colExpr(ac.info.ArgColName)), nil
 	default:

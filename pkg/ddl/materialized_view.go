@@ -33,7 +33,6 @@ import (
 	"github.com/pingcap/tidb/pkg/parser/format"
 	pmodel "github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
-	mvmerge "github.com/pingcap/tidb/pkg/planner/mview"
 	"github.com/pingcap/tidb/pkg/sessionctx"
 	"github.com/pingcap/tidb/pkg/sessionctx/variable"
 	storeerr "github.com/pingcap/tidb/pkg/store/driver/error"
@@ -42,6 +41,7 @@ import (
 	"github.com/pingcap/tidb/pkg/util/dbterror"
 	exeerrors "github.com/pingcap/tidb/pkg/util/dbterror/exeerrors"
 	plannererrors "github.com/pingcap/tidb/pkg/util/dbterror/plannererrors"
+	"github.com/pingcap/tidb/pkg/util/generatedexpr"
 	"github.com/pingcap/tidb/pkg/util/sqlescape"
 	"go.uber.org/zap"
 )
@@ -1337,8 +1337,7 @@ func validateCreateMaterializedViewQuery(
 	}
 
 	groupBySet := make(map[string]struct{}, len(sel.GroupBy.Items))
-	groupByCols := make([]string, 0, len(sel.GroupBy.Items))
-	groupByAllPlainColumns := true
+	groupByKeys := make([]mviewGroupKeyIndexMatch, 0, len(sel.GroupBy.Items))
 	countExprCols := make(map[string]struct{})
 	nullableSumCols := make(map[string]struct{})
 	usedCols := make(map[string]struct{}, 8)
@@ -1367,15 +1366,13 @@ func validateCreateMaterializedViewQuery(
 			return nil, dbterror.ErrGeneralUnsupportedDDL.GenWithStack("duplicate GROUP BY expression is not supported in CREATE MATERIALIZED VIEW")
 		}
 		groupBySet[normalizedExpr] = struct{}{}
-		groupByCols = append(groupByCols, normalizedExpr)
+		groupByKeys = append(groupByKeys, mviewGroupKeyIndexMatch{normalizedExpr: normalizedExpr})
 		if colExpr, ok := item.Expr.(*ast.ColumnNameExpr); ok {
 			colName, err := resolveMViewColumnName(colExpr.Name, baseTableName, fromAlias, baseColMap)
 			if err != nil {
 				return nil, err
 			}
-			groupByCols[len(groupByCols)-1] = colName
-		} else {
-			groupByAllPlainColumns = false
+			groupByKeys[len(groupByKeys)-1].plainCol = colName
 		}
 		for _, col := range collectColumnNamesInExpr(item.Expr) {
 			colName, err := resolveMViewColumnName(col, baseTableName, fromAlias, baseColMap)
@@ -1508,11 +1505,14 @@ func validateCreateMaterializedViewQuery(
 		groupByInfos = append(groupByInfos, mviewGroupByInfo{SelectIdx: idx})
 	}
 
-	if hasMinOrMax && !groupByAllPlainColumns {
-		return nil, dbterror.ErrGeneralUnsupportedDDL.GenWithStack("CREATE MATERIALIZED VIEW with MIN/MAX does not yet support GROUP BY expression")
-	}
-	if hasMinOrMax && !mvmerge.HasVisibleIndexWithPrefixCoveringColumns(baseTableInfo, groupByCols) {
-		return nil, dbterror.ErrGeneralUnsupportedDDL.GenWithStack("CREATE MATERIALIZED VIEW with MIN/MAX requires base table index whose leading columns cover all GROUP BY columns")
+	if hasMinOrMax {
+		ok, err := hasVisibleIndexWithPrefixCoveringMViewGroupKeys(sctx, baseTableInfo, groupByKeys)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			return nil, dbterror.ErrGeneralUnsupportedDDL.GenWithStack("CREATE MATERIALIZED VIEW with MIN/MAX requires base table index whose leading columns cover all GROUP BY columns")
+		}
 	}
 
 	for colName := range usedCols {
@@ -1605,6 +1605,11 @@ type columnNameCollector struct {
 	cols []*ast.ColumnName
 }
 
+type mviewGroupKeyIndexMatch struct {
+	plainCol       string
+	normalizedExpr string
+}
+
 func (c *columnNameCollector) Enter(n ast.Node) (ast.Node, bool) {
 	if x, ok := n.(*ast.ColumnNameExpr); ok {
 		c.cols = append(c.cols, x.Name)
@@ -1617,6 +1622,86 @@ func (*columnNameCollector) Leave(n ast.Node) (ast.Node, bool) { return n, true 
 func isCountStarOrOne(arg ast.ExprNode) bool {
 	v, ok := arg.(*driver.ValueExpr)
 	return ok && v.Kind() == types.KindInt64 && v.GetInt64() == 1
+}
+
+func hasVisibleIndexWithPrefixCoveringMViewGroupKeys(
+	sctx sessionctx.Context,
+	baseTableInfo *model.TableInfo,
+	groupKeys []mviewGroupKeyIndexMatch,
+) (bool, error) {
+	if sctx == nil || baseTableInfo == nil || len(groupKeys) == 0 {
+		return false, nil
+	}
+	if baseTableInfo.PKIsHandle && len(groupKeys) == 1 {
+		if pkCol := baseTableInfo.GetPkColInfo(); pkCol != nil && groupKeys[0].plainCol != "" && pkCol.Name.L == groupKeys[0].plainCol {
+			return true, nil
+		}
+	}
+
+	prefixLen := len(groupKeys)
+	for _, idx := range baseTableInfo.Indices {
+		if idx == nil || idx.Invisible || idx.State != model.StatePublic || len(idx.Columns) < prefixLen {
+			continue
+		}
+		used := make([]bool, prefixLen)
+		matched := true
+		for i := 0; i < prefixLen; i++ {
+			idxCol := idx.Columns[i]
+			if idxCol == nil || idxCol.Length > 0 || idxCol.Offset < 0 || idxCol.Offset >= len(baseTableInfo.Columns) {
+				matched = false
+				break
+			}
+			colInfo := baseTableInfo.Columns[idxCol.Offset]
+			found := false
+			for j, groupKey := range groupKeys {
+				if used[j] {
+					continue
+				}
+				ok, err := matchMViewGroupKeyWithIndexColumn(sctx, groupKey, colInfo)
+				if err != nil {
+					return false, err
+				}
+				if ok {
+					used[j] = true
+					found = true
+					break
+				}
+			}
+			if !found {
+				matched = false
+				break
+			}
+		}
+		if matched {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func matchMViewGroupKeyWithIndexColumn(
+	sctx sessionctx.Context,
+	groupKey mviewGroupKeyIndexMatch,
+	colInfo *model.ColumnInfo,
+) (bool, error) {
+	if colInfo == nil {
+		return false, nil
+	}
+	if !colInfo.Hidden {
+		return groupKey.plainCol != "" && colInfo.Name.L == groupKey.plainCol, nil
+	}
+	if groupKey.plainCol != "" || colInfo.GeneratedExprString == "" {
+		return false, nil
+	}
+	expr, err := generatedexpr.ParseExpression(colInfo.GeneratedExprString)
+	if err != nil {
+		return false, err
+	}
+	normalizedExpr, err := normalizeMViewExprForMatch(sctx, expr)
+	if err != nil {
+		return false, err
+	}
+	return normalizedExpr == groupKey.normalizedExpr, nil
 }
 
 func hasMaterializedViewDependsOnBaseTable(baseTableInfo *model.TableInfo) bool {

@@ -20,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pingcap/tidb/pkg/config"
 	"github.com/pingcap/tidb/pkg/domain"
 	"github.com/pingcap/tidb/pkg/infoschema"
 	"github.com/pingcap/tidb/pkg/meta/model"
@@ -330,6 +331,71 @@ func TestBuildRefreshMVFastPlanWithMinMaxHasFullUpdate(t *testing.T) {
 	require.NoError(t, explain.RenderResult())
 	require.NotEmpty(t, explain.Rows)
 	require.Contains(t, explain.Rows[0][4], "full_update:index_lookup")
+}
+
+func TestBuildRefreshMVFastPlanWithMinMaxGroupByExpressionHasFullUpdate(t *testing.T) {
+	restoreConfig := config.RestoreFunc()
+	defer restoreConfig()
+	config.UpdateGlobal(func(conf *config.Config) {
+		conf.Experimental.AllowsExpressionIndex = true
+	})
+
+	store, dom := testkit.CreateMockStoreAndDomain(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("create table t_mv_refresh_expr_minmax (a int not null, ts datetime not null, v int not null)")
+	tk.MustExec("create index idx_a_date on t_mv_refresh_expr_minmax (a, (date(ts)))")
+	tk.MustExec("create materialized view log on t_mv_refresh_expr_minmax (a, ts, v) purge next date_add(now(), interval 1 hour)")
+	tk.MustExec("create materialized view mv_refresh_expr_minmax (a, d, cnt, mx, mn) refresh fast as select a, date(ts), count(1), max(v), min(v) from t_mv_refresh_expr_minmax group by a, date(ts)")
+
+	// Ensure we have a non-zero StartTS; mock.Store.Begin returns nil, so create a fake txn first.
+	sctx := plannercore.MockContext()
+	sctx.GetSessionVars().CurrentDB = "test"
+	savedStore := sctx.Store
+	sctx.Store = nil
+	_, err := sctx.Txn(true)
+	require.NoError(t, err)
+	sctx.Store = savedStore
+
+	implementStmt := &ast.RefreshMaterializedViewImplementStmt{
+		RefreshStmt: &ast.RefreshMaterializedViewStmt{
+			ViewName: &ast.TableName{
+				Schema: pmodel.NewCIStr("test"),
+				Name:   pmodel.NewCIStr("mv_refresh_expr_minmax"),
+			},
+			Type: ast.RefreshMaterializedViewTypeFast,
+		},
+		LastSuccessfulRefreshReadTSO: 0,
+	}
+
+	builder, _ := plannercore.NewPlanBuilder().Init(sctx.GetPlanCtx(), dom.InfoSchema(), hint.NewQBHintHandler(nil))
+	p, err := builder.Build(context.Background(), resolve.NewNodeW(implementStmt))
+	require.NoError(t, err)
+
+	mergePlan, ok := p.(*plannercore.MVDeltaMerge)
+	require.True(t, ok)
+	require.Equal(t, []int{0, 1}, mergePlan.GroupKeyMVOffsets)
+	require.NotNil(t, mergePlan.Source)
+	require.NotNil(t, mergePlan.FullUpdateInnerSource)
+	require.NotNil(t, mergePlan.FullUpdateIndexRanges)
+	require.Len(t, mergePlan.FullUpdateKeyOff2IdxOff, len(mergePlan.GroupKeyMVOffsets))
+	require.Len(t, mergePlan.FullUpdateKeyResultColIdxes, len(mergePlan.GroupKeyMVOffsets))
+	require.Len(t, mergePlan.FullUpdateOutputMVOffsets, 4)
+	for i, keyResultColIdx := range mergePlan.FullUpdateKeyResultColIdxes {
+		require.GreaterOrEqual(t, keyResultColIdx, 0)
+		require.Less(t, keyResultColIdx, len(mergePlan.FullUpdateOutputMVOffsets))
+		require.Equal(t, mergePlan.GroupKeyMVOffsets[i], mergePlan.FullUpdateOutputMVOffsets[keyResultColIdx])
+	}
+	mvOffsetCount := make(map[int]int, len(mergePlan.FullUpdateOutputMVOffsets))
+	for _, mvOffset := range mergePlan.FullUpdateOutputMVOffsets {
+		mvOffsetCount[mvOffset]++
+	}
+	require.Equal(t, map[int]int{
+		0: 1,
+		1: 1,
+		3: 1,
+		4: 1,
+	}, mvOffsetCount)
 }
 
 func TestBuildRefreshMVFastAsOfTimestampPlanWithMinMaxCarriesFullUpdateSnapshot(t *testing.T) {

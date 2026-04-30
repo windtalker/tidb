@@ -20,6 +20,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/pingcap/tidb/pkg/config"
 	"github.com/pingcap/tidb/pkg/domain"
 	"github.com/pingcap/tidb/pkg/infoschema"
 	"github.com/pingcap/tidb/pkg/meta/model"
@@ -35,6 +36,7 @@ import (
 	"github.com/pingcap/tidb/pkg/planner/mview"
 	_ "github.com/pingcap/tidb/pkg/session"
 	"github.com/pingcap/tidb/pkg/sessionctx"
+	"github.com/pingcap/tidb/pkg/testkit"
 	"github.com/pingcap/tidb/pkg/types"
 	"github.com/pingcap/tidb/pkg/util/hint"
 	"github.com/stretchr/testify/require"
@@ -760,6 +762,63 @@ func TestBuildMinMaxHasRemovedGate(t *testing.T) {
 		{Pos: 12, DB: mvDBName, Tbl: mvTableAlias, Col: "mn", OrigTbl: mv.Name.O, OrigCol: "mn"},
 		{Pos: 13, DB: mvDBName, Tbl: mvTableAlias, Col: "__mvmerge_mv_rowid", OrigCol: "_tidb_rowid"},
 	})
+}
+
+func TestBuildMinMaxGroupByExpressionHasFullUpdateTemplate(t *testing.T) {
+	restoreConfig := config.RestoreFunc()
+	defer restoreConfig()
+	config.UpdateGlobal(func(conf *config.Config) {
+		conf.Experimental.AllowsExpressionIndex = true
+	})
+
+	store, dom := testkit.CreateMockStoreAndDomain(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("create table t_minmax_group_expr (a int not null, ts datetime not null, v int not null)")
+	tk.MustExec("create index idx_a_date on t_minmax_group_expr (a, (date(ts)))")
+	tk.MustExec("create materialized view log on t_minmax_group_expr (a, ts, v) purge next date_add(now(), interval 1 hour)")
+	tk.MustExec("create materialized view mv_minmax_group_expr (a, d, cnt, mx, mn) as select a, date(ts), count(1), max(v), min(v) from t_minmax_group_expr group by a, date(ts)")
+
+	is := dom.InfoSchema()
+	mvTable, err := is.TableByName(context.Background(), pmodel.NewCIStr("test"), pmodel.NewCIStr("mv_minmax_group_expr"))
+	require.NoError(t, err)
+
+	res, err := mvmerge.Build(
+		tk.Session().GetPlanCtx(),
+		is,
+		mvTable.Meta(),
+		mvmerge.BuildOptions{FromTS: 1},
+		nil,
+	)
+	require.NoError(t, err)
+	require.Equal(t, []int{0, 1}, res.GroupKeyMVOffsets)
+	require.Equal(t, 4, res.FullUpdateLookupColumnCount)
+	require.Equal(t, []int{0, 1, 3, 4}, res.FullUpdateLookupMVOffsets)
+	require.NotNil(t, res.FullUpdateLookupTemplateSelect)
+
+	outerSrc, ok := res.FullUpdateLookupTemplateSelect.From.TableRefs.Left.(*ast.TableSource)
+	require.True(t, ok)
+	outerSel, ok := outerSrc.Source.(*ast.SelectStmt)
+	require.True(t, ok)
+	require.Len(t, outerSel.Fields.Fields, 2)
+	require.Equal(t, "`a`", restoreNodeForTest(t, outerSel.Fields.Fields[0].Expr))
+	require.Equal(t, "DATE(`ts`)", restoreNodeForTest(t, outerSel.Fields.Fields[1].Expr))
+
+	innerSrc, ok := res.FullUpdateLookupTemplateSelect.From.TableRefs.Right.(*ast.TableSource)
+	require.True(t, ok)
+	innerSel, ok := innerSrc.Source.(*ast.SelectStmt)
+	require.True(t, ok)
+	require.Len(t, innerSel.GroupBy.Items, 2)
+	require.Equal(t, "`a`", restoreNodeForTest(t, innerSel.GroupBy.Items[0].Expr))
+	require.Equal(t, "DATE(`ts`)", restoreNodeForTest(t, innerSel.GroupBy.Items[1].Expr))
+
+	fullPlan, fullOutputNames, err := optimizeForTest(tk.Session(), is)(context.Background(), res.FullUpdateLookupTemplateSelect)
+	require.NoError(t, err)
+	indexJoin := findIndexJoinPlan(fullPlan)
+	require.NotNilf(t, indexJoin, "lookup template best plan: %s", core.ToString(fullPlan))
+	require.Equal(t, res.FullUpdateLookupColumnCount, fullPlan.Schema().Len())
+	require.Equal(t, res.FullUpdateLookupColumnCount, len(fullOutputNames))
+	requireOutputColNames(t, fullOutputNames, []string{"a", "d", "mx", "mn"})
 }
 
 func TestBuildMinMaxNullableDependencyOrder(t *testing.T) {
