@@ -236,6 +236,32 @@ func TestMaterializedViewDDLBasic(t *testing.T) {
 	err = tk.ExecToErr("create materialized view mv_bad_mlog_cols_count (a, cnt_b, cnt) as select a, count(b), count(1) from t_mlog_missing group by a")
 	require.ErrorContains(t, err, "does not contain column b")
 
+	// GROUP BY expressions are allowed when they appear in the SELECT list exactly once.
+	tk.MustExec("create table t_group_expr (a int not null, b datetime not null)")
+	tk.MustExec("insert into t_group_expr values ('1', '2024-01-01 01:00:00'), ('1', '2024-01-01 12:00:00'), ('2', '2024-01-02 00:00:00')")
+	tk.MustExec("create materialized view log on t_group_expr (a, b) purge next date_add(now(), interval 1 hour)")
+	tk.MustExec("create materialized view mv_group_expr (a, d, cnt) as select a, date(b), count(1) from t_group_expr group by a, date(b)")
+	tk.MustQuery("select a, d, cnt from mv_group_expr order by a, d").Check(testkit.Rows("1 2024-01-01 2", "2 2024-01-02 1"))
+	err = tk.ExecToErr("create materialized view mv_bad_group_expr_missing (a, cnt) as select a, count(1) from t_group_expr group by a, date(b)")
+	require.ErrorContains(t, err, "GROUP BY expression")
+	err = tk.ExecToErr("create materialized view mv_bad_group_expr_dup (a, d1, d2, cnt) as select a, date(b), date(b), count(1) from t_group_expr group by a, date(b)")
+	require.ErrorContains(t, err, "duplicate GROUP BY expression in SELECT list")
+	err = tk.ExecToErr("create materialized view mv_bad_group_expr_ordinal (a, d, cnt) as select a, date(b), count(1) from t_group_expr group by 1, date(b)")
+	require.ErrorContains(t, err, "GROUP BY ordinal position is not supported")
+
+	// MV LOG dependency checks include base columns referenced inside GROUP BY expressions.
+	tk.MustExec("create table t_group_expr_mlog (a int not null, b datetime not null)")
+	tk.MustExec("create materialized view log on t_group_expr_mlog (a) purge next date_add(now(), interval 1 hour)")
+	err = tk.ExecToErr("create materialized view mv_bad_group_expr_mlog (a, d, cnt) as select a, date(b), count(1) from t_group_expr_mlog group by a, date(b)")
+	require.ErrorContains(t, err, "does not contain column b")
+
+	// GROUP BY key nullability follows the query output metadata, not only base-column flags.
+	tk.MustExec("create table t_group_expr_notnull (a int not null, b int)")
+	tk.MustExec("create materialized view log on t_group_expr_notnull (a, b) purge next date_add(now(), interval 1 hour)")
+	tk.MustExec("create materialized view mv_group_expr_notnull (a, b1, cnt) as select a, ifnull(b, 0), count(1) from t_group_expr_notnull group by a, ifnull(b, 0)")
+	showCreate = tk.MustQuery("show create table mv_group_expr_notnull").Rows()[0][1].(string)
+	require.Contains(t, showCreate, "PRIMARY KEY (`a`,`b1`)")
+
 	// Nullable group-by key should use UNIQUE KEY.
 	tk.MustExec("create table t_nullable (a int, b int)")
 	tk.MustExec("create materialized view log on t_nullable (a, b) purge next date_add(now(), interval 1 hour)")
@@ -302,6 +328,8 @@ func TestMaterializedViewDDLBasic(t *testing.T) {
 	tk.MustExec("drop materialized view mv_alert_zero")
 	tk.MustExec("drop materialized view mv_upper_agg")
 	tk.MustExec("drop materialized view mv_alias")
+	tk.MustExec("drop materialized view mv_group_expr")
+	tk.MustExec("drop materialized view mv_group_expr_notnull")
 	tk.MustExec("drop materialized view mv_nullable")
 	tk.MustExec("drop materialized view mv_sum_nullable")
 	tk.MustExec("drop materialized view mv_sum_nullable_dup_cnt")
@@ -309,6 +337,9 @@ func TestMaterializedViewDDLBasic(t *testing.T) {
 	tk.MustExec("drop materialized view mv_minmax_nullable")
 	tk.MustExec("drop materialized view mv_presplit")
 	tk.MustExec("drop materialized view log on t")
+	tk.MustExec("drop materialized view log on t_group_expr")
+	tk.MustExec("drop materialized view log on t_group_expr_mlog")
+	tk.MustExec("drop materialized view log on t_group_expr_notnull")
 	tk.MustExec("drop materialized view log on t_nullable")
 	tk.MustExec("drop materialized view log on t_sum_nullable")
 	tk.MustExec("drop materialized view log on t_sum_time")

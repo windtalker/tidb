@@ -285,6 +285,10 @@ func (e *executor) CreateMaterializedView(ctx sessionctx.Context, s *ast.CreateM
 			Tp:   &ft,
 		})
 	}
+	for i := range groupByInfos {
+		rf := resultFields[groupByInfos[i].SelectIdx]
+		groupByInfos[i].NotNull = rf.Column != nil && mysql.HasNotNullFlag(rf.Column.GetFlag())
+	}
 
 	// Build group-key index for one-row-per-group semantics (PK when all keys are NOT NULL, else UNIQUE).
 	keys := make([]*ast.IndexPartSpecification, 0, len(groupByInfos))
@@ -1334,28 +1338,52 @@ func validateCreateMaterializedViewQuery(
 
 	groupBySet := make(map[string]struct{}, len(sel.GroupBy.Items))
 	groupByCols := make([]string, 0, len(sel.GroupBy.Items))
-	groupByNotNull := make(map[string]bool, len(sel.GroupBy.Items))
+	groupByAllPlainColumns := true
 	countExprCols := make(map[string]struct{})
 	nullableSumCols := make(map[string]struct{})
 	usedCols := make(map[string]struct{}, 8)
 
 	for _, item := range sel.GroupBy.Items {
-		colExpr, ok := item.Expr.(*ast.ColumnNameExpr)
-		if !ok {
+		if _, ok := item.Expr.(*ast.PositionExpr); ok {
+			return nil, dbterror.ErrGeneralUnsupportedDDL.GenWithStack("GROUP BY ordinal position is not supported in CREATE MATERIALIZED VIEW")
+		}
+		if valueExpr, ok := item.Expr.(*driver.ValueExpr); ok {
+			if valueExpr.Kind() == types.KindInt64 || valueExpr.Kind() == types.KindUint64 {
+				return nil, dbterror.ErrGeneralUnsupportedDDL.GenWithStack("GROUP BY ordinal position is not supported in CREATE MATERIALIZED VIEW")
+			}
+		}
+		groupExpr, err := buildMViewSingleTableExpr(sctx, baseTableName, fromAlias, baseTableInfo, item.Expr)
+		if err != nil {
 			return nil, dbterror.ErrGeneralUnsupportedDDL.GenWithStack("GROUP BY expression is not supported in CREATE MATERIALIZED VIEW")
 		}
-		colName, err := resolveMViewColumnName(colExpr.Name, baseTableName, fromAlias, baseColMap)
+		if expression.CheckNonDeterministic(groupExpr) {
+			return nil, dbterror.ErrGeneralUnsupportedDDL.GenWithStack("CREATE MATERIALIZED VIEW GROUP BY expression must be deterministic")
+		}
+		normalizedExpr, err := normalizeMViewExprForMatch(sctx, item.Expr)
 		if err != nil {
-			return nil, err
+			return nil, dbterror.ErrGeneralUnsupportedDDL.GenWithStack("GROUP BY expression is not supported in CREATE MATERIALIZED VIEW")
 		}
-		if _, exists := groupBySet[colName]; exists {
-			return nil, dbterror.ErrGeneralUnsupportedDDL.GenWithStack("duplicate GROUP BY column is not supported in CREATE MATERIALIZED VIEW")
+		if _, exists := groupBySet[normalizedExpr]; exists {
+			return nil, dbterror.ErrGeneralUnsupportedDDL.GenWithStack("duplicate GROUP BY expression is not supported in CREATE MATERIALIZED VIEW")
 		}
-		baseCol := baseColMap[colName]
-		groupBySet[colName] = struct{}{}
-		groupByCols = append(groupByCols, colName)
-		groupByNotNull[colName] = mysql.HasNotNullFlag(baseCol.GetFlag())
-		usedCols[colName] = struct{}{}
+		groupBySet[normalizedExpr] = struct{}{}
+		groupByCols = append(groupByCols, normalizedExpr)
+		if colExpr, ok := item.Expr.(*ast.ColumnNameExpr); ok {
+			colName, err := resolveMViewColumnName(colExpr.Name, baseTableName, fromAlias, baseColMap)
+			if err != nil {
+				return nil, err
+			}
+			groupByCols[len(groupByCols)-1] = colName
+		} else {
+			groupByAllPlainColumns = false
+		}
+		for _, col := range collectColumnNamesInExpr(item.Expr) {
+			colName, err := resolveMViewColumnName(col, baseTableName, fromAlias, baseColMap)
+			if err != nil {
+				return nil, err
+			}
+			usedCols[colName] = struct{}{}
+		}
 	}
 
 	if sel.Where != nil {
@@ -1383,19 +1411,6 @@ func validateCreateMaterializedViewQuery(
 			return nil, dbterror.ErrGeneralUnsupportedDDL.GenWithStack("CREATE MATERIALIZED VIEW does not support wildcard select field")
 		}
 		switch expr := f.Expr.(type) {
-		case *ast.ColumnNameExpr:
-			colName, err := resolveMViewColumnName(expr.Name, baseTableName, fromAlias, baseColMap)
-			if err != nil {
-				return nil, err
-			}
-			if _, ok := groupBySet[colName]; !ok {
-				return nil, dbterror.ErrGeneralUnsupportedDDL.GenWithStack("non-aggregated column must appear in GROUP BY clause")
-			}
-			if _, exists := selectColIdx[colName]; exists {
-				return nil, dbterror.ErrGeneralUnsupportedDDL.GenWithStack("duplicate GROUP BY column in SELECT list is not supported in CREATE MATERIALIZED VIEW")
-			}
-			selectColIdx[colName] = i
-			usedCols[colName] = struct{}{}
 		case *ast.AggregateFuncExpr:
 			if expr.Distinct {
 				return nil, dbterror.ErrGeneralUnsupportedDDL.GenWithStack("CREATE MATERIALIZED VIEW does not support DISTINCT aggregate function")
@@ -1456,7 +1471,17 @@ func validateCreateMaterializedViewQuery(
 				return nil, dbterror.ErrGeneralUnsupportedDDL.GenWithStack("unsupported aggregate function in CREATE MATERIALIZED VIEW" + " agg " + expr.F)
 			}
 		default:
-			return nil, dbterror.ErrGeneralUnsupportedDDL.GenWithStack("unsupported SELECT expression in CREATE MATERIALIZED VIEW")
+			normalizedExpr, err := normalizeMViewExprForMatch(sctx, expr)
+			if err != nil {
+				return nil, dbterror.ErrGeneralUnsupportedDDL.GenWithStack("unsupported SELECT expression in CREATE MATERIALIZED VIEW")
+			}
+			if _, ok := groupBySet[normalizedExpr]; !ok {
+				return nil, dbterror.ErrGeneralUnsupportedDDL.GenWithStack("non-aggregated column must appear in GROUP BY clause")
+			}
+			if _, exists := selectColIdx[normalizedExpr]; exists {
+				return nil, dbterror.ErrGeneralUnsupportedDDL.GenWithStack("duplicate GROUP BY expression in SELECT list is not supported in CREATE MATERIALIZED VIEW")
+			}
+			selectColIdx[normalizedExpr] = i
 		}
 	}
 	if !hasCountStarOrOne {
@@ -1472,18 +1497,20 @@ func validateCreateMaterializedViewQuery(
 
 	groupByInfos = make([]mviewGroupByInfo, 0, len(sel.GroupBy.Items))
 	for _, item := range sel.GroupBy.Items {
-		colExpr := item.Expr.(*ast.ColumnNameExpr)
-		colName, err := resolveMViewColumnName(colExpr.Name, baseTableName, fromAlias, baseColMap)
+		normalizedExpr, err := normalizeMViewExprForMatch(sctx, item.Expr)
 		if err != nil {
-			return nil, err
+			return nil, dbterror.ErrGeneralUnsupportedDDL.GenWithStack("GROUP BY expression is not supported in CREATE MATERIALIZED VIEW")
 		}
-		idx, ok := selectColIdx[colName]
+		idx, ok := selectColIdx[normalizedExpr]
 		if !ok {
-			return nil, errors.Errorf("GROUP BY column %s must appear in SELECT list", colExpr.Name.Name.O)
+			return nil, errors.Errorf("GROUP BY expression %s must appear in SELECT list", normalizedExpr)
 		}
-		groupByInfos = append(groupByInfos, mviewGroupByInfo{SelectIdx: idx, NotNull: groupByNotNull[colName]})
+		groupByInfos = append(groupByInfos, mviewGroupByInfo{SelectIdx: idx})
 	}
 
+	if hasMinOrMax && !groupByAllPlainColumns {
+		return nil, dbterror.ErrGeneralUnsupportedDDL.GenWithStack("CREATE MATERIALIZED VIEW with MIN/MAX does not yet support GROUP BY expression")
+	}
 	if hasMinOrMax && !mvmerge.HasVisibleIndexWithPrefixCoveringColumns(baseTableInfo, groupByCols) {
 		return nil, dbterror.ErrGeneralUnsupportedDDL.GenWithStack("CREATE MATERIALIZED VIEW with MIN/MAX requires base table index whose leading columns cover all GROUP BY columns")
 	}
@@ -1556,6 +1583,22 @@ func collectColumnNamesInExpr(expr ast.ExprNode) []*ast.ColumnName {
 	collector := &columnNameCollector{cols: make([]*ast.ColumnName, 0, 8)}
 	expr.Accept(collector)
 	return collector.cols
+}
+
+func normalizeMViewExprForMatch(sctx sessionctx.Context, expr ast.ExprNode) (string, error) {
+	if sctx == nil || expr == nil {
+		return "", errors.New("expression is nil")
+	}
+	var sb strings.Builder
+	flags := format.DefaultRestoreFlags |
+		format.RestoreStringWithoutCharset |
+		format.RestoreWithoutSchemaName |
+		format.RestoreWithoutTableName
+	rctx := format.NewRestoreCtx(flags, &sb)
+	if err := expr.Restore(rctx); err != nil {
+		return "", err
+	}
+	return sb.String(), nil
 }
 
 type columnNameCollector struct {

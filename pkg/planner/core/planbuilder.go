@@ -5729,6 +5729,19 @@ func checkForUserVariables(in ast.Node) error {
 	return nil
 }
 
+func hasGroupByOrdinalPosition(node ast.ResultSetNode) bool {
+	sel, ok := node.(*ast.SelectStmt)
+	if !ok || sel.GroupBy == nil {
+		return false
+	}
+	for _, item := range sel.GroupBy.Items {
+		if _, ok := item.Expr.(*ast.PositionExpr); ok {
+			return true
+		}
+	}
+	return false
+}
+
 func (b *PlanBuilder) buildRefreshMaterializedView(_ context.Context, stmt *ast.RefreshMaterializedViewStmt) (base.Plan, error) {
 	dbName := stmt.ViewName.Schema.L
 	if dbName == "" {
@@ -6128,6 +6141,9 @@ func (b *PlanBuilder) buildDDL(ctx context.Context, node ast.DDLNode) (base.Plan
 		err := checkForUserVariables(v.Select)
 		if err != nil {
 			return nil, err
+		}
+		if hasGroupByOrdinalPosition(v.Select) {
+			return nil, dbterror.ErrGeneralUnsupportedDDL.GenWithStack("GROUP BY ordinal position is not supported in CREATE MATERIALIZED VIEW")
 		}
 		nodeW := resolve.NewNodeWWithCtx(v.Select, b.resolveCtx)
 		plan, err := b.Build(ctx, nodeW)
