@@ -1405,7 +1405,21 @@ func TestBuildCompleteDiffSourceGroupByExpressionOffsets(t *testing.T) {
 
 	res, err := mvmerge.BuildCompleteDiffSource(sctx.GetPlanCtx(), is, mv)
 	require.NoError(t, err)
+	sctx.GetSessionVars().EnableFullOuterJoin = true
+	plan, _, err := optimizeForTest(sctx, is)(context.Background(), res.DiffSourceSelect)
+	require.NoError(t, err)
+	hashJoin := findHashJoinPlan(plan)
+	require.NotNil(t, hashJoin)
+	require.Equal(t, logicalop.FullOuterJoin, hashJoin.JoinType)
+	require.False(t, hashJoin.RightIsBuildSide())
+
 	require.Equal(t, []int{1, 0}, res.GroupKeyMVOffsets)
+	require.Equal(t, 1, res.MarkerMVOffset)
+	require.Equal(t, 1, res.MHandleCols.NumCols())
+	require.Equal(t, int64(model.ExtraHandleID), res.MHandleCols.GetCol(0).ID)
+	require.Equal(t, 1, res.MHandleCols.GetCol(0).Index)
+	require.Equal(t, 2+2*len(mv.Columns), res.SourceColumnCount)
+	require.NoError(t, res.ValidateSourceLayout(res.SourceColumnCount))
 	require.NotNil(t, res.DiffSourceSelect.From)
 	require.NotNil(t, res.DiffSourceSelect.From.TableRefs)
 	require.NotNil(t, res.DiffSourceSelect.From.TableRefs.On)
@@ -1425,6 +1439,9 @@ func TestBuildCompleteDiffSourceGroupByExpressionOffsets(t *testing.T) {
 		"a": opcode.EQ,
 		"d": opcode.NullEQ,
 	}, opByMVCol)
+	require.Equal(t, map[string]opcode.Op{
+		"cnt": opcode.EQ,
+	}, collectPayloadComparisonOps(t, res.DiffSourceSelect.Where))
 }
 
 func TestBuildCompleteDiffSourceCommonHandleReusesOldRowImage(t *testing.T) {

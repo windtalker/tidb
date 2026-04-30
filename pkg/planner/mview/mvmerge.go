@@ -2102,6 +2102,30 @@ func ifExpr(cond, trueExpr, falseExpr ast.ExprNode) *ast.FuncCallExpr {
 	}
 }
 
+func bindMVSelectOutputNamesToMVColumns(mvSel *ast.SelectStmt, mv *model.TableInfo) error {
+	if mv == nil {
+		return errors.New("mv table info is nil")
+	}
+	if mvSel == nil || mvSel.Fields == nil {
+		return errors.Errorf("materialized view %s select fields are nil", mv.Name.O)
+	}
+	if len(mvSel.Fields.Fields) != len(mv.Columns) {
+		return errors.Errorf(
+			"materialized view %s select output count %d does not match mv column count %d",
+			mv.Name.O,
+			len(mvSel.Fields.Fields),
+			len(mv.Columns),
+		)
+	}
+	for i, f := range mvSel.Fields.Fields {
+		if f == nil {
+			return errors.Errorf("materialized view %s select field %d is nil", mv.Name.O, i)
+		}
+		f.AsName = mv.Columns[i].Name
+	}
+	return nil
+}
+
 // BuildCompleteDiffSource builds the diff-source SELECT statement and layout metadata for
 // COMPLETE DELTA APPLY refresh.
 func BuildCompleteDiffSource(
@@ -2122,19 +2146,8 @@ func BuildCompleteDiffSource(
 	if err != nil {
 		return nil, err
 	}
-	if mvSel.Fields == nil || len(mvSel.Fields.Fields) != len(mv.Columns) {
-		return nil, errors.Errorf(
-			"materialized view %s select output count %d does not match mv column count %d",
-			mv.Name.O,
-			len(mvSel.Fields.Fields),
-			len(mv.Columns),
-		)
-	}
-	for i, f := range mvSel.Fields.Fields {
-		if f == nil {
-			return nil, errors.Errorf("materialized view %s select field %d is nil", mv.Name.O, i)
-		}
-		f.AsName = mv.Columns[i].Name
+	if err := bindMVSelectOutputNamesToMVColumns(mvSel, mv); err != nil {
+		return nil, err
 	}
 
 	groupKeyOffsets, err := extractGroupKeyOffsetsFromMVSelect(sctx, mvSel)
