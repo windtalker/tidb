@@ -325,9 +325,10 @@ func TestBuildGroupByExpression(t *testing.T) {
 		},
 		MaterializedView: &model.MaterializedViewInfo{
 			BaseTableIDs: []int64{baseID},
-			SQLContent:   "select date(ts), a, count(1), sum(v) from t group by a, date(ts)",
+			SQLContent:   "select date(t.ts), t.a, count(1), sum(t.v) from t where t.v > 10 group by t.a, date(t.ts)",
 		},
 	}
+	mv.Columns[1].FieldType.AddFlag(mysql.NotNullFlag)
 
 	is := infoschema.MockInfoSchema([]*model.TableInfo{base, mlog, mv})
 	domain.GetDomain(sctx).MockInfoCacheAndLoadInfoSchema(is)
@@ -341,6 +342,11 @@ func TestBuildGroupByExpression(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.Equal(t, []int{1, 0}, res.GroupKeyMVOffsets)
+	plan, outputNames, err := optimizeForTest(sctx, is)(context.Background(), res.MergeSourceSelect)
+	require.NoError(t, err)
+	require.NotNil(t, plan)
+	require.Equal(t, res.SourceColumnCount, plan.Schema().Len())
+	require.Len(t, outputNames, res.SourceColumnCount)
 
 	deltaSrc, ok := res.MergeSourceSelect.From.TableRefs.Left.(*ast.TableSource)
 	require.True(t, ok)
@@ -355,6 +361,29 @@ func TestBuildGroupByExpression(t *testing.T) {
 	require.Equal(t, "DATE(`ts`)", restoreNodeForTest(t, deltaSel.Fields.Fields[1].Expr))
 	require.Equal(t, "`a`", restoreNodeForTest(t, deltaSel.GroupBy.Items[0].Expr))
 	require.Equal(t, "DATE(`ts`)", restoreNodeForTest(t, deltaSel.GroupBy.Items[1].Expr))
+	whereText := restoreNodeForTest(t, deltaSel.Where)
+	require.Contains(t, whereText, "`_tidb_commit_ts`>10")
+	require.Contains(t, whereText, "`v`>10")
+	require.NotContains(t, whereText, "`t`.")
+
+	require.NotNil(t, res.MergeSourceSelect.From)
+	require.NotNil(t, res.MergeSourceSelect.From.TableRefs)
+	require.NotNil(t, res.MergeSourceSelect.From.TableRefs.On)
+	joinPredicates := collectAndPredicates(t, res.MergeSourceSelect.From.TableRefs.On.Expr)
+	require.Len(t, joinPredicates, 2)
+	opByMVCol := make(map[string]opcode.Op, len(joinPredicates))
+	for _, pred := range joinPredicates {
+		leftTable, leftCol := columnNameRef(t, pred.L)
+		rightTable, rightCol := columnNameRef(t, pred.R)
+		require.Equal(t, deltaTableAlias, leftTable)
+		require.Equal(t, mvTableAlias, rightTable)
+		require.Equal(t, leftCol, rightCol)
+		opByMVCol[rightCol] = pred.Op
+	}
+	require.Equal(t, map[string]opcode.Op{
+		"d": opcode.NullEQ,
+		"x": opcode.EQ,
+	}, opByMVCol)
 }
 
 func TestBuildMLogDeltaSelectTiFlashHint(t *testing.T) {
