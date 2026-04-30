@@ -572,6 +572,7 @@ var GAFunction4ExpressionIndex = map[string]struct{}{
 	ast.JSONDepth:         {},
 	ast.JSONKeys:          {},
 	ast.JSONLength:        {},
+	ast.Date:              {},
 }
 
 var analyzeSkipAllowedTypes = map[string]struct{}{
