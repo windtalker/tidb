@@ -400,7 +400,12 @@ func (e *InsertExec) Open(ctx context.Context) error {
 		e.initEvalBuffer4Dup()
 	}
 	if e.SelectExec != nil {
-		return exec.Open(ctx, e.SelectExec)
+		if err := exec.Open(ctx, e.SelectExec); err != nil {
+			return err
+		}
+	}
+	if len(e.GenExprs) > 0 {
+		e.initGenExprEvalInfo()
 	}
 	if !e.allAssignmentsAreConstant {
 		e.initEvalBuffer()

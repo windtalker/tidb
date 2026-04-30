@@ -334,6 +334,9 @@ func createInsertValues(e *LoadDataWorker) (insertVal *InsertValues, err error) 
 		rowLen:         len(insertColumns),
 		hasExtraHandle: hasExtraHandle,
 	}
+	if len(ret.GenExprs) > 0 {
+		ret.initGenExprEvalInfo()
+	}
 	if len(insertColumns) > 0 {
 		ret.initEvalBuffer()
 	}

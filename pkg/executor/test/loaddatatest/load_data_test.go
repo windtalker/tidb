@@ -354,6 +354,25 @@ func TestLoadDataSpecifiedColumns(t *testing.T) {
 	checkCases(tests, loadSQL, t, tk, ctx, selectSQL, deleteSQL)
 }
 
+func TestLoadDataGeneratedColumns(t *testing.T) {
+	store := testkit.CreateMockStore(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test; drop table if exists load_data_gen;")
+	tk.MustExec(`create table load_data_gen (
+		a int,
+		b int generated always as (a + 1) stored,
+		c int generated always as (b + 1) stored
+	)`)
+	loadSQL := "load data local infile '/tmp/nonexistence.csv' into table load_data_gen (a)"
+	ctx := tk.Session().(sessionctx.Context)
+	tests := []testCase{
+		{[]byte("1\n2\n"), []string{"1|2|3", "2|3|4"}, "Records: 2  Deleted: 0  Skipped: 0  Warnings: 0"},
+	}
+	deleteSQL := "delete from load_data_gen"
+	selectSQL := "select a, b, c from load_data_gen order by a"
+	checkCases(tests, loadSQL, t, tk, ctx, selectSQL, deleteSQL)
+}
+
 func TestLoadDataIgnoreLines(t *testing.T) {
 	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)

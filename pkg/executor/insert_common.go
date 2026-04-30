@@ -72,9 +72,12 @@ type InsertValues struct {
 
 	// colDefaultVals is used to store casted default value.
 	// Because not every insert statement needs colDefaultVals, so we will init the buffer lazily.
-	colDefaultVals  []defaultVal
-	evalBuffer      chunk.MutRow
-	evalBufferTypes []*types.FieldType
+	colDefaultVals        []defaultVal
+	evalBuffer            chunk.MutRow
+	evalBufferTypes       []*types.FieldType
+	genExprBaseRefOffsets []int
+	genExprNeedsPublish   []bool
+	genExprEvalInfoCached bool
 
 	allAssignmentsAreConstant bool
 
@@ -182,6 +185,49 @@ func (e *InsertValues) initEvalBuffer() {
 		e.evalBufferTypes[len(e.evalBufferTypes)-1] = types.NewFieldType(mysql.TypeLonglong)
 	}
 	e.evalBuffer = chunk.MutRowFromTypes(e.evalBufferTypes)
+}
+
+func (e *InsertValues) getOrInitEvalBuffer() chunk.MutRow {
+	if chunk.Row(e.evalBuffer).Chunk() == nil {
+		e.initEvalBuffer()
+	}
+	return e.evalBuffer
+}
+
+func (e *InsertValues) initGenExprEvalInfo() {
+	if e.genExprEvalInfoCached {
+		return
+	}
+	tCols := e.Table.Cols()
+	seen := make(map[int]struct{}, len(tCols))
+	offsets := make([]int, 0, len(tCols))
+	genExprNeedsPublish := make([]bool, len(e.GenExprs))
+	genExprIndexByOffset := make(map[int]int, len(e.GenExprs))
+	genExprIdx := 0
+	for _, col := range tCols {
+		if !col.IsGenerated() {
+			continue
+		}
+		genExprIndexByOffset[col.Offset] = genExprIdx
+		genExprIdx++
+	}
+	for _, expr := range e.GenExprs {
+		for _, col := range expression.ExtractColumns(expr) {
+			offset := col.Index
+			if genExprOffset, ok := genExprIndexByOffset[offset]; ok {
+				genExprNeedsPublish[genExprOffset] = true
+				continue
+			}
+			if _, ok := seen[offset]; ok {
+				continue
+			}
+			seen[offset] = struct{}{}
+			offsets = append(offsets, offset)
+		}
+	}
+	e.genExprBaseRefOffsets = offsets
+	e.genExprNeedsPublish = genExprNeedsPublish
+	e.genExprEvalInfoCached = true
 }
 
 func (e *InsertValues) lazilyInitColDefaultValBuf() (ok bool) {
@@ -711,14 +757,24 @@ func (e *InsertValues) fillRow(ctx context.Context, row []types.Datum, hasValue 
 			return nil, err
 		}
 	}
+	if len(gCols) == 0 {
+		return row, nil
+	}
 
 	sctx := e.Ctx()
 	evalCtx := sctx.GetExprCtx().GetEvalCtx()
 	sc := sctx.GetSessionVars().StmtCtx
 	warnCnt := int(sc.WarningCount())
+	evalBuffer := e.getOrInitEvalBuffer()
+	// A generated column can depend on base columns or previously defined generated columns.
+	// Seed the base-column inputs once, then publish only the generated-column results that
+	// are referenced by later generated expressions.
+	for _, offset := range e.genExprBaseRefOffsets {
+		evalBuffer.SetDatum(offset, row[offset])
+	}
 	for i, gCol := range gCols {
 		colIdx := gCol.ColumnInfo.Offset
-		val, err := e.GenExprs[i].Eval(evalCtx, chunk.MutRowFromDatums(row).ToRow())
+		val, err := e.GenExprs[i].Eval(evalCtx, evalBuffer.ToRow())
 		if err != nil && gCol.FieldType.IsArray() {
 			return nil, completeError(tbl, gCol.Offset, rowIdx, err)
 		}
@@ -739,6 +795,9 @@ func (e *InsertValues) fillRow(ctx context.Context, row []types.Datum, hasValue 
 		// Handle the bad null error.
 		if err = gCol.HandleBadNull(sc.ErrCtx(), &row[colIdx], rowCntInLoadData); err != nil {
 			return nil, err
+		}
+		if e.genExprNeedsPublish[i] {
+			evalBuffer.SetDatum(colIdx, row[colIdx])
 		}
 	}
 	return row, nil

@@ -158,6 +158,29 @@ commit;`
 	tk.MustQuery("show warnings").Check(testkit.Rows("Warning 1526 Table has no partition for value 3"))
 }
 
+func TestInsertStoredGeneratedColumnsReuseEvalBuffer(t *testing.T) {
+	store := testkit.CreateMockStore(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+
+	tk.MustExec("drop table if exists t")
+	tk.MustExec(`create table t (
+		a int default 7,
+		b int generated always as (a + 1) stored,
+		c int generated always as (b + 1) stored
+	)`)
+
+	tk.MustExec("insert into t (a) values (1), (5)")
+	tk.MustExec("insert into t values ()")
+	tk.MustExec("insert into t (a) select a + 10 from t where a = 1")
+	tk.MustQuery("select a, b, c from t order by a").Check(testkit.Rows(
+		"1 2 3",
+		"5 6 7",
+		"7 8 9",
+		"11 12 13",
+	))
+}
+
 type testCase struct {
 	data        []byte
 	expected    []string

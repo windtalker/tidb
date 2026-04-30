@@ -56,9 +56,16 @@ func (e *ReplaceExec) Open(ctx context.Context) error {
 	e.memTracker.AttachTo(e.Ctx().GetSessionVars().StmtCtx.MemTracker)
 
 	if e.SelectExec != nil {
-		return exec.Open(ctx, e.SelectExec)
+		if err := exec.Open(ctx, e.SelectExec); err != nil {
+			return err
+		}
 	}
-	e.initEvalBuffer()
+	if len(e.GenExprs) > 0 {
+		e.initGenExprEvalInfo()
+	}
+	if !e.allAssignmentsAreConstant {
+		e.initEvalBuffer()
+	}
 	return nil
 }
 
