@@ -1795,7 +1795,7 @@ func (do *Domain) StartMVService() error {
 				zap.Stack("stack"),
 			)
 			metrics.PanicCounter.WithLabelValues(metrics.LabelDomain).Inc()
-			metrics.MVServiceRunEventCounterVec.WithLabelValues(mvservice.MVServicePanic).Inc()
+			metrics.MVServicePanicGauge.Inc()
 		}, loopName)
 	}
 	runMVServiceLoopWithRecover("mvService", do.mvService.Run)

@@ -123,11 +123,7 @@ const (
 	mvDurationResultSuccess = "success"
 	mvDurationResultFailed  = "failed"
 
-	// MVServicePanic reports one recovered panic in MV service loops.
-	MVServicePanic = "mv_service_panic"
-
 	mvRunEventInitFailed         = "init_failed"
-	mvRunEventRecoveredPanic     = MVServicePanic
 	mvRunEventServerChanged      = "server_changed"
 	mvRunEventServerRefreshError = "server_refresh_error"
 	mvRunEventFetchByDDL         = "fetch_meta_by_ddl"
@@ -953,7 +949,6 @@ func (t *MVService) runGCOperationHistory(now time.Time, historyGCInterval time.
 		if r := recover(); r != nil {
 			result = mvDurationResultFailed
 			t.scheduleHistoryGCFailure(now, historyGCInterval)
-			t.mh.observeRunEvent(mvRunEventRecoveredPanic)
 			fields := append(t.runtimeLogFields(), zap.Any("panic", r), zap.ByteString("stack", debug.Stack()))
 			logutil.BgLogger().Error("MVService history GC panicked", fields...)
 		}

@@ -968,9 +968,6 @@ func TestMVServiceMaybeGCMVHistoryReportsMetrics(t *testing.T) {
 
 		svc.maybeGCOperationHistory(mvsNow())
 		require.Eventually(t, func() bool {
-			return helper.runEventCount(mvRunEventRecoveredPanic) > 0
-		}, testEventuallyWait, testEventuallyTick)
-		require.Eventually(t, func() bool {
 			return helper.taskDurationCount(mvTaskDurationTypeHistoryGC, mvDurationResultFailed) > 0
 		}, testEventuallyWait, testEventuallyTick)
 		require.Eventually(t, func() bool {
