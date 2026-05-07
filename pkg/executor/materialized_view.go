@@ -2569,6 +2569,7 @@ func (e *RefreshMaterializedViewExec) executeRefreshMaterializedView(kctx contex
 	if err != nil {
 		return err
 	}
+	reportRefreshFailed := tblInfo.MaterializedView != nil && tblInfo.MaterializedView.MViewRefreshFailed
 	mviewID = tblInfo.ID
 	refreshHistRunningInserted := false
 	defer func() {
@@ -2589,6 +2590,8 @@ func (e *RefreshMaterializedViewExec) executeRefreshMaterializedView(kctx contex
 			&refreshJobID,
 			taskCancelController,
 			refreshStart,
+			reportRefreshFailed,
+			isInternalSQL,
 			err,
 		)
 	}()
@@ -2719,6 +2722,26 @@ func (e *RefreshMaterializedViewExec) executeRefreshMaterializedView(kctx contex
 			if histErr != nil {
 				return errors.Annotatef(histErr, "refresh materialized view: failed to finalize refresh history after error %v", finalErr)
 			}
+			if reportRefreshFailed {
+				if alertErr := markRefreshFailedAlertState(finalizeCtx, histSQLExec, mviewID, schemaName.O, tblInfo.Name.O); alertErr != nil {
+					logutil.BgLogger().Warn("refresh materialized view: failed to mark refresh_failed alert",
+						zap.Int64("mviewID", mviewID),
+						zap.String("schema", schemaName.O),
+						zap.String("mview", tblInfo.Name.O),
+						zap.Uint64("refreshJobID", refreshJobID),
+						zap.Error(alertErr),
+					)
+				}
+				logutil.BgLogger().Error("Materialized_view_refresh_failed",
+					zap.Int64("mview_id", mviewID),
+					zap.String("schema", schemaName.O),
+					zap.String("mview", tblInfo.Name.O),
+					zap.Uint64("refresh_job_id", refreshJobID),
+					zap.String("refresh_method", refreshMethod),
+					zap.Bool("internal_sql", isInternalSQL),
+					zap.String("error", refreshErrMsg),
+				)
+			}
 			return errors.Trace(finalErr)
 		}
 		stopTaskMonitor, err := startMVTaskMonitor(
@@ -2778,6 +2801,11 @@ func (e *RefreshMaterializedViewExec) executeRefreshMaterializedView(kctx contex
 		}); err != nil {
 			e.Ctx().GetSessionVars().StmtCtx.AppendWarning(
 				errors.Annotate(err, "refresh materialized view: refresh committed but failed to finalize refresh history"),
+			)
+		}
+		if alertErr := deleteRefreshAlertState(finalizeCtx, histSQLExec, mviewID); alertErr != nil {
+			e.Ctx().GetSessionVars().StmtCtx.AppendWarning(
+				errors.Annotate(alertErr, "refresh materialized view: refresh committed but failed to delete refresh alert"),
 			)
 		}
 		applyMVRefreshStmtResult(e.Ctx().GetSessionVars().StmtCtx, refreshStmtResult)
@@ -2918,6 +2946,26 @@ func (e *RefreshMaterializedViewExec) executeRefreshMaterializedView(kctx contex
 		}
 		if rollbackErr != nil {
 			return errors.Annotatef(rollbackErr, "refresh materialized view: rollback failed after error %v", finalErr)
+		}
+		if reportRefreshFailed {
+			if alertErr := markRefreshFailedAlertState(finalizeCtx, histSQLExec, mviewID, schemaName.O, tblInfo.Name.O); alertErr != nil {
+				logutil.BgLogger().Warn("refresh materialized view: failed to mark refresh_failed alert",
+					zap.Int64("mviewID", mviewID),
+					zap.String("schema", schemaName.O),
+					zap.String("mview", tblInfo.Name.O),
+					zap.Uint64("refreshJobID", refreshJobID),
+					zap.Error(alertErr),
+				)
+			}
+			logutil.BgLogger().Error("Materialized_view_refresh_failed",
+				zap.Int64("mview_id", mviewID),
+				zap.String("schema", schemaName.O),
+				zap.String("mview", tblInfo.Name.O),
+				zap.Uint64("refresh_job_id", refreshJobID),
+				zap.String("refresh_method", refreshMethod),
+				zap.Bool("internal_sql", isInternalSQL),
+				zap.String("error", refreshErrMsg),
+			)
 		}
 		return errors.Trace(finalErr)
 	}
@@ -3072,6 +3120,11 @@ func (e *RefreshMaterializedViewExec) executeRefreshMaterializedView(kctx contex
 	}); err != nil {
 		e.Ctx().GetSessionVars().StmtCtx.AppendWarning(
 			errors.Annotate(err, "refresh materialized view: refresh committed but failed to finalize refresh history"),
+		)
+	}
+	if alertErr := deleteRefreshAlertState(finalizeCtx, histSQLExec, mviewID); alertErr != nil {
+		e.Ctx().GetSessionVars().StmtCtx.AppendWarning(
+			errors.Annotate(alertErr, "refresh materialized view: refresh committed but failed to delete refresh alert"),
 		)
 	}
 	return nil
@@ -4282,6 +4335,64 @@ const (
 	refreshHistStatusFailed  = "failed"
 )
 
+func markRefreshFailedAlertState(
+	kctx context.Context,
+	sqlExec sqlexec.SQLExecutor,
+	mviewID int64,
+	mvSchema string,
+	mvName string,
+) error {
+	_, err := sqlExec.ExecuteInternal(
+		kctx,
+		`INSERT INTO mysql.tidb_mview_refresh_alert (
+	MVIEW_ID,
+	MV_SCHEMA,
+	MV_NAME,
+	REFRESH_FAILED,
+	UPDATED_AT
+) VALUES (
+	%?,
+	%?,
+	%?,
+	'Yes',
+	NOW(6)
+) ON DUPLICATE KEY UPDATE
+MV_SCHEMA = VALUES(MV_SCHEMA),
+MV_NAME = VALUES(MV_NAME),
+REFRESH_FAILED = VALUES(REFRESH_FAILED),
+UPDATED_AT = VALUES(UPDATED_AT)`,
+		mviewID,
+		mvSchema,
+		mvName,
+	)
+	if err != nil {
+		if infoschema.ErrTableNotExists.Equal(err) {
+			return errors.New("refresh materialized view: required system table mysql.tidb_mview_refresh_alert does not exist")
+		}
+		return errors.Trace(err)
+	}
+	return nil
+}
+
+func deleteRefreshAlertState(
+	kctx context.Context,
+	sqlExec sqlexec.SQLExecutor,
+	mviewID int64,
+) error {
+	if _, err := sqlExec.ExecuteInternal(
+		kctx,
+		`DELETE FROM mysql.tidb_mview_refresh_alert
+WHERE MVIEW_ID = %?`,
+		mviewID,
+	); err != nil {
+		if infoschema.ErrTableNotExists.Equal(err) {
+			return errors.New("refresh materialized view: required system table mysql.tidb_mview_refresh_alert does not exist")
+		}
+		return errors.Trace(err)
+	}
+	return nil
+}
+
 func insertRefreshHistRunning(
 	kctx context.Context,
 	sqlExec sqlexec.SQLExecutor,
@@ -4414,6 +4525,8 @@ func (e *RefreshMaterializedViewExec) insertRefreshHistFailedFallback(
 	refreshJobID *uint64,
 	taskCancelController *mvTaskCancelController,
 	refreshStart time.Time,
+	reportRefreshFailed bool,
+	isInternalSQL bool,
 	refreshErr error,
 ) error {
 	refreshFailedReason, finalErr := taskCancelController.normalizeTaskFailure(refreshErr)
@@ -4450,6 +4563,26 @@ func (e *RefreshMaterializedViewExec) insertRefreshHistFailedFallback(
 		&refreshErrMsg,
 	); err != nil {
 		return errors.Annotatef(err, "refresh materialized view: failed to insert failed refresh history after error %v", finalErr)
+	}
+	if reportRefreshFailed {
+		if alertErr := markRefreshFailedAlertState(kctx, histSQLExec, mviewID, mvSchema, mvName); alertErr != nil {
+			logutil.BgLogger().Warn("refresh materialized view: failed to mark refresh_failed alert",
+				zap.Int64("mviewID", mviewID),
+				zap.String("schema", mvSchema),
+				zap.String("mview", mvName),
+				zap.Uint64("refreshJobID", *refreshJobID),
+				zap.Error(alertErr),
+			)
+		}
+		logutil.BgLogger().Error("Materialized_view_refresh_failed",
+			zap.Int64("mview_id", mviewID),
+			zap.String("schema", mvSchema),
+			zap.String("mview", mvName),
+			zap.Uint64("refresh_job_id", *refreshJobID),
+			zap.String("refresh_method", refreshMethod),
+			zap.Bool("internal_sql", isInternalSQL),
+			zap.String("error", refreshErrMsg),
+		)
 	}
 	return errors.Trace(finalErr)
 }

@@ -2601,12 +2601,30 @@ func TestServerHelperSyncMVRefreshAlertStates(t *testing.T) {
 	err := (&serviceHelper{}).SyncMVRefreshAlertStates(context.Background(), pool, now, states)
 	require.NoError(t, err)
 	require.Equal(t, []string{
-		buildDeleteMVRefreshAlertSQL([]int64{103}),
+		buildDeleteResolvedMVRefreshAlertSQL([]int64{103}),
+		buildClearResolvedMVRefreshAlertLevelSQL(now, []int64{103}),
 		buildUpsertMVRefreshAlertSQL(now, states[:2]),
 	}, se.executedRestrictedSQL)
-	require.Len(t, se.executedRestrictedArg, 2)
+	require.Len(t, se.executedRestrictedArg, 3)
 	require.Empty(t, se.executedRestrictedArg[0])
 	require.Empty(t, se.executedRestrictedArg[1])
+	require.Empty(t, se.executedRestrictedArg[2])
+}
+
+func TestBuildResolvedMVRefreshAlertSQL(t *testing.T) {
+	installMockTimeForTest(t)
+
+	now := mvsNow().Round(0)
+	ids := []int64{103, 104}
+
+	require.Equal(t,
+		"DELETE FROM mysql.tidb_mview_refresh_alert WHERE MVIEW_ID IN (103,104) AND REFRESH_FAILED IS NULL",
+		buildDeleteResolvedMVRefreshAlertSQL(ids),
+	)
+	require.Equal(t,
+		"UPDATE mysql.tidb_mview_refresh_alert SET ALERT_LEVEL = NULL, UPDATED_AT = '2023-11-15 06:13:20' WHERE MVIEW_ID IN (103,104) AND REFRESH_FAILED IS NOT NULL AND ALERT_LEVEL IS NOT NULL",
+		buildClearResolvedMVRefreshAlertLevelSQL(now, ids),
+	)
 }
 
 func TestServerHelperCleanupStaleMVRefreshAlerts(t *testing.T) {
