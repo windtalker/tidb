@@ -1576,8 +1576,8 @@ func TestMaterializedViewRefreshFailedAlertByAttribute(t *testing.T) {
 	tk.MustExec("create table t_mv_refresh_failed_alert (a int not null, b int not null)")
 	tk.MustExec("insert into t_mv_refresh_failed_alert values (1, 10), (2, 20)")
 	tk.MustExec("create materialized view log on t_mv_refresh_failed_alert (a, b) purge next date_add(now(), interval 1 hour)")
-	tk.MustExec("create materialized view mv_refresh_failed_yes (a, s, cnt) refresh fast attributes='mview_refresh_failed=yes' as select a, sum(b), count(1) from t_mv_refresh_failed_alert group by a")
-	tk.MustExec("create materialized view mv_refresh_failed_no (a, s, cnt) refresh fast attributes='mview_refresh_failed=no' as select a, sum(b), count(1) from t_mv_refresh_failed_alert group by a")
+	tk.MustExec("create materialized view mv_refresh_failed_yes (a, s, cnt) refresh fast attributes='mview_alert_refresh_failed=yes' as select a, sum(b), count(1) from t_mv_refresh_failed_alert group by a")
+	tk.MustExec("create materialized view mv_refresh_failed_no (a, s, cnt) refresh fast attributes='mview_alert_refresh_failed=no' as select a, sum(b), count(1) from t_mv_refresh_failed_alert group by a")
 
 	mvYesIDRows := tk.MustQuery("select tidb_table_id from information_schema.tables where table_schema = 'test' and table_name = 'mv_refresh_failed_yes'").Rows()
 	require.Len(t, mvYesIDRows, 1)

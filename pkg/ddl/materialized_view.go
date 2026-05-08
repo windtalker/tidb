@@ -49,7 +49,7 @@ import (
 const (
 	mviewAttrAlertWarning                                 = "mview_alert_warning"
 	mviewAttrAlertOverdue                                 = "mview_alert_overdue"
-	mviewAttrRefreshFailed                                = "mview_refresh_failed"
+	mviewAttrAlertRefreshFailed                           = "mview_alert_refresh_failed"
 	alterMaterializedScheduleInfoUpdateLockWaitTimeoutSec = int64(10)
 )
 
@@ -328,7 +328,7 @@ func (e *executor) CreateMaterializedView(ctx sessionctx.Context, s *ast.CreateM
 	if err != nil {
 		return err
 	}
-	alertWarningSec, alertOverdueSec, refreshFailedAlert, err := parseMViewAttributes(s.Attributes)
+	alertWarningSec, alertOverdueSec, alertRefreshFailed, err := parseMViewAttributes(s.Attributes)
 	if err != nil {
 		return err
 	}
@@ -342,7 +342,7 @@ func (e *executor) CreateMaterializedView(ctx sessionctx.Context, s *ast.CreateM
 		RefreshNext:        refreshNext,
 		AlertWarningSec:    alertWarningSec,
 		AlertOverdueSec:    alertOverdueSec,
-		MViewRefreshFailed: refreshFailedAlert,
+		AlertRefreshFailed: alertRefreshFailed,
 		DefinitionSQLMode:  ctx.GetSessionVars().SQLMode,
 		DefinitionTimeZone: model.TimeZoneLocation{
 			Name:   tzName,
@@ -738,7 +738,7 @@ func (e *executor) alterMaterializedViewAttributes(
 	mviewID int64,
 	attrs string,
 ) error {
-	alertWarningSec, alertOverdueSec, refreshFailedAlert, err := parseMViewAttributes(attrs)
+	alertWarningSec, alertOverdueSec, alertRefreshFailed, err := parseMViewAttributes(attrs)
 	if err != nil {
 		return err
 	}
@@ -757,7 +757,7 @@ func (e *executor) alterMaterializedViewAttributes(
 	args := &model.AlterMaterializedViewAttributesArgs{
 		AlertWarningSec:    alertWarningSec,
 		AlertOverdueSec:    alertOverdueSec,
-		MViewRefreshFailed: refreshFailedAlert,
+		AlertRefreshFailed: alertRefreshFailed,
 	}
 	return errors.Trace(e.doDDLJob2(ctx, job, args))
 }
@@ -1230,7 +1230,7 @@ func buildMViewRefreshMeta(sctx sessionctx.Context, refresh *ast.MViewRefreshCla
 	}
 }
 
-func parseMViewAttributes(attrs string) (alertWarningSec, alertOverdueSec int64, refreshFailedAlert bool, err error) {
+func parseMViewAttributes(attrs string) (alertWarningSec, alertOverdueSec int64, alertRefreshFailed bool, err error) {
 	attrs = strings.TrimSpace(attrs)
 	if attrs == "" {
 		return 0, 0, false, nil
@@ -1269,12 +1269,12 @@ func parseMViewAttributes(attrs string) (alertWarningSec, alertOverdueSec int64,
 				return 0, 0, false, errors.Errorf("invalid ATTRIBUTES value for %s: %s (must be non-negative integer seconds)", key, valStr)
 			}
 			alertOverdueSec = val
-		case mviewAttrRefreshFailed:
+		case mviewAttrAlertRefreshFailed:
 			switch strings.ToLower(valStr) {
 			case "yes":
-				refreshFailedAlert = true
+				alertRefreshFailed = true
 			case "no":
-				refreshFailedAlert = false
+				alertRefreshFailed = false
 			default:
 				return 0, 0, false, errors.Errorf("invalid ATTRIBUTES value for %s: %s (must be yes or no)", key, valStr)
 			}
@@ -1287,7 +1287,7 @@ func parseMViewAttributes(attrs string) (alertWarningSec, alertOverdueSec int64,
 		return 0, 0, false, errors.Errorf("invalid ATTRIBUTES: %s (%d) must be less than or equal to %s (%d)",
 			mviewAttrAlertWarning, alertWarningSec, mviewAttrAlertOverdue, alertOverdueSec)
 	}
-	return alertWarningSec, alertOverdueSec, refreshFailedAlert, nil
+	return alertWarningSec, alertOverdueSec, alertRefreshFailed, nil
 }
 
 type mviewGroupByInfo struct {

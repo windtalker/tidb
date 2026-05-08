@@ -746,18 +746,18 @@ func GetAlterMaterializedViewRefreshArgs(job *Job) (*AlterMaterializedViewRefres
 type AlterMaterializedViewAttributesArgs struct {
 	AlertWarningSec    int64 `json:"alert_warning_sec,omitempty"`
 	AlertOverdueSec    int64 `json:"alert_overdue_sec,omitempty"`
-	MViewRefreshFailed bool  `json:"mview_refresh_failed,omitempty"`
+	AlertRefreshFailed bool  `json:"alert_refresh_failed,omitempty"`
 }
 
 func (a *AlterMaterializedViewAttributesArgs) getArgsV1(*Job) []any {
-	return []any{a.AlertWarningSec, a.AlertOverdueSec, a.MViewRefreshFailed}
+	return []any{a.AlertWarningSec, a.AlertOverdueSec, a.AlertRefreshFailed}
 }
 
 func (a *AlterMaterializedViewAttributesArgs) decodeV1(job *Job) error {
-	if err := job.decodeArgs(&a.AlertWarningSec, &a.AlertOverdueSec, &a.MViewRefreshFailed); err == nil {
+	if err := job.decodeArgs(&a.AlertWarningSec, &a.AlertOverdueSec, &a.AlertRefreshFailed); err == nil {
 		return nil
 	}
-	a.MViewRefreshFailed = false
+	a.AlertRefreshFailed = false
 	return errors.Trace(job.decodeArgs(&a.AlertWarningSec, &a.AlertOverdueSec))
 }
 

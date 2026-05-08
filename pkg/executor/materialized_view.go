@@ -2569,7 +2569,7 @@ func (e *RefreshMaterializedViewExec) executeRefreshMaterializedView(kctx contex
 	if err != nil {
 		return err
 	}
-	reportRefreshFailed := tblInfo.MaterializedView != nil && tblInfo.MaterializedView.MViewRefreshFailed
+	reportRefreshFailed := tblInfo.MaterializedView != nil && tblInfo.MaterializedView.AlertRefreshFailed
 	mviewID = tblInfo.ID
 	refreshHistRunningInserted := false
 	defer func() {

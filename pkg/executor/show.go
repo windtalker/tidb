@@ -1832,8 +1832,8 @@ func fetchShowCreateTable4MaterializedView(ctx sessionctx.Context, tb *model.Tab
 	if mvInfo.AlertOverdueSec > 0 {
 		attrPairs = append(attrPairs, fmt.Sprintf("mview_alert_overdue=%d", mvInfo.AlertOverdueSec))
 	}
-	if mvInfo.MViewRefreshFailed {
-		attrPairs = append(attrPairs, "mview_refresh_failed=yes")
+	if mvInfo.AlertRefreshFailed {
+		attrPairs = append(attrPairs, "mview_alert_refresh_failed=yes")
 	}
 	if len(attrPairs) > 0 {
 		fmt.Fprintf(buf, " ATTRIBUTES='%s'", strings.Join(attrPairs, ","))

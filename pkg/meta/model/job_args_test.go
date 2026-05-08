@@ -614,7 +614,7 @@ func TestGetAlterMaterializedViewAttributesArgs(t *testing.T) {
 	inArgs := &AlterMaterializedViewAttributesArgs{
 		AlertWarningSec:    10,
 		AlertOverdueSec:    20,
-		MViewRefreshFailed: true,
+		AlertRefreshFailed: true,
 	}
 	for _, v := range []JobVersion{JobVersion1, JobVersion2} {
 		j2 := &Job{}
@@ -639,7 +639,7 @@ func TestGetAlterMaterializedViewAttributesArgs(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, legacy.AlertWarningSec, args.AlertWarningSec)
 	require.Equal(t, legacy.AlertOverdueSec, args.AlertOverdueSec)
-	require.False(t, args.MViewRefreshFailed)
+	require.False(t, args.AlertRefreshFailed)
 }
 
 func TestGetAlterMaterializedViewLogPurgeArgs(t *testing.T) {
