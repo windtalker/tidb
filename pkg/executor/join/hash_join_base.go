@@ -304,6 +304,11 @@ func (w *buildWorkerBase) fetchBuildSideRows(ctx context.Context, hashJoinCtx *h
 	})
 
 	sessVars := hashJoinCtx.SessCtx.GetSessionVars()
+	// Build side rows are materialized into RowContainer and the input chunks are not reused by the fetcher.
+	// Starting from MaxChunkSize can waste memory for TP workloads with small build sides, so we begin with
+	// InitCap and promote to MaxChunkSize once we observe a full chunk.
+	nextBuildChunkCap := w.BuildSideExec.InitCap()
+	useMaxChunkSizeForBuildChunk := false
 	failpoint.Inject("issue51998", func(val failpoint.Value) {
 		if val.(bool) {
 			time.Sleep(2 * time.Second)
@@ -330,7 +335,7 @@ func (w *buildWorkerBase) fetchBuildSideRows(ctx context.Context, hashJoinCtx *h
 			return
 		}
 
-		chk := hashJoinCtx.ChunkAllocPool.Alloc(w.BuildSideExec.RetFieldTypes(), sessVars.MaxChunkSize, sessVars.MaxChunkSize)
+		chk := hashJoinCtx.ChunkAllocPool.Alloc(w.BuildSideExec.RetFieldTypes(), nextBuildChunkCap, sessVars.MaxChunkSize)
 		err = exec.Next(ctx, w.BuildSideExec, chk)
 
 		failpoint.Inject("issue51998", func(val failpoint.Value) {
@@ -351,6 +356,10 @@ func (w *buildWorkerBase) fetchBuildSideRows(ctx context.Context, hashJoinCtx *h
 
 		if chk.NumRows() == 0 {
 			return
+		}
+		if !useMaxChunkSizeForBuildChunk && chk.IsFull() {
+			useMaxChunkSizeForBuildChunk = true
+			nextBuildChunkCap = sessVars.MaxChunkSize
 		}
 
 		syncerAdd(fetcherAndWorkerSyncer)

@@ -1072,7 +1072,11 @@ func (w *indexWorker) fetchHandles(ctx context.Context, results []distsql.Select
 			}
 		}
 	}()
-	chk := w.idxLookup.AllocPool.Alloc(w.idxLookup.getRetTpsForIndexReader(), w.idxLookup.MaxChunkSize(), w.idxLookup.MaxChunkSize())
+	chk := w.idxLookup.AllocPool.Alloc(
+		w.idxLookup.getRetTpsForIndexReader(),
+		w.idxLookup.InitCap(),
+		w.idxLookup.MaxChunkSize(),
+	)
 	idxID := w.idxLookup.getIndexPlanRootID()
 	if w.idxLookup.stmtRuntimeStatsColl != nil {
 		if idxID != w.idxLookup.ID() && w.idxLookup.stats != nil {

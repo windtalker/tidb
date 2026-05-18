@@ -646,7 +646,7 @@ func (w *partialTableWorker) needPartitionHandle() (bool, error) {
 
 func (w *partialTableWorker) fetchHandles(ctx context.Context, exitCh <-chan struct{}, fetchCh chan<- *indexMergeTableTask,
 	finished <-chan struct{}, handleCols plannerutil.HandleCols, parTblIdx int, partialPlanIndex int) (count int64, err error) {
-	chk := w.tableReader.NewChunkWithCapacity(w.getRetTpsForTableScan(), w.maxChunkSize, w.maxBatchSize)
+	chk := w.tableReader.NewChunkWithCapacity(w.getRetTpsForTableScan(), w.tableReader.InitCap(), w.maxBatchSize)
 	for {
 		start := time.Now()
 		handles, retChunk, err := w.extractTaskHandles(ctx, chk, handleCols)
@@ -1732,7 +1732,7 @@ func (w *partialIndexWorker) fetchHandles(
 	handleCols plannerutil.HandleCols,
 	partialPlanIndex int) (count int64, err error) {
 	tps := w.getRetTpsForIndexScan(handleCols)
-	chk := chunk.NewChunkWithCapacity(tps, w.maxChunkSize)
+	chk := chunk.New(tps, w.sc.GetSessionVars().InitChunkSize, w.maxChunkSize)
 	for i := 0; i < len(results); {
 		start := time.Now()
 		handles, retChunk, err := w.extractTaskHandles(ctx, chk, results[i], handleCols)
