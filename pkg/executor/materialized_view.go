@@ -98,10 +98,10 @@ const (
 )
 
 type compareMaterializedViewDiffLayout struct {
-	groupKeyOffsets       []int
-	leftMarkerColIdx      int
-	rightMarkerColIdx     int
-	payloadCompareColumns []mviewCompleteDeltaCompareColumn
+	groupKeyOffsets        []int
+	currentMarkerColIdx    int
+	recomputedMarkerColIdx int
+	payloadCompareColumns  []mviewCompleteDeltaCompareColumn
 }
 
 type compareMaterializedViewRecordSetExec struct {
@@ -758,12 +758,12 @@ type MViewCompleteDeltaApplyExec struct {
 	TargetHandleCols plannerutil.HandleCols
 	OpColID          int
 
-	MWritableInputColIDs []int
-	QWritableInputColIDs []int
+	CurrentWritableInputColIDs    []int
+	RecomputedWritableInputColIDs []int
 
-	CompareWritableIdxes []int
-	MCompareInputColIDs  []int
-	QCompareInputColIDs  []int
+	CompareWritableIdxes         []int
+	CurrentCompareInputColIDs    []int
+	RecomputedCompareInputColIDs []int
 
 	writableFieldTypes []*types.FieldType
 	compareColumns     []mviewCompleteDeltaCompareColumn
@@ -783,11 +783,11 @@ type MViewCompleteDeltaApplyExec struct {
 }
 
 type mviewCompleteDeltaCompareColumn struct {
-	writableIdx int
-	mInputColID int
-	qInputColID int
-	fieldType   *types.FieldType
-	notNull     bool
+	writableIdx          int
+	currentInputColID    int
+	recomputedInputColID int
+	fieldType            *types.FieldType
+	notNull              bool
 }
 
 type mviewCompleteDeltaApplyWriterStats struct {
@@ -960,10 +960,10 @@ func (e *MViewCompleteDeltaApplyExec) Open(ctx context.Context) error {
 		return errors.New("MViewCompleteDeltaApply child executor is nil")
 	}
 	childTypes := child.RetFieldTypes()
-	if err := validateMViewCompleteDeltaWritableInputColTypes(e.TargetTable, childTypes, e.MWritableInputColIDs); err != nil {
+	if err := validateMViewCompleteDeltaWritableInputColTypes(e.TargetTable, childTypes, e.CurrentWritableInputColIDs); err != nil {
 		return err
 	}
-	if err := validateMViewCompleteDeltaWritableInputColTypes(e.TargetTable, childTypes, e.QWritableInputColIDs); err != nil {
+	if err := validateMViewCompleteDeltaWritableInputColTypes(e.TargetTable, childTypes, e.RecomputedWritableInputColIDs); err != nil {
 		return err
 	}
 
@@ -1174,12 +1174,12 @@ func (e *MViewCompleteDeltaApplyExec) collectChunkUpdateRows(ops []int64) (int, 
 }
 
 func (e *MViewCompleteDeltaApplyExec) initCompareColumns(inputColCount int) error {
-	if len(e.MCompareInputColIDs) != len(e.CompareWritableIdxes) || len(e.QCompareInputColIDs) != len(e.CompareWritableIdxes) {
+	if len(e.CurrentCompareInputColIDs) != len(e.CompareWritableIdxes) || len(e.RecomputedCompareInputColIDs) != len(e.CompareWritableIdxes) {
 		return errors.Errorf(
-			"MViewCompleteDeltaApply compare mapping length mismatch (compare=%d, M=%d, Q=%d)",
+			"MViewCompleteDeltaApply compare mapping length mismatch (compare=%d, current=%d, recomputed=%d)",
 			len(e.CompareWritableIdxes),
-			len(e.MCompareInputColIDs),
-			len(e.QCompareInputColIDs),
+			len(e.CurrentCompareInputColIDs),
+			len(e.RecomputedCompareInputColIDs),
 		)
 	}
 	if cap(e.compareColumns) >= len(e.CompareWritableIdxes) {
@@ -1195,29 +1195,29 @@ func (e *MViewCompleteDeltaApplyExec) initCompareColumns(inputColCount int) erro
 				len(e.writableFieldTypes),
 			)
 		}
-		mInputColID := e.MCompareInputColIDs[compareIdx]
-		if mInputColID < 0 || mInputColID >= inputColCount {
+		currentInputColID := e.CurrentCompareInputColIDs[compareIdx]
+		if currentInputColID < 0 || currentInputColID >= inputColCount {
 			return errors.Errorf(
-				"MViewCompleteDeltaApply M compare input col id %d out of source range [0,%d)",
-				mInputColID,
+				"MViewCompleteDeltaApply current compare input col id %d out of source range [0,%d)",
+				currentInputColID,
 				inputColCount,
 			)
 		}
-		qInputColID := e.QCompareInputColIDs[compareIdx]
-		if qInputColID < 0 || qInputColID >= inputColCount {
+		recomputedInputColID := e.RecomputedCompareInputColIDs[compareIdx]
+		if recomputedInputColID < 0 || recomputedInputColID >= inputColCount {
 			return errors.Errorf(
-				"MViewCompleteDeltaApply Q compare input col id %d out of source range [0,%d)",
-				qInputColID,
+				"MViewCompleteDeltaApply recomputed compare input col id %d out of source range [0,%d)",
+				recomputedInputColID,
 				inputColCount,
 			)
 		}
 		fieldType := e.writableFieldTypes[writableIdx]
 		e.compareColumns[compareIdx] = mviewCompleteDeltaCompareColumn{
-			writableIdx: writableIdx,
-			mInputColID: mInputColID,
-			qInputColID: qInputColID,
-			fieldType:   fieldType,
-			notNull:     mysql.HasNotNullFlag(fieldType.GetFlag()),
+			writableIdx:          writableIdx,
+			currentInputColID:    currentInputColID,
+			recomputedInputColID: recomputedInputColID,
+			fieldType:            fieldType,
+			notNull:              mysql.HasNotNullFlag(fieldType.GetFlag()),
 		}
 	}
 	return nil
@@ -1244,8 +1244,8 @@ func (e *MViewCompleteDeltaApplyExec) markChunkUpdateTouchedColumns(input *chunk
 			e.updateTouchedBitmap,
 			e.updateTouchedStride,
 			compareIdx,
-			input.Column(compareCol.mInputColID),
-			input.Column(compareCol.qInputColID),
+			input.Column(compareCol.currentInputColID),
+			input.Column(compareCol.recomputedInputColID),
 			compareCol.fieldType,
 			compareCol.notNull,
 			"COMPLETE DELTA APPLY",
@@ -1257,25 +1257,25 @@ func (e *MViewCompleteDeltaApplyExec) markChunkUpdateTouchedColumns(input *chunk
 }
 
 func (e *MViewCompleteDeltaApplyExec) buildDeleteRow(row chunk.Row) {
-	for writableIdx, colID := range e.MWritableInputColIDs {
+	for writableIdx, colID := range e.CurrentWritableInputColIDs {
 		row.DatumWithBuffer(colID, e.writableFieldTypes[writableIdx], &e.oldRow[writableIdx])
 	}
 }
 
 func (e *MViewCompleteDeltaApplyExec) buildInsertRow(row chunk.Row) {
-	for writableIdx, colID := range e.QWritableInputColIDs {
+	for writableIdx, colID := range e.RecomputedWritableInputColIDs {
 		row.DatumWithBuffer(colID, e.writableFieldTypes[writableIdx], &e.newRow[writableIdx])
 	}
 }
 
 func (e *MViewCompleteDeltaApplyExec) buildUpdateRows(row chunk.Row) {
-	for writableIdx, colID := range e.MWritableInputColIDs {
+	for writableIdx, colID := range e.CurrentWritableInputColIDs {
 		row.DatumWithBuffer(colID, e.writableFieldTypes[writableIdx], &e.oldRow[writableIdx])
 	}
 	copy(e.newRow, e.oldRow)
 	// `newRow` starts from the old row image and only patches columns marked touched for this UPDATE row.
 	for _, writableIdx := range e.currTouchedIdxes {
-		row.DatumWithBuffer(e.QWritableInputColIDs[writableIdx], e.writableFieldTypes[writableIdx], &e.newRow[writableIdx])
+		row.DatumWithBuffer(e.RecomputedWritableInputColIDs[writableIdx], e.writableFieldTypes[writableIdx], &e.newRow[writableIdx])
 	}
 }
 
@@ -1375,20 +1375,20 @@ func (e *CompareMaterializedViewExec) Next(ctx context.Context, req *chunk.Chunk
 		}()
 	}
 
-	baseQueryExec, err := e.openCompareMaterializedViewQueryExec(ctx, lastSuccessReadTSO, tblInfo.MaterializedView, tblInfo.MaterializedView.SQLContent)
+	recomputedQueryExec, err := e.openCompareMaterializedViewQueryExec(ctx, lastSuccessReadTSO, tblInfo.MaterializedView, tblInfo.MaterializedView.SQLContent)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = baseQueryExec.Close() }()
+	defer func() { _ = recomputedQueryExec.Close() }()
 
-	mvQuerySQL := buildCompareMaterializedViewSelectSQL(schemaName, tblInfo.Name, visibleCols)
-	mvQueryExec, err := e.openCompareMaterializedViewQueryExec(ctx, compareSnapshotTS, tblInfo.MaterializedView, mvQuerySQL)
+	currentMVQuerySQL := buildCompareMaterializedViewSelectSQL(schemaName, tblInfo.Name, visibleCols)
+	currentQueryExec, err := e.openCompareMaterializedViewQueryExec(ctx, compareSnapshotTS, tblInfo.MaterializedView, currentMVQuerySQL)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = mvQueryExec.Close() }()
+	defer func() { _ = currentQueryExec.Close() }()
 
-	hashJoinExec := newCompareMaterializedViewHashJoinExec(e.Ctx(), baseQueryExec, mvQueryExec, layout.groupKeyOffsets, visibleCols)
+	hashJoinExec := newCompareMaterializedViewHashJoinExec(e.Ctx(), recomputedQueryExec, currentQueryExec, layout.groupKeyOffsets, visibleCols)
 	if err := exec.Open(ctx, hashJoinExec); err != nil {
 		_ = hashJoinExec.Close()
 		return err
@@ -1421,8 +1421,8 @@ func (e *CompareMaterializedViewExec) Next(ctx context.Context, req *chunk.Chunk
 				changedRows,
 				1,
 				0,
-				joinResult.Column(compareCol.mInputColID),
-				joinResult.Column(compareCol.qInputColID),
+				joinResult.Column(compareCol.currentInputColID),
+				joinResult.Column(compareCol.recomputedInputColID),
 				compareCol.fieldType,
 				compareCol.notNull,
 				"COMPARE MATERIALIZED VIEW",
@@ -1431,12 +1431,12 @@ func (e *CompareMaterializedViewExec) Next(ctx context.Context, req *chunk.Chunk
 			}
 		}
 
-		leftMarkerCol := joinResult.Column(layout.leftMarkerColIdx)
-		rightMarkerCol := joinResult.Column(layout.rightMarkerColIdx)
+		currentMarkerCol := joinResult.Column(layout.currentMarkerColIdx)
+		recomputedMarkerCol := joinResult.Column(layout.recomputedMarkerColIdx)
 		for rowIdx := 0; rowIdx < joinResult.NumRows(); rowIdx++ {
 			diffType := classifyCompareMaterializedViewRowDiff(
-				leftMarkerCol.IsNull(rowIdx),
-				rightMarkerCol.IsNull(rowIdx),
+				currentMarkerCol.IsNull(rowIdx),
+				recomputedMarkerCol.IsNull(rowIdx),
 				changedRows[rowIdx] != 0,
 			)
 			if diffType == "" {
@@ -1809,9 +1809,9 @@ func buildCompareMaterializedViewDiffLayout(
 	}
 
 	layout := &compareMaterializedViewDiffLayout{
-		groupKeyOffsets:   append([]int(nil), diffMeta.GroupKeyMVOffsets...),
-		leftMarkerColIdx:  diffMeta.MarkerMVOffset,
-		rightMarkerColIdx: len(visibleCols) + diffMeta.MarkerMVOffset,
+		groupKeyOffsets:        append([]int(nil), diffMeta.GroupKeyMVOffsets...),
+		currentMarkerColIdx:    len(visibleCols) + diffMeta.MarkerMVOffset,
+		recomputedMarkerColIdx: diffMeta.MarkerMVOffset,
 	}
 	layout.payloadCompareColumns = make([]mviewCompleteDeltaCompareColumn, 0, len(visibleCols)-len(groupKeySet))
 	for offset, col := range visibleCols {
@@ -1819,10 +1819,10 @@ func buildCompareMaterializedViewDiffLayout(
 			continue
 		}
 		layout.payloadCompareColumns = append(layout.payloadCompareColumns, mviewCompleteDeltaCompareColumn{
-			mInputColID:    offset,
-			qInputColID:    len(visibleCols) + offset,
-			fieldType:      &col.FieldType,
-			notNull:        mysql.HasNotNullFlag(col.GetFlag()),
+			currentInputColID:    len(visibleCols) + offset,
+			recomputedInputColID: offset,
+			fieldType:            &col.FieldType,
+			notNull:              mysql.HasNotNullFlag(col.GetFlag()),
 		})
 	}
 	return layout, nil
@@ -1871,9 +1871,9 @@ func newCompareMaterializedViewHashJoinExec(
 		buildCompareMaterializedViewOrdinalSlice(len(leftTypes)),
 		buildCompareMaterializedViewOrdinalSlice(len(rightTypes)),
 	}
-	// Compare always uses BaseQuery@R as the probe/left side and MV@S as the
-	// build/right side. This matches the full outer hash join builder setup for
-	// build=right, probe=left:
+	// Compare always uses the recomputed source result as the probe/left side
+	// and the current MV rows as the build/right side. This matches the full
+	// outer hash join builder setup for build=right, probe=left:
 	// - unmatched build rows are (NULL-left, right), handled by RightOuterJoin;
 	// - unmatched probe rows are (left, NULL-right), handled by LeftOuterJoin.
 	fullJoinBuildJoiner := join.NewJoiner(
@@ -2018,11 +2018,11 @@ func buildCompareMaterializedViewOrdinalSlice(colCnt int) []int {
 	return ordinals
 }
 
-func classifyCompareMaterializedViewRowDiff(leftMissing, rightMissing, payloadChanged bool) string {
+func classifyCompareMaterializedViewRowDiff(currentMissing, recomputedMissing, payloadChanged bool) string {
 	switch {
-	case leftMissing:
+	case recomputedMissing:
 		return compareMaterializedViewExcessiveType
-	case rightMissing:
+	case currentMissing:
 		return compareMaterializedViewVacuumType
 	case payloadChanged:
 		return compareMaterializedViewDifferType
