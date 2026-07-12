@@ -215,6 +215,35 @@ func TestMutateBuffersGetter(t *testing.T) {
 	require.Same(t, stmtBufs, buffers.GetWriteStmtBufs())
 }
 
+func TestMutateBuffersClear(t *testing.T) {
+	buffers := NewMutateBuffers(&variable.WriteStmtBufs{})
+	encode := buffers.GetEncodeRowBufferWithCap(4)
+	encode.AddColVal(1, types.NewStringDatum("value1"))
+	encode.AddColVal(2, types.NewBytesDatum([]byte("value2")))
+	encode.row = encode.row[:1]
+	encode.colIDs = encode.colIDs[:1]
+
+	check := buffers.GetCheckRowBufferWithCap(3)
+	check.AddColVal(types.NewStringDatum("check1"))
+	check.AddColVal(types.NewBytesDatum([]byte("check2")))
+	check.rowToCheck = check.rowToCheck[:1]
+
+	buffers.Clear()
+	require.Equal(t, 0, len(encode.colIDs))
+	require.Equal(t, 4, cap(encode.colIDs))
+	require.Equal(t, 0, len(encode.row))
+	require.Equal(t, 4, cap(encode.row))
+	require.Equal(t, 0, len(check.rowToCheck))
+	require.Equal(t, 3, cap(check.rowToCheck))
+
+	for _, datum := range encode.row[:cap(encode.row)] {
+		require.Equal(t, types.Datum{}, datum)
+	}
+	for _, datum := range check.rowToCheck[:cap(check.rowToCheck)] {
+		require.Equal(t, types.Datum{}, datum)
+	}
+}
+
 func TestEnsureCapacityAndReset(t *testing.T) {
 	slice := ensureCapacityAndReset([]int(nil), 0)
 	require.Nil(t, slice)

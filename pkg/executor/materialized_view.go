@@ -159,6 +159,21 @@ const (
 	mlogPurgeAdaptiveMaxBudget      = mvservice.DefaultMVPurgeTaskTimeout - mlogPurgeAdaptiveDeadlineBuffer
 )
 
+func clearSessionMutateBuffers(sctx sessionctx.Context) {
+	if sctx == nil {
+		return
+	}
+	tableCtx := sctx.GetTableCtx()
+	if tableCtx == nil {
+		return
+	}
+	mutateBuffers := tableCtx.GetMutateBuffers()
+	if mutateBuffers == nil {
+		return
+	}
+	mutateBuffers.Clear()
+}
+
 // PurgeMaterializedViewLogExec executes "PURGE MATERIALIZED VIEW LOG" as a utility-style statement.
 type PurgeMaterializedViewLogExec struct {
 	exec.BaseExecutor
@@ -2374,6 +2389,7 @@ func (e *PurgeMaterializedViewLogExec) executePurgeMaterializedViewLog(
 		return err
 	}
 	defer e.ReleaseSysSession(releaseCtx, purgeSctx)
+	defer clearSessionMutateBuffers(purgeSctx)
 	purgeSessVars := purgeSctx.GetSessionVars()
 	restorePurgeChunkRPC := purgeSessVars.DisableChunkRPCWithRestore()
 	defer restorePurgeChunkRPC()
@@ -2402,6 +2418,7 @@ func (e *PurgeMaterializedViewLogExec) executePurgeMaterializedViewLog(
 		return err
 	}
 	defer e.ReleaseSysSession(releaseCtx, deleteSctx)
+	defer clearSessionMutateBuffers(deleteSctx)
 	if collectorAware, ok := deleteSctx.(interface{ AttachStatsCollectorForInternalSession() func() }); ok {
 		// PURGE MATERIALIZED VIEW LOG deletes real MLOG rows through an internal
 		// session, so attach the stats collector to keep mysql.stats_meta.count in sync.
@@ -2466,6 +2483,7 @@ func (e *PurgeMaterializedViewLogExec) executePurgeMaterializedViewLog(
 		return err
 	}
 	defer e.ReleaseSysSession(releaseCtx, histSctx)
+	defer clearSessionMutateBuffers(histSctx)
 	histSQLExec := histSctx.GetSQLExecutor()
 	histLoc := histSctx.GetSessionVars().Location()
 
@@ -3884,6 +3902,7 @@ func (e *PurgeMaterializedViewLogExec) insertMLogPurgeHistFailedFallback(
 		return errors.Annotatef(err, "purge materialized view log: failed to open history session after error %v", finalErr)
 	}
 	defer e.ReleaseSysSession(releaseCtx, histSctx)
+	defer clearSessionMutateBuffers(histSctx)
 	histSQLExec := histSctx.GetSQLExecutor()
 	histLoc := histSctx.GetSessionVars().Location()
 
@@ -4156,6 +4175,7 @@ func (e *RefreshMaterializedViewExec) executeRefreshMaterializedView(kctx contex
 		return err
 	}
 	defer e.ReleaseSysSession(releaseCtx, refreshSctx)
+	defer clearSessionMutateBuffers(refreshSctx)
 	if collectorAware, ok := refreshSctx.(interface{ AttachStatsCollectorForInternalSession() func() }); ok {
 		// REFRESH MATERIALIZED VIEW runs real maintenance reads/writes against user tables, so
 		// reuse the full session collectors here, including index usage collection when enabled.
@@ -4237,6 +4257,7 @@ func (e *RefreshMaterializedViewExec) executeRefreshMaterializedView(kctx contex
 			return err
 		}
 		defer e.ReleaseSysSession(releaseCtx, histSctx)
+		defer clearSessionMutateBuffers(histSctx)
 		histSQLExec := histSctx.GetSQLExecutor()
 		histLoc := histSctx.GetSessionVars().Location()
 
@@ -4421,6 +4442,7 @@ func (e *RefreshMaterializedViewExec) executeRefreshMaterializedView(kctx contex
 		return err
 	}
 	defer e.ReleaseSysSession(releaseCtx, histSctx)
+	defer clearSessionMutateBuffers(histSctx)
 	histSQLExec := histSctx.GetSQLExecutor()
 	histLoc := histSctx.GetSessionVars().Location()
 
@@ -4710,6 +4732,7 @@ func (e *RefreshMaterializedViewExec) executeRefreshMaterializedViewCompleteOutO
 		return 0, err
 	}
 	defer e.ReleaseSysSession(releaseCtx, buildSctx)
+	defer clearSessionMutateBuffers(buildSctx)
 
 	buildSessVars := buildSctx.GetSessionVars()
 	restoreBuildChunkRPC := buildSessVars.DisableChunkRPCWithRestore()
@@ -6424,6 +6447,7 @@ func (e *RefreshMaterializedViewExec) insertRefreshHistFailedFallback(
 		return errors.Annotatef(err, "refresh materialized view: failed to open history session after error %v", finalErr)
 	}
 	defer e.ReleaseSysSession(releaseCtx, histSctx)
+	defer clearSessionMutateBuffers(histSctx)
 	histSQLExec := histSctx.GetSQLExecutor()
 	histLoc := histSctx.GetSessionVars().Location()
 

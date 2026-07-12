@@ -43,6 +43,13 @@ func (b *EncodeRowBuffer) Reset(capacity int) {
 	b.row = ensureCapacityAndReset(b.row, 0, capacity)
 }
 
+// Clear clears references held by the buffer while keeping its capacity for reuse.
+func (b *EncodeRowBuffer) Clear() {
+	clear(b.row[:cap(b.row)])
+	b.colIDs = b.colIDs[:0]
+	b.row = b.row[:0]
+}
+
 // AddColVal adds a column value to the buffer.
 func (b *EncodeRowBuffer) AddColVal(colID int64, val types.Datum) {
 	b.colIDs = append(b.colIDs, colID)
@@ -113,6 +120,12 @@ func (b *CheckRowBuffer) Reset(capacity int) {
 	b.rowToCheck = ensureCapacityAndReset(b.rowToCheck, 0, capacity)
 }
 
+// Clear clears references held by the buffer while keeping its capacity for reuse.
+func (b *CheckRowBuffer) Clear() {
+	clear(b.rowToCheck[:cap(b.rowToCheck)])
+	b.rowToCheck = b.rowToCheck[:0]
+}
+
 // MutateBuffers is a memory pool for table related memory allocation that aims to reuse memory
 // and saves allocation.
 // It is used in table operations like AddRecord/UpdateRecord/DeleteRecord.
@@ -166,6 +179,12 @@ func (b *MutateBuffers) GetCheckRowBufferWithCap(capacity int) *CheckRowBuffer {
 // GetWriteStmtBufs returns the `*variable.WriteStmtBufs`
 func (b *MutateBuffers) GetWriteStmtBufs() *variable.WriteStmtBufs {
 	return b.stmtBufs
+}
+
+// Clear clears references held by reusable mutation buffers while keeping their capacity for reuse.
+func (b *MutateBuffers) Clear() {
+	b.encodeRow.Clear()
+	b.checkRow.Clear()
 }
 
 // ensureCapacityAndReset is similar to the built-in make(),
