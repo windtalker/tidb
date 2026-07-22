@@ -182,6 +182,17 @@ func getHashJoins(super base.LogicalPlan, prop *property.PhysicalProperty) (join
 			appendHashJoins(getHashJoin(ge, p, prop, 1, false))
 			appendHashJoins(getHashJoin(ge, p, prop, 0, false))
 		}
+	case base.FullOuterJoin:
+		// For full outer join in phase-1, always use the regular hash join probe path.
+		// Build side is still chosen by cost / hints.
+		if forceLeftToBuild {
+			appendHashJoins(getHashJoin(ge, p, prop, 0, false))
+		} else if forceRightToBuild {
+			appendHashJoins(getHashJoin(ge, p, prop, 1, false))
+		} else {
+			appendHashJoins(getHashJoin(ge, p, prop, 1, false))
+			appendHashJoins(getHashJoin(ge, p, prop, 0, false))
+		}
 	}
 
 	forced = (p.PreferJoinType&h.PreferHashJoin > 0) || forceLeftToBuild || forceRightToBuild
@@ -2140,6 +2151,18 @@ func exhaustPhysicalPlans4LogicalJoin(super base.LogicalPlan, prop *property.Phy
 	if prop.MPPPartitionTp == property.BroadcastType {
 		return nil, false, nil
 	}
+	if p.JoinType == base.FullOuterJoin {
+		// Phase-1 restriction: full outer join runs on root hash join(v1) only.
+		if prop.IsFlashProp() {
+			return nil, true, nil
+		}
+		hashJoins, forced := getHashJoins(p, prop)
+		if forced && len(hashJoins) > 0 {
+			return hashJoins, true, nil
+		}
+		return hashJoins, true, nil
+	}
+
 	joins := make([]base.PhysicalPlan, 0, 8)
 	// we lift the p.canPushToTiFlash check here, because we want to generate all the plans to be decided by the attachment layer.
 	if prop.IndexJoinProp == nil {
