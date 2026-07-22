@@ -48,7 +48,7 @@ git diff --stat xufei/cp_mv_for_master_base..xufei/cp_mv_for_master
 
 | 文档 | 内容 | 状态 |
 | --- | --- | --- |
-| `docs/note/materialized_view/mv_master_port_non_mv_audit.md` | source diff 中非 MV candidate 的分类：倾向排除、MV prerequisite candidate、混合文件 | 初版完成 |
+| `docs/note/materialized_view/mv_master_port_non_mv_audit.md` | source diff 中非 MV candidate 的分类：已确认不 cp、MV prerequisite candidate、混合文件 | 已确认第一批不 cp 决策 |
 
 ## 状态说明
 
@@ -109,10 +109,10 @@ git diff --stat xufei/cp_mv_for_master_base..xufei/cp_mv_for_master
 | S7 | Manual refresh、show 和 infoschema executor | `pkg/executor/materialized_view.go`、`pkg/executor/show.go`、`pkg/executor/infoschema_reader.go` | direct MV | 待处理 | port refresh executor、show command、infoschema reader | refresh 和 infoschema tests | `待处理` | 包含 complete refresh 变体和用户可见 metadata 输出。 |
 | S8 | MV service 框架 | `pkg/mvservice`、`pkg/domain`、`pkg/server`、service metrics | direct MV | 待处理 | port 后台调度、cancel、backpressure 框架 | mvservice unit tests | `待处理` | 依赖 metadata、bootstrap table 和 internal session 变量。 |
 | S9 | Fast refresh planner | `pkg/planner/mview`、`pkg/planner/core`、plan guard、mview casetest | direct MV | 待处理 | 基于当前 planner 重写 fast-refresh plan derivation | planner casetest 和 unit tests | `待处理` | 包含 count/sum/min/max 和 bounded fast refresh planning。 |
-| S10 | Delta merge agg executor 和 aggregate prerequisite | `pkg/executor/mviewdeltamergeagg`、`pkg/executor/aggfuncs`、`pkg/expression/aggregation` | direct MV / prerequisite | 待处理 | port fast refresh 需要的 operator 和 aggregate 支持 | executor aggregate tests 和 mviewdeltamergeagg tests | `待处理` | port 前检查 master 是否已经有对应 aggregate 改动。 |
+| S10 | Delta merge agg executor 和 aggregate prerequisite | `pkg/executor/mviewdeltamergeagg`、`pkg/executor/aggfuncs`、`pkg/expression/aggregation` | direct MV / prerequisite | aggregate prerequisite 部分 `master 已有` | port fast refresh 需要的 MV operator；`SUM_INT`、`MAX_COUNT`、`MIN_COUNT` 直接适配 `origin/master` 现有实现 | executor aggregate tests 和 mviewdeltamergeagg tests | `待处理` | `SUM_INT`、`MAX_COUNT`、`MIN_COUNT` 已有 parser / expression / executor / tipb pushdown / checker 支持。 |
 | S11 | Observability、metrics、stats 和 GC 处理 | `pkg/metrics`、`pkg/statistics`、`pkg/store/gcworker`、refresh observability | direct MV / hardening | 待处理 | port metrics、history、analyze skip/schedule、GC safeguard | targeted metrics / stats / gc tests | `待处理` | 通常放在 core refresh 和 service 之后更稳。 |
 | S12 | BR / import / restore / system-table 交互 | `br`、`pkg/executor/import_into.go`、importer tests、realtikv import test | prerequisite / candidate | 待处理 | 审计 MV system table 和 initial build 是否依赖这些改动 | 如果 port，则跑 targeted BR/import tests | `待处理` | 部分改动可能 master 已有，或者和 MV 无关。 |
-| S13 | 非 MV candidate drift | `cmd/mirror`、`full_outer_join`、`active_active/commit_ts`、TopSQL、build helpers、root metadata | non-MV candidate | 待处理 | 分类为 `master 已有`、`prerequisite` 或 `排除` | 只有 port 时才跑 targeted test | `待处理` | 先不丢弃，但避免把无关 branch drift 带进 master。 |
+| S13 | 非 MV candidate drift | `cmd/mirror`、`full_outer_join`、`active_active/commit_ts`、TopSQL、build helpers、root metadata | non-MV candidate | 部分已确认 | agent docs、`.gitignore`、build helper、`cmd/mirror`、`google/skylark` 删除、root metadata、TopSQL network bytes、prepare dedup / plan cache、active-active commit TS 独立测试均不 cp；FULL OUTER JOIN 转入 prerequisite 审计；`_tidb_commit_ts` 底层能力 `origin/master` 已有，但 SQL 可引用策略仍需在 MV port 中处理；`SUM_INT`、`MAX_COUNT`、`MIN_COUNT` 已确认 `master` 已有 | 只有 port 时才跑 targeted test | `审计中` | integration result 不直接 cp，后续按 master port 后实际行为重新录制。 |
 | S14 | Bazel 和生成文件元数据 | `BUILD.bazel`、`DEPS.bzl`、`go.mod`、`go.sum`、generated parser output | build metadata | 待处理 | 源码改完后基于 master 重新生成 | `make bazel_prepare`；需要时跑 parser 生成命令 | `待处理` | 需要生成时不要手改 generated artifact。 |
 | S15 | Integration 和 regression tests | `tests/integrationtest`、executor/DDL/planner tests | tests | 待处理 | 按 slice port 测试和行为 | scoped integration / unit commands | `待处理` | 避免从无关 planner 改动带来大量 result churn。 |
 
@@ -127,19 +127,22 @@ docs/note/materialized_view/mv_master_port_non_mv_audit.md
 
 | Candidate | Source 路径 | 初始疑点 | 决策 |
 | --- | --- | --- | --- |
-| Full outer join | `pkg/planner/core/casetest/fulljoin`、join executor 改动、`tests/integrationtest/*full_outer_join*` | 可能和 MV 无关，但 planner/executor 改动可能影响 MV query 支持 | 待处理 |
-| Active-active commit TS | `tests/integrationtest/*active_active/commit_ts*` | 大概率是非 MV integration coverage | 待处理 |
-| TopSQL 改动 | `pkg/util/topsql` | 大概率是非 MV drift，除非 refresh observability 依赖它 | 待处理 |
+| Full outer join | `pkg/planner/core/casetest/fulljoin`、join executor 改动、`tests/integrationtest/*full_outer_join*` | 可能和 MV 无关，但 planner/executor 改动可能影响 MV query 支持 | 作为 MV prerequisite 审计 |
+| Active-active commit TS | `tests/integrationtest/*active_active/commit_ts*` | 大概率是非 MV integration coverage | 独立测试不 cp；`origin/master` 已有底层 `_tidb_commit_ts` 能力，但直接 SQL 引用仍被禁用，MV 内部 SQL 的使用方式后续单独处理 |
+| TopSQL 改动 | `pkg/util/topsql` | 大概率是非 MV drift，除非 refresh observability 依赖它 | 不 cp |
 | BR restore 改动 | `br/pkg/restore/snap_client` | 可能是 MV system table 和 metadata restore 所需 | 待处理 |
-| `cmd/mirror` | `cmd/mirror` | 大概率是无关工具 drift | 待处理 |
-| Build helper | `build/detect_base_branch.sh`、`build/get_changed_bazel_pkgs.sh` | 大概率是 workflow drift | 待处理 |
-| Root metadata | `AGENTS.md`、`DEPS.bzl`、`Makefile`、`OWNERS`、`OWNERS_ALIASES`、`go.mod`、`go.sum`、`.gitignore` | 避免带入无关仓库级 drift；如果确实需要依赖，应该从 master 重新生成 | 待处理 |
+| `cmd/mirror` | `cmd/mirror` | 大概率是无关工具 drift | 不 cp |
+| Build helper | `build/detect_base_branch.sh`、`build/get_changed_bazel_pkgs.sh` | 大概率是 workflow drift | 不 cp |
+| Root metadata | `AGENTS.md`、`DEPS.bzl`、`Makefile`、`OWNERS`、`OWNERS_ALIASES`、`go.mod`、`go.sum`、`.gitignore` | 避免带入无关仓库级 drift；如果确实需要依赖，应该从 master 重新生成 | agent docs、`.gitignore`、OWNERS、Makefile 等不 cp；必要 build metadata 后续从 master 重新生成 |
 
 ## 工作日志
 
 | 日期 | 目标分支 | Slice | 动作 | 结果 |
 | --- | --- | --- | --- | --- |
 | 2026-07-22 | `cp_mv_for_master_base` | S0 | 创建 source-boundary tracking 文档 | `已移植` |
+| 2026-07-22 | `cp_mv_for_master_base` | S13 | 记录第一批非 MV drift 人工确认决策 | agent docs、`.gitignore`、build helper、`cmd/mirror`、`google/skylark` 删除、root metadata、TopSQL network bytes、prepare dedup / plan cache、active-active commit TS 独立测试均不 cp；integration result 后续重新录制 |
+| 2026-07-22 | `cp_mv_for_master_base` | S13 | 确认最新 `origin/master` 的 `_tidb_commit_ts` 状态 | 底层 commitTS 下传和隐藏列建模已有；preprocess 仍禁止直接 SQL 引用，MV port 需要决定是完全放开还是限定 internal/MLog 使用 |
+| 2026-07-22 | `cp_mv_for_master_base` | S10/S13 | 确认最新 `origin/master` 的新 aggregate 状态 | `SUM_INT`、`MAX_COUNT`、`MIN_COUNT` 已有 parser / expression / executor / tipb pushdown / checker 支持；fast refresh 后续只适配 master 现有实现 |
 
 ## 常用命令
 
