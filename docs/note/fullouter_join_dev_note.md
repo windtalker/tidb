@@ -13,6 +13,12 @@ Phase 1 target:
 - `FULL OUTER JOIN ... ON ...` only
 - Feature-gated by `tidb_enable_full_outer_join` (default `OFF`)
 
+The master port also includes a later TiFlash follow-up:
+
+- TiFlash MPP shuffle HashJoin for full outer join
+- no TiFlash MPP broadcast join for full outer join
+- no root IndexJoin, MergeJoin, or HashJoin v2 full outer join support
+
 ---
 
 ## 2. Scope and Non-Goals
@@ -37,7 +43,7 @@ Phase 1 target:
 - HashJoin v2 support
 - MergeJoin support
 - IndexJoin support
-- TiFlash MPP / coprocessor pushdown for full join
+- TiFlash MPP broadcast join or non-MPP coprocessor join pushdown for full join
 
 ---
 
@@ -143,8 +149,9 @@ This avoids overloading a single `OuterFilter` semantics that is tied to one-sid
 - Full join nullability behavior corrected (both sides nullable)
 - Predicate pushdown preserves one-side ON conditions at join level
 - Join reorder and outer-join simplification/conversion paths guarded for full join semantics
-- Physical plan constrained to root HashJoin for full join
-- MPP/ToPB full join path blocked
+- Non-MPP physical plan constrained to root HashJoin for full join
+- TiFlash MPP shuffle HashJoin can encode `TypeFullOuterJoin` in TiPB
+- TiFlash MPP broadcast join remains blocked for full join
 
 ### 6.3 Executor (HashJoin v1)
 
@@ -181,13 +188,15 @@ Completed:
 - Safety handling in join reorder / simplify / convert rules
 - Unit and integration coverage for key full-join cases
 - `tidb_enable_full_outer_join` switch with default OFF
+- TiFlash MPP shuffle HashJoin pushdown follow-up
 
 Remaining (Phase 1 out-of-scope by design):
 
 - `NATURAL FULL OUTER JOIN`
 - `FULL OUTER JOIN ... USING (...)`
 - Cascades planner full-join support
-- HashJoin v2 / MergeJoin / IndexJoin / MPP full-join support
+- HashJoin v2 / MergeJoin / IndexJoin full-join support
+- TiFlash MPP broadcast join and non-MPP coprocessor join pushdown
 
 ---
 

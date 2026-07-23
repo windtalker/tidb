@@ -11,6 +11,8 @@
 
 - 原始 PR: https://github.com/pingcap/tidb/pull/68919
 - merge commit: `6ba9bb6053d6c9d850ab0781d6912980491e5c6b`
+- TiFlash pushdown follow-up source commit:
+  `3872db839ad65516640d2349fd25c1aeeda4ab4d`
 - 原始 base branch: `feature/release-8.5-materialized-view`
 - 关联 issue: `pingcap/tidb#18023`
 - 当前 port branch: `full_outer_join_for_master`
@@ -24,6 +26,7 @@
 - `tidb_enable_full_outer_join` sysvar，默认关闭。
 - planner 中 `FullOuterJoin` 逻辑 join type、物理计划生成、cost、predicate 和 join reorder guard。
 - executor hash join v1 的 full outer join 行为。
+- TiFlash MPP shuffle hash join 的 full outer join pushdown。
 - full outer join 的 planner unit/casetest、executor unit test 和 integration test。
 - 原 PR 中的 full outer join design note。
 
@@ -52,6 +55,7 @@
 | P4 | port hash join v1 executor full outer join 行为 | 已完成 |
 | P5 | port / 重录 targeted tests 和 integration result | 已完成 |
 | P6 | fmt、bazel metadata、targeted validation | 已完成 targeted 验证；Ready 验证有本地环境阻塞 |
+| P7 | port TiFlash MPP shuffle full outer join pushdown | 已验证 |
 
 ## 验证计划
 
