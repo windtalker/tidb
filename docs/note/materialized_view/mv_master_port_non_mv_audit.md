@@ -5,7 +5,7 @@
 Source range:
 
 ```text
-xufei/cp_mv_for_master_base..xufei/cp_mv_for_master
+f08c648a20380ea723449c6c3eb5b171d96fd567..6910cef840612ee85e171adb19d3e427697a65da
 ```
 
 本文档的目标不是决定最终实现细节，而是先回答两个问题：
@@ -90,14 +90,14 @@ MV 实现或设计文档明确依赖这些能力。
 筛出名字上不带 MV 的文件：
 
 ```bash
-git diff --name-status xufei/cp_mv_for_master_base..xufei/cp_mv_for_master \
+git diff --name-status f08c648a20380ea723449c6c3eb5b171d96fd567..6910cef840612ee85e171adb19d3e427697a65da \
   | rg -v '(materialized|Materialized|mview|MView|mv_|mlog|MLog|MLOG|tidb_mview|tidb_mlog|TIDB_MVIEW|TIDB_MLOG)'
 ```
 
 查看非 MV candidate 的 diff 概览：
 
 ```bash
-git diff --stat xufei/cp_mv_for_master_base..xufei/cp_mv_for_master -- \
+git diff --stat f08c648a20380ea723449c6c3eb5b171d96fd567..6910cef840612ee85e171adb19d3e427697a65da -- \
   br cmd build pkg/util/topsql pkg/executor/join \
   pkg/planner/core/casetest/fulljoin \
   tests/integrationtest/t/active_active tests/integrationtest/r/active_active \

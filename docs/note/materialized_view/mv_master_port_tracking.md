@@ -14,7 +14,7 @@ head: xufei/cp_mv_for_master
 head commit: 6910cef840612ee85e171adb19d3e427697a65da
 
 source range:
-  xufei/cp_mv_for_master_base..xufei/cp_mv_for_master
+  f08c648a20380ea723449c6c3eb5b171d96fd567..6910cef840612ee85e171adb19d3e427697a65da
 ```
 
 当前 source diff 规模：
@@ -23,11 +23,11 @@ source range:
 499 files changed, 97628 insertions(+), 25112 deletions(-)
 ```
 
-后续 inventory 和 review 都以这个 range 为准：
+后续 inventory 和 review 都以这个 commit range 为准：
 
 ```bash
-git diff --name-status xufei/cp_mv_for_master_base..xufei/cp_mv_for_master
-git diff --stat xufei/cp_mv_for_master_base..xufei/cp_mv_for_master
+git diff --name-status f08c648a20380ea723449c6c3eb5b171d96fd567..6910cef840612ee85e171adb19d3e427697a65da
+git diff --stat f08c648a20380ea723449c6c3eb5b171d96fd567..6910cef840612ee85e171adb19d3e427697a65da
 ```
 
 ## Port 规则
@@ -149,17 +149,17 @@ docs/note/materialized_view/mv_master_port_non_mv_audit.md
 查看固定 source range：
 
 ```bash
-git diff --name-status xufei/cp_mv_for_master_base..xufei/cp_mv_for_master
-git diff --stat xufei/cp_mv_for_master_base..xufei/cp_mv_for_master
+git diff --name-status f08c648a20380ea723449c6c3eb5b171d96fd567..6910cef840612ee85e171adb19d3e427697a65da
+git diff --stat f08c648a20380ea723449c6c3eb5b171d96fd567..6910cef840612ee85e171adb19d3e427697a65da
 ```
 
 查看某一组路径：
 
 ```bash
-git diff xufei/cp_mv_for_master_base..xufei/cp_mv_for_master -- pkg/parser pkg/parser/ast
-git diff xufei/cp_mv_for_master_base..xufei/cp_mv_for_master -- pkg/ddl
-git diff xufei/cp_mv_for_master_base..xufei/cp_mv_for_master -- pkg/executor pkg/table
-git diff xufei/cp_mv_for_master_base..xufei/cp_mv_for_master -- pkg/planner pkg/mvservice
+git diff f08c648a20380ea723449c6c3eb5b171d96fd567..6910cef840612ee85e171adb19d3e427697a65da -- pkg/parser pkg/parser/ast
+git diff f08c648a20380ea723449c6c3eb5b171d96fd567..6910cef840612ee85e171adb19d3e427697a65da -- pkg/ddl
+git diff f08c648a20380ea723449c6c3eb5b171d96fd567..6910cef840612ee85e171adb19d3e427697a65da -- pkg/executor pkg/table
+git diff f08c648a20380ea723449c6c3eb5b171d96fd567..6910cef840612ee85e171adb19d3e427697a65da -- pkg/planner pkg/mvservice
 ```
 
 检查 `master` 是否已有某个符号或行为：
@@ -171,10 +171,12 @@ git grep -n "<symbol-or-keyword>" master -- <path-or-dir>
 按区域统计 source diff：
 
 ```bash
-git diff --name-only xufei/cp_mv_for_master_base..xufei/cp_mv_for_master \
+git diff --name-only f08c648a20380ea723449c6c3eb5b171d96fd567..6910cef840612ee85e171adb19d3e427697a65da \
   | awk -F/ '{ if ($1 == "pkg") print $1 "/" $2; else if ($1 == "tests") print $1 "/" $2; else if ($1 == "docs") print $1 "/" $2; else print $1 }' \
   | sort | uniq -c | sort -nr
 ```
+
+> 说明：`base`/`head` 仍保留分支名只是为了方便理解来源，真正的审计和复用命令都固定到上面的 commit range，避免 tracker 分支后续继续提交时污染 diff 结果。
 
 ## 待确认问题
 
