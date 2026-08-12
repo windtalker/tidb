@@ -1759,10 +1759,14 @@ func TestMaterializedViewFastRefreshRejectsHazardousPurgeHist(t *testing.T) {
 	mlogID, err := strconv.ParseInt(fmt.Sprintf("%v", mlogIDRows[0][0]), 10, 64)
 	require.NoError(t, err)
 
-	lastSuccessRows := tk.MustQuery(fmt.Sprintf("select LAST_SUCCESS_READ_TSO from mysql.tidb_mview_refresh_info where MVIEW_ID = %d", mvID)).Rows()
-	require.Len(t, lastSuccessRows, 1)
-	lastSuccessReadTSO, err := strconv.ParseUint(fmt.Sprintf("%v", lastSuccessRows[0][0]), 10, 64)
-	require.NoError(t, err)
+	readLastSuccessReadTSO := func() uint64 {
+		lastSuccessRows := tk.MustQuery(fmt.Sprintf("select LAST_SUCCESS_READ_TSO from mysql.tidb_mview_refresh_info where MVIEW_ID = %d", mvID)).Rows()
+		require.Len(t, lastSuccessRows, 1)
+		lastSuccessReadTSO, err := strconv.ParseUint(fmt.Sprintf("%v", lastSuccessRows[0][0]), 10, 64)
+		require.NoError(t, err)
+		return lastSuccessReadTSO
+	}
+	lastSuccessReadTSO := readLastSuccessReadTSO()
 
 	tk.MustExec(fmt.Sprintf("update mysql.tidb_mlog_purge_info set LAST_PURGED_TSO = %d where MLOG_ID = %d", lastSuccessReadTSO, mlogID))
 	tk.MustExec(fmt.Sprintf(
@@ -1782,6 +1786,41 @@ func TestMaterializedViewFastRefreshRejectsHazardousPurgeHist(t *testing.T) {
 	require.Error(t, err)
 	require.ErrorContains(t, err, "materialized view log may have been purged beyond LAST_SUCCESS_READ_TSO")
 
+	tk.MustQuery(fmt.Sprintf("select LAST_SUCCESS_READ_TSO from mysql.tidb_mview_refresh_info where MVIEW_ID = %d", mvID)).
+		Check(testkit.Rows(fmt.Sprintf("%d", lastSuccessReadTSO)))
+
+	tk.MustExec(fmt.Sprintf("delete from mysql.tidb_mlog_purge_hist where MLOG_ID = %d", mlogID))
+	tk.MustExec(fmt.Sprintf("update mysql.tidb_mlog_purge_info set LAST_PURGED_TSO = %d where MLOG_ID = %d", lastSuccessReadTSO, mlogID))
+	tk.MustExec(fmt.Sprintf(
+		`insert into mysql.tidb_mlog_purge_hist (
+			PURGE_JOB_ID, MLOG_ID, BASE_TABLE_SCHEMA, BASE_TABLE_NAME, PURGE_METHOD,
+			PURGE_TIME, PURGE_ROWS, PURGE_STATUS, PURGE_CUTOFF_TSO, PURGE_FAILED_REASON
+		) values (
+			%[1]d, %[2]d, 'test', 't_refresh_purge_guard', 'manual',
+			now(6), 0, 'failed', NULL, 'mock failed before delete'
+		)`,
+		lastSuccessReadTSO+1500,
+		mlogID,
+	))
+	tk.MustExec("refresh materialized view mv_refresh_purge_guard fast")
+	lastSuccessReadTSO = readLastSuccessReadTSO()
+
+	tk.MustExec("insert into t_refresh_purge_guard values (4, 40)")
+	tk.MustExec(fmt.Sprintf(
+		`insert into mysql.tidb_mlog_purge_hist (
+			PURGE_JOB_ID, MLOG_ID, BASE_TABLE_SCHEMA, BASE_TABLE_NAME, PURGE_METHOD,
+			PURGE_TIME, PURGE_ROWS, PURGE_STATUS, PURGE_CUTOFF_TSO, PURGE_FAILED_REASON
+		) values (
+			%[1]d, %[2]d, 'test', 't_refresh_purge_guard', 'manual',
+			now(6), 1, 'failed', %[3]d, 'mock failed after delete'
+		)`,
+		lastSuccessReadTSO+2000,
+		mlogID,
+		lastSuccessReadTSO+1,
+	))
+	err = tk.ExecToErr("refresh materialized view mv_refresh_purge_guard fast")
+	require.Error(t, err)
+	require.ErrorContains(t, err, "materialized view log may have been purged beyond LAST_SUCCESS_READ_TSO")
 	tk.MustQuery(fmt.Sprintf("select LAST_SUCCESS_READ_TSO from mysql.tidb_mview_refresh_info where MVIEW_ID = %d", mvID)).
 		Check(testkit.Rows(fmt.Sprintf("%d", lastSuccessReadTSO)))
 
@@ -1831,7 +1870,7 @@ func TestMaterializedViewFastRefreshRejectsHazardousPurgeHist(t *testing.T) {
 			%[1]d, %[2]d, 'test', 't_refresh_purge_guard', 'manual',
 			now(6), 0, 'running', %[3]d, now(6)
 		)`,
-		lastSuccessReadTSO+2000,
+		lastSuccessReadTSO+3000,
 		mlogID,
 		lastSuccessReadTSO+1,
 	))

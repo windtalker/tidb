@@ -2497,6 +2497,7 @@ func (e *PurgeMaterializedViewLogExec) executePurgeMaterializedViewLog(
 			purgeErrMsg = *purgeFailedReason
 		}
 		purgeEndAt := time.Now()
+		clearPurgeCutoffTSO := totalPurgeRows == 0
 		if histErr := finalizeMLogPurgeHistWithRetry(
 			finalizeCtx,
 			histSQLExec,
@@ -2507,6 +2508,7 @@ func (e *PurgeMaterializedViewLogExec) executePurgeMaterializedViewLog(
 			histTime(purgeEndAt, histLoc),
 			totalPurgeRows,
 			&purgeErrMsg,
+			clearPurgeCutoffTSO,
 		); histErr != nil {
 			return errors.Annotatef(histErr, "purge materialized view log: failed to finalize purge history after error %v", finalErr)
 		}
@@ -2532,6 +2534,7 @@ func (e *PurgeMaterializedViewLogExec) executePurgeMaterializedViewLog(
 			histTime(purgeEndAt, histLoc),
 			totalPurgeRows,
 			nil,
+			false,
 		)
 	}
 	failpoint.Inject("mockPurgeMaterializedViewLogErrorBeforeInsertHist", func(val failpoint.Value) {
@@ -3920,10 +3923,15 @@ func finalizeMLogPurgeHist(
 	purgeEndAt time.Time,
 	purgeRows int64,
 	purgeFailedReason *string,
+	clearPurgeCutoffTSO bool,
 ) error {
 	var purgeFailedReasonArg any
 	if purgeFailedReason != nil {
 		purgeFailedReasonArg = *purgeFailedReason
+	}
+	var purgeCutoffTSOAssignment string
+	if clearPurgeCutoffTSO {
+		purgeCutoffTSOAssignment = ",\n\t\tPURGE_CUTOFF_TSO = NULL"
 	}
 	updateSQL := `UPDATE mysql.tidb_mlog_purge_hist
 	SET
@@ -3931,7 +3939,7 @@ func finalizeMLogPurgeHist(
 		PURGE_ROWS = %?,
 		PURGE_DURATION_SEC = %?,
 		PURGE_STATUS = %?,
-		PURGE_FAILED_REASON = %?
+		PURGE_FAILED_REASON = %?` + purgeCutoffTSOAssignment + `
 	WHERE PURGE_JOB_ID = %?`
 	_, err := sqlExec.ExecuteInternal(
 		kctx,
@@ -3967,6 +3975,7 @@ func finalizeMLogPurgeHistWithRetry(
 	purgeEndAt time.Time,
 	purgeRows int64,
 	purgeFailedReason *string,
+	clearPurgeCutoffTSO bool,
 ) error {
 	firstErr := finalizeMLogPurgeHist(
 		kctx,
@@ -3977,6 +3986,7 @@ func finalizeMLogPurgeHistWithRetry(
 		purgeEndAt,
 		purgeRows,
 		purgeFailedReason,
+		clearPurgeCutoffTSO,
 	)
 	if firstErr == nil {
 		return nil
@@ -3990,6 +4000,7 @@ func finalizeMLogPurgeHistWithRetry(
 		purgeEndAt,
 		purgeRows,
 		purgeFailedReason,
+		clearPurgeCutoffTSO,
 	)
 	if retryErr == nil {
 		return nil
@@ -5619,7 +5630,7 @@ func readLatestMLogPurgeCutoffFenceTSO(
 		kctx,
 		sqlExec,
 		`SELECT PURGE_CUTOFF_TSO
-FROM mysql.tidb_mlog_purge_hist
+FROM mysql.tidb_mlog_purge_hist FORCE INDEX(PRIMARY)
 WHERE MLOG_ID = %?
   AND PURGE_CUTOFF_TSO IS NOT NULL
 ORDER BY PURGE_JOB_ID DESC
@@ -5639,8 +5650,8 @@ LIMIT 1`,
 }
 
 // readLatestHazardousMLogPurgeCutoffTSO relies on purge-side monotonic cutoff
-// enforcement: purge skips before writing history if its newly computed
-// safePurgeTSO is lower than the latest recorded non-NULL PURGE_CUTOFF_TSO.
+// enforcement. PURGE_CUTOFF_TSO is kept non-NULL only for history rows that
+// participate in the refresh hazard fence.
 func readLatestHazardousMLogPurgeCutoffTSO(
 	kctx context.Context,
 	sqlExec sqlexec.SQLExecutor,
@@ -5650,18 +5661,12 @@ func readLatestHazardousMLogPurgeCutoffTSO(
 		kctx,
 		sqlExec,
 		`SELECT PURGE_CUTOFF_TSO
-FROM mysql.tidb_mlog_purge_hist
+FROM mysql.tidb_mlog_purge_hist FORCE INDEX(PRIMARY)
 WHERE MLOG_ID = %?
-  AND (
-    PURGE_STATUS = %?
-    OR PURGE_STATUS = %?
-    OR PURGE_ROWS > 0
-  )
+  AND PURGE_CUTOFF_TSO IS NOT NULL
 ORDER BY PURGE_JOB_ID DESC
 LIMIT 1`,
 		mlogID,
-		purgeHistStatusRunning,
-		purgeHistStatusOrphaned,
 	)
 	if err != nil {
 		if infoschema.ErrTableNotExists.Equal(err) {
