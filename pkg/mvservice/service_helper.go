@@ -1092,7 +1092,6 @@ func deriveMaterializedScheduleNextTimeForManualCancel(
 	nextAt, shouldUpdate, err := expression.DeriveMaterializedScheduleNextTime(
 		ctx,
 		sctx,
-		sctx,
 		startExpr,
 		nextExpr,
 		scheduleSQLMode,

@@ -1290,8 +1290,8 @@ func setCreateMaterializedViewScheduleEvalSession(
 	originalStmtTZ := sessVars.StmtCtx.TimeZone()
 
 	sessVars.SQLMode = sqlMode
-	sessVars.StmtCtx.SetErrLevels(reorgErrLevelsWithSQLMode(sqlMode))
-	sessVars.StmtCtx.SetTypeFlags(reorgTypeFlagsWithSQLMode(sqlMode))
+	sessVars.StmtCtx.SetTypeFlags(expression.MaterializedScheduleTypeFlagsWithSQLMode(sqlMode))
+	sessVars.StmtCtx.SetErrLevels(expression.MaterializedScheduleErrLevelsWithSQLMode(sqlMode))
 
 	sessVars.TimeZone = scheduleTimeZone
 	sessVars.StmtCtx.SetTimeZone(scheduleTimeZone)

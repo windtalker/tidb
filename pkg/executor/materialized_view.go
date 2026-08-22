@@ -30,7 +30,6 @@ import (
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/tidb/pkg/ddl"
 	"github.com/pingcap/tidb/pkg/domain"
-	"github.com/pingcap/tidb/pkg/errctx"
 	"github.com/pingcap/tidb/pkg/executor/internal/exec"
 	executil "github.com/pingcap/tidb/pkg/executor/internal/util"
 	"github.com/pingcap/tidb/pkg/executor/join"
@@ -2650,7 +2649,6 @@ func (e *PurgeMaterializedViewLogExec) executePurgeMaterializedViewLog(
 				kctx,
 				e.Ctx().GetSessionVars(),
 				scheduleEvalSctx,
-				purgeSctx,
 				countSQLExec,
 				countSessVars,
 				mlogInfo,
@@ -2751,7 +2749,6 @@ func (e *PurgeMaterializedViewLogExec) executePurgeMaterializedViewLog(
 	nextPurgeUnixSeconds, shouldUpdateNextPurgeUnixSeconds, err := deriveRuntimeMaterializedScheduleNextUnixSeconds(
 		kctx,
 		scheduleEvalSctx,
-		purgeSctx,
 		mlogInfo.PurgeStartWith,
 		mlogInfo.PurgeNext,
 		isInternalSQL,
@@ -3181,7 +3178,6 @@ func loadMLogPurgeThrottleConfig(
 func deriveMLogPurgeThrottleDeadline(
 	kctx context.Context,
 	evalSctx sessionctx.Context,
-	templateSctx sessionctx.Context,
 	mlogInfo *model.MaterializedViewLogInfo,
 	isInternalSQL bool,
 	schemaName string,
@@ -3207,7 +3203,6 @@ func deriveMLogPurgeThrottleDeadline(
 		nextPurgeUnixSeconds, shouldUpdateNextPurgeUnixSeconds, err := deriveRuntimeMaterializedScheduleNextUnixSeconds(
 			kctx,
 			evalSctx,
-			templateSctx,
 			mlogInfo.PurgeStartWith,
 			mlogInfo.PurgeNext,
 			true,
@@ -3242,7 +3237,6 @@ func tryBuildMLogPurgeDeletePlanBestEffort(
 	kctx context.Context,
 	sessVars *variable.SessionVars,
 	evalSctx sessionctx.Context,
-	templateSctx sessionctx.Context,
 	sqlExec sqlexec.SQLExecutor,
 	countSessVars *variable.SessionVars,
 	mlogInfo *model.MaterializedViewLogInfo,
@@ -3298,7 +3292,6 @@ func tryBuildMLogPurgeDeletePlanBestEffort(
 	throttleDeadline, err := deriveMLogPurgeThrottleDeadline(
 		kctx,
 		evalSctx,
-		templateSctx,
 		mlogInfo,
 		isInternalSQL,
 		schemaName,
@@ -4637,7 +4630,6 @@ func (e *RefreshMaterializedViewExec) executeRefreshMaterializedView(kctx contex
 	nextRefreshUnixSeconds, shouldUpdateNextRefreshUnixSeconds, err := deriveRuntimeMaterializedScheduleNextUnixSeconds(
 		kctx,
 		scheduleEvalSctx,
-		refreshSctx,
 		tblInfo.MaterializedView.RefreshStartWith,
 		tblInfo.MaterializedView.RefreshNext,
 		isInternalSQL,
@@ -4889,7 +4881,6 @@ func (e *RefreshMaterializedViewExec) executeRefreshMaterializedViewCompleteOutO
 			nextRefreshUnixSeconds, shouldUpdateNextRefreshUnixSeconds, scheduleErr = deriveRuntimeMaterializedScheduleNextUnixSeconds(
 				kctx,
 				scheduleEvalSctx,
-				refreshSctx,
 				tblInfo.MaterializedView.RefreshStartWith,
 				tblInfo.MaterializedView.RefreshNext,
 				isInternalSQL,
@@ -5247,8 +5238,8 @@ func initRefreshMaterializedViewSession(
 	sessVars.SetStatusFlag(mysql.ServerStatusNoBackslashEscaped, sessVars.SQLMode.HasNoBackslashEscapesMode())
 	sessVars.TimeZone = loc
 	sessVars.StmtCtx.SetTimeZone(loc)
-	sessVars.StmtCtx.SetTypeFlags(refreshTypeFlagsWithSQLMode(sessVars.SQLMode))
-	sessVars.StmtCtx.SetErrLevels(refreshErrLevelsWithSQLMode(sessVars.SQLMode))
+	sessVars.StmtCtx.SetTypeFlags(expression.MaterializedScheduleTypeFlagsWithSQLMode(sessVars.SQLMode))
+	sessVars.StmtCtx.SetErrLevels(expression.MaterializedScheduleErrLevelsWithSQLMode(sessVars.SQLMode))
 
 	return func() {
 		sessVars.SQLMode = origSQLMode
@@ -5258,26 +5249,6 @@ func initRefreshMaterializedViewSession(
 		sessVars.StmtCtx.SetTypeFlags(origTypeFlags)
 		sessVars.StmtCtx.SetErrLevels(origErrLevels)
 	}, nil
-}
-
-func refreshTypeFlagsWithSQLMode(mode mysql.SQLMode) types.Flags {
-	return types.StrictFlags.
-		WithTruncateAsWarning(!mode.HasStrictMode()).
-		WithIgnoreInvalidDateErr(mode.HasAllowInvalidDatesMode()).
-		WithIgnoreZeroInDate(!mode.HasStrictMode() || mode.HasAllowInvalidDatesMode()).
-		WithCastTimeToYearThroughConcat(true)
-}
-
-func refreshErrLevelsWithSQLMode(mode mysql.SQLMode) errctx.LevelMap {
-	return errctx.LevelMap{
-		errctx.ErrGroupTruncate:  errctx.ResolveErrLevel(false, !mode.HasStrictMode()),
-		errctx.ErrGroupBadNull:   errctx.ResolveErrLevel(false, !mode.HasStrictMode()),
-		errctx.ErrGroupNoDefault: errctx.ResolveErrLevel(false, !mode.HasStrictMode()),
-		errctx.ErrGroupDividedByZero: errctx.ResolveErrLevel(
-			!mode.HasErrorForDivisionByZeroMode(),
-			!mode.HasStrictMode(),
-		),
-	}
 }
 
 func validateRefreshMaterializedViewStmt(s *ast.RefreshMaterializedViewStmt, isInternalSQL bool) (ast.RefreshMaterializedViewMode, string, error) {
@@ -6067,7 +6038,6 @@ func collectMLogScanPlanIDs(plan plannercorebase.PhysicalPlan, mlogTableID int64
 func deriveRuntimeMaterializedScheduleNextUnixSeconds(
 	kctx context.Context,
 	evalSctx sessionctx.Context,
-	templateSctx sessionctx.Context,
 	startExpr string,
 	nextExpr string,
 	isInternalSQL bool,
@@ -6081,7 +6051,6 @@ func deriveRuntimeMaterializedScheduleNextUnixSeconds(
 	nextAt, shouldUpdate, err := expression.DeriveMaterializedScheduleNextTime(
 		kctx,
 		evalSctx,
-		templateSctx,
 		startExpr,
 		nextExpr,
 		scheduleSQLMode,

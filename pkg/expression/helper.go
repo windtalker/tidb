@@ -23,6 +23,7 @@ import (
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/failpoint"
+	"github.com/pingcap/tidb/pkg/errctx"
 	"github.com/pingcap/tidb/pkg/parser/ast"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
 	"github.com/pingcap/tidb/pkg/parser/terror"
@@ -224,13 +225,12 @@ func getStmtTimestamp(ctx EvalContext) (now time.Time, err error) {
 func DeriveMaterializedScheduleNextTime(
 	kctx context.Context,
 	evalSctx sessionctx.Context,
-	templateSctx sessionctx.Context,
 	startExpr string,
 	nextExpr string,
 	scheduleSQLMode mysql.SQLMode,
 	scheduleTimeZone *time.Location,
 ) (*types.Time, bool, error) {
-	if evalSctx == nil || templateSctx == nil {
+	if evalSctx == nil {
 		return nil, false, errors.New("runtime materialized schedule eval session is unavailable")
 	}
 	if scheduleTimeZone == nil {
@@ -242,7 +242,6 @@ func DeriveMaterializedScheduleNextTime(
 		nextAt, err := evalMaterializedScheduleExprToDatetime(
 			kctx,
 			evalSctx,
-			templateSctx,
 			nextExpr,
 			scheduleSQLMode,
 			scheduleTimeZone,
@@ -276,16 +275,38 @@ func MaterializedScheduleTimeToUnixSeconds(t *types.Time, scheduleTimeZone *time
 	return &unixSeconds, nil
 }
 
+// MaterializedScheduleTypeFlagsWithSQLMode derives the type conversion flags
+// used to build and evaluate materialized view schedule expressions.
+func MaterializedScheduleTypeFlagsWithSQLMode(mode mysql.SQLMode) types.Flags {
+	return types.StrictFlags.
+		WithTruncateAsWarning(!mode.HasStrictMode()).
+		WithIgnoreInvalidDateErr(mode.HasAllowInvalidDatesMode()).
+		WithIgnoreZeroInDate(!mode.HasStrictMode() || mode.HasAllowInvalidDatesMode()).
+		WithCastTimeToYearThroughConcat(true)
+}
+
+// MaterializedScheduleErrLevelsWithSQLMode derives the error levels used to
+// build and evaluate materialized view schedule expressions.
+func MaterializedScheduleErrLevelsWithSQLMode(mode mysql.SQLMode) errctx.LevelMap {
+	return errctx.LevelMap{
+		errctx.ErrGroupTruncate:  errctx.ResolveErrLevel(false, !mode.HasStrictMode()),
+		errctx.ErrGroupBadNull:   errctx.ResolveErrLevel(false, !mode.HasStrictMode()),
+		errctx.ErrGroupNoDefault: errctx.ResolveErrLevel(false, !mode.HasStrictMode()),
+		errctx.ErrGroupDividedByZero: errctx.ResolveErrLevel(
+			!mode.HasErrorForDivisionByZeroMode(),
+			!mode.HasStrictMode(),
+		),
+	}
+}
+
 func evalMaterializedScheduleExprToDatetime(
 	kctx context.Context,
 	evalSctx sessionctx.Context,
-	templateSctx sessionctx.Context,
 	exprSQL string,
 	scheduleSQLMode mysql.SQLMode,
 	scheduleTimeZone *time.Location,
 ) (*types.Time, error) {
 	sessVars := evalSctx.GetSessionVars()
-	templateVars := templateSctx.GetSessionVars()
 	origSQLMode := sessVars.SQLMode
 	origTypeFlags := sessVars.StmtCtx.TypeFlags()
 	origErrLevels := sessVars.StmtCtx.ErrLevels()
@@ -293,8 +314,8 @@ func evalMaterializedScheduleExprToDatetime(
 	origStmtTimeZone := sessVars.StmtCtx.TimeZone()
 	sessVars.SQLMode = scheduleSQLMode
 	sessVars.SetStatusFlag(mysql.ServerStatusNoBackslashEscaped, sessVars.SQLMode.HasNoBackslashEscapesMode())
-	sessVars.StmtCtx.SetTypeFlags(templateVars.StmtCtx.TypeFlags())
-	sessVars.StmtCtx.SetErrLevels(templateVars.StmtCtx.ErrLevels())
+	sessVars.StmtCtx.SetTypeFlags(MaterializedScheduleTypeFlagsWithSQLMode(scheduleSQLMode))
+	sessVars.StmtCtx.SetErrLevels(MaterializedScheduleErrLevelsWithSQLMode(scheduleSQLMode))
 	sessVars.TimeZone = scheduleTimeZone
 	sessVars.StmtCtx.SetTimeZone(scheduleTimeZone)
 	defer func() {

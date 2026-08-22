@@ -364,7 +364,6 @@ func TestDeriveMLogPurgeThrottleDeadline(t *testing.T) {
 			context.Background(),
 			nil,
 			nil,
-			nil,
 			false,
 			"test",
 			"t",
@@ -381,7 +380,6 @@ func TestDeriveMLogPurgeThrottleDeadline(t *testing.T) {
 
 		deadline, err := deriveMLogPurgeThrottleDeadline(
 			context.Background(),
-			nil,
 			nil,
 			nil,
 			false,
