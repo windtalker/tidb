@@ -218,25 +218,35 @@ func getStmtTimestamp(ctx EvalContext) (now time.Time, err error) {
 	return ctx.CurrentTime()
 }
 
-// DeriveMaterializedScheduleNextTimeUTC evaluates the runtime NEXT expression and
-// returns the next execution time in UTC. Runtime scheduling only depends on NEXT:
-// when NEXT is absent, callers should still update NEXT_TIME to NULL to clear
-// stale schedule state.
-func DeriveMaterializedScheduleNextTimeUTC(
+// DeriveMaterializedScheduleNextTime evaluates the runtime NEXT expression in
+// scheduleTimeZone. Runtime scheduling only depends on NEXT: when NEXT is
+// absent, callers should still clear stale persisted schedule state.
+func DeriveMaterializedScheduleNextTime(
 	kctx context.Context,
 	evalSctx sessionctx.Context,
 	templateSctx sessionctx.Context,
 	startExpr string,
 	nextExpr string,
 	scheduleSQLMode mysql.SQLMode,
+	scheduleTimeZone *time.Location,
 ) (*types.Time, bool, error) {
 	if evalSctx == nil || templateSctx == nil {
 		return nil, false, errors.New("runtime materialized schedule eval session is unavailable")
 	}
+	if scheduleTimeZone == nil {
+		return nil, false, errors.New("runtime materialized schedule timezone is unavailable")
+	}
 	nextExpr = strings.TrimSpace(nextExpr)
 
 	if nextExpr != "" {
-		nextAt, err := evalMaterializedScheduleExprToDatetimeUTC(kctx, evalSctx, templateSctx, nextExpr, scheduleSQLMode)
+		nextAt, err := evalMaterializedScheduleExprToDatetime(
+			kctx,
+			evalSctx,
+			templateSctx,
+			nextExpr,
+			scheduleSQLMode,
+			scheduleTimeZone,
+		)
 		if err != nil {
 			return nil, true, err
 		}
@@ -248,12 +258,31 @@ func DeriveMaterializedScheduleNextTimeUTC(
 	return nil, true, nil
 }
 
-func evalMaterializedScheduleExprToDatetimeUTC(
+// MaterializedScheduleTimeToUnixSeconds converts a materialized schedule time
+// interpreted in scheduleTimeZone to Unix seconds for persisting in internal
+// MV system tables.
+func MaterializedScheduleTimeToUnixSeconds(t *types.Time, scheduleTimeZone *time.Location) (*int64, error) {
+	if t == nil {
+		return nil, nil
+	}
+	if scheduleTimeZone == nil {
+		return nil, errors.New("materialized schedule timezone is unavailable")
+	}
+	goTime, err := t.GoTime(scheduleTimeZone)
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+	unixSeconds := goTime.Unix()
+	return &unixSeconds, nil
+}
+
+func evalMaterializedScheduleExprToDatetime(
 	kctx context.Context,
 	evalSctx sessionctx.Context,
 	templateSctx sessionctx.Context,
 	exprSQL string,
 	scheduleSQLMode mysql.SQLMode,
+	scheduleTimeZone *time.Location,
 ) (*types.Time, error) {
 	sessVars := evalSctx.GetSessionVars()
 	templateVars := templateSctx.GetSessionVars()
@@ -266,8 +295,8 @@ func evalMaterializedScheduleExprToDatetimeUTC(
 	sessVars.SetStatusFlag(mysql.ServerStatusNoBackslashEscaped, sessVars.SQLMode.HasNoBackslashEscapesMode())
 	sessVars.StmtCtx.SetTypeFlags(templateVars.StmtCtx.TypeFlags())
 	sessVars.StmtCtx.SetErrLevels(templateVars.StmtCtx.ErrLevels())
-	sessVars.TimeZone = time.UTC
-	sessVars.StmtCtx.SetTimeZone(time.UTC)
+	sessVars.TimeZone = scheduleTimeZone
+	sessVars.StmtCtx.SetTimeZone(scheduleTimeZone)
 	defer func() {
 		sessVars.SQLMode = origSQLMode
 		sessVars.SetStatusFlag(mysql.ServerStatusNoBackslashEscaped, origSQLMode.HasNoBackslashEscapesMode())
