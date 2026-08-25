@@ -55,7 +55,7 @@ git diff --stat f08c648a20380ea723449c6c3eb5b171d96fd567..bf681b1b662a04c01dfdbf
 
 | PR | 范围 | 说明 |
 | --- | --- | --- |
-| PR1 | bootstrap 相关 | 只做最终 MV 系统表 bootstrap 和初始化。包括 bootstrap version 合并后的 5 张 MV 专用系统表、最终字段类型、字段/index rename，以及 `NEXT_*_UNIX_SECONDS` 和 `LAST_SUCCESS_REFRESH_END_UNIX_SECONDS` 的最终 schema；不把 parser / DDL / runtime 一起卷进来。权限相关改动另行处理，不进入本 PR。 |
+| PR1 | bootstrap 相关 | 只做最终 MV 系统表 bootstrap 和初始化。包括 bootstrap version 合并后的 5 张 MV 专用系统表、最终字段类型、字段/index rename，以及 `NEXT_*_UNIX_SECONDS` 和 `LAST_SUCCESS_REFRESH_END_UNIX_SECONDS` 的最终 schema；不把 parser / DDL / runtime 一起卷进来。 |
 | PR2 | create/drop MV / MLog 相关 | 只做建表、删表、schema tracker、job args、validation 这一层；带入 CREATE/ALTER 时保存 schedule timezone、Unix-seconds schedule 初始化，以及 create/cutover 对最终 refresh-info schema 的适配。 |
 | PR3 | MLog 写入相关 | base-table DML 到 MLog 的同步、row 处理、显式 DML 拦截等。 |
 | PR4 | MLog purge 相关 | purge executor、cancel purge、purge history、hazard guard、purge 侧 observability；带入 `NEXT_PURGE_UNIX_SECONDS`、保存的 purge schedule timezone，以及 purge history 的最终字段/index 命名。 |
@@ -98,4 +98,3 @@ git diff --stat f08c648a20380ea723449c6c3eb5b171d96fd567..bf681b1b662a04c01dfdbf
 | 日期 | 目标分支 | 动作 | 结果 |
 | --- | --- | --- | --- |
 | 2026-08-25 | `cp_mv_for_master_base` | 更新 source boundary 和最终 diff 统计 | head 从 `6910cef840` 更新为 `bf681b1b66`，纳入 bootstrap 合并、schedule timezone、Unix seconds、timestamp/MV naming refine 的后续 commit |
-

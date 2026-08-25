@@ -5,7 +5,7 @@
 Source range:
 
 ```text
-f08c648a20380ea723449c6c3eb5b171d96fd567..6910cef840612ee85e171adb19d3e427697a65da
+f08c648a20380ea723449c6c3eb5b171d96fd567..bf681b1b662a04c01dfdbf62507af90790df453d
 ```
 
 本文档的目标不是决定最终实现细节，而是先回答两个问题：
@@ -90,14 +90,14 @@ MV 实现或设计文档明确依赖这些能力。
 筛出名字上不带 MV 的文件：
 
 ```bash
-git diff --name-status f08c648a20380ea723449c6c3eb5b171d96fd567..6910cef840612ee85e171adb19d3e427697a65da \
+git diff --name-status f08c648a20380ea723449c6c3eb5b171d96fd567..bf681b1b662a04c01dfdbf62507af90790df453d \
   | rg -v '(materialized|Materialized|mview|MView|mv_|mlog|MLog|MLOG|tidb_mview|tidb_mlog|TIDB_MVIEW|TIDB_MLOG)'
 ```
 
 查看非 MV candidate 的 diff 概览：
 
 ```bash
-git diff --stat f08c648a20380ea723449c6c3eb5b171d96fd567..6910cef840612ee85e171adb19d3e427697a65da -- \
+git diff --stat f08c648a20380ea723449c6c3eb5b171d96fd567..bf681b1b662a04c01dfdbf62507af90790df453d -- \
   br cmd build pkg/util/topsql pkg/executor/join \
   pkg/planner/core/casetest/fulljoin \
   tests/integrationtest/t/active_active tests/integrationtest/r/active_active \
@@ -109,7 +109,7 @@ git diff --stat f08c648a20380ea723449c6c3eb5b171d96fd567..6910cef840612ee85e171a
 检查 FULL OUTER JOIN 是否被 MV 引用：
 
 ```bash
-git grep -n -i 'full outer\|fullouter\|FullOuter' xufei/cp_mv_for_master -- \
+git grep -n -i 'full outer\|fullouter\|FullOuter' bf681b1b66 -- \
   pkg/executor pkg/planner/mview pkg/ddl pkg/sessionctx pkg/parser \
   tests/integrationtest/t/executor/mview_refresh.test docs/note/materialized_view
 ```
@@ -118,7 +118,7 @@ git grep -n -i 'full outer\|fullouter\|FullOuter' xufei/cp_mv_for_master -- \
 
 ```bash
 git grep -n '_tidb_commit_ts\|CommitTs\|commit ts\|DecodeToChunkWithCommitTS' \
-  xufei/cp_mv_for_master -- \
+  bf681b1b66 -- \
   pkg/executor/materialized_view.go pkg/executor/mv_refresh_observability.go \
   pkg/planner/mview pkg/table/tables/mview_log.go \
   pkg/store pkg/util docs/note/materialized_view \
@@ -142,7 +142,7 @@ git grep -n "Usage of column name '_tidb_commit_ts'\|select _tidb_commit_ts" \
 
 ```bash
 git grep -n 'OnExecutionBegin\|OnExecutionFinished\|NetworkInBytes\|NetworkOutBytes' \
-  xufei/cp_mv_for_master -- \
+  bf681b1b66 -- \
   pkg/server pkg/session pkg/executor pkg/util/topsql pkg/mvservice docs/note/materialized_view
 ```
 
