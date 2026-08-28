@@ -76,6 +76,51 @@ git diff --stat f08c648a20380ea723449c6c3eb5b171d96fd567..bf681b1b662a04c01dfdbf
 - timestamp 和 MV/MLog 命名 refine -> 按最终字段/模块归属跟随 PR1/PR2/PR4/PR5/PR6/PR7，不按 commit 单独 port
 - 任何只服务于某个功能面的补丁、测试、回归结果，都跟着那个功能面的 PR 走
 
+## PR 拆分
+
+系统表阶段已经拆成两个子 PR：`PR1a` 是 MV 业务系统表，已合入
+`master`；`PR1b` 是权限相关系统表，当前权限分支上的改动。
+
+第二阶段统一定义为 MV/MLog DDL 生命周期，并拆成两个有先后依赖的子 PR：
+
+```text
+PR2a parser/AST/语法  ->  PR2b metadata/job args/DDL 实现
+```
+
+| PR | 范围 | 说明 |
+| --- | --- | --- |
+| PR2a | MV/MLog parser 和语法 | 覆盖 `CREATE`、`DROP`、`ALTER MATERIALIZED VIEW`、`ALTER MATERIALIZED VIEW LOG` 的全部 grammar、AST、Restore、Digest、关键字和 parser 测试；只负责语法和 AST，不实现 DDL 行为。 |
+| PR2b | MV/MLog DDL 实现 | 包含 `pkg/meta/model` 的 MV/MLog `TableInfo` 和 job args、DDL dispatcher、schema tracker、validation、notifier、rollback/sanity check，以及 create/drop/alter 的完整 DDL 执行和测试。 |
+
+PR2b 使用最终 MV 系统表 schema 作为 source of truth。schedule timezone、Unix-seconds
+字段和 MV/MLog 命名 refine 在 CREATE/ALTER DDL 路径中的适配归 PR2b；purge、refresh
+和 service runtime 的对应逻辑分别归后续 owning PR。
+
+如果 PR2b 仍然过大，可以继续拆成 `PR2b1`（metadata + create/drop）和 `PR2b2`
+（alter + schema tracker/validation），但不应把 metadata/job args 放到 PR2a，或推迟
+到 refresh/service PR。
+
+## Port Slice
+
+| ID | Slice | Source 路径 / 符号 | 分类 | Master 状态 | Port 动作 | 验证 | 状态 | 备注 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| S0 | 跟踪文档 | `docs/note/materialized_view/mv_master_port_tracking.md` | 流程 | N/A | 创建 tracking doc | N/A | `已移植` | 每完成一个有意义的 port 步骤后更新本文档。 |
+| S1 | 设计文档 | `docs/note/materialized_view/{mv_refresh,kill_refresh_purge,mv_log_purge,mv_compare,mv_init_build_state,mv_refresh_observability}.md` | docs | 待处理 | port 有用的设计文档，或保留为内部参考 | 文档 review | `待处理` | 文档内容要和最终 master 实现保持一致。 |
+| S2 | Parser、AST 和用户语法 | `pkg/parser`、`pkg/parser/ast`、`pkg/parser/mysql/privs.go`、`pkg/parser/mview_stmt_options.go` | direct MV | 待处理 | 基于当前 parser grammar 重写语法和 AST | parser unit test 和相关 integration test | `待处理` | 归 `PR2a`；包含 create/drop/alter/refresh/purge/cancel/show/compare 语法。 |
+| S3 | 元数据模型和 DDL job args | `pkg/meta`、`pkg/meta/model`、`TableInfo`、MV/MLog 依赖元数据、job args | direct MV | 待处理 | port metadata field 和 job argument 编解码 | model / job args tests | `待处理` | 归 `PR2b`；必须兼容 master 当前 metadata versioning 和 BR restore 语义。 |
+| S4 | Bootstrap、变量和 internal session prerequisite | `pkg/session`、`pkg/sessionctx`、`pkg/domain`、`pkg/privilege` | direct MV / prerequisite | 待处理 | port MV system table、sysvar、privilege hook、internal-session 行为 | bootstrap / sysvar / session tests | `待处理` | 需要确认 master 是否已有等价 internal-session helper。 |
+| S5 | MV/MLog DDL 执行 | `pkg/ddl/materialized_view.go`、`pkg/ddl/mview_schedule_expr.go`、`pkg/ddl/create_table.go`、DDL guard、notifier、schema tracker | direct MV | 待处理 | 基于 master 当前 DDL framework 重写 DDL flow | DDL executor tests | `待处理` | 归 `PR2b`，与 S3 合并；包含依赖校验、schedule expression、alter/drop/truncate guard。 |
+| S6 | MLog table 和 base-table DML capture | `pkg/table/tables/mview_log.go`、executor write path、`pkg/executor/internal/util/touched_rows.go` | direct MV | 待处理 | port mlog row 生成和事务写入行为 | writetest 和 integration DML tests | `待处理` | 验证 insert/update/delete、rollback、generated column、partition 行为。 |
+| S7 | Manual refresh、show 和 infoschema executor | `pkg/executor/materialized_view.go`、`pkg/executor/show.go`、`pkg/executor/infoschema_reader.go` | direct MV | 待处理 | port refresh executor、show command、infoschema reader | refresh 和 infoschema tests | `待处理` | 包含 complete refresh 变体和用户可见 metadata 输出。 |
+| S8 | MV service 框架 | `pkg/mvservice`、`pkg/domain`、`pkg/server`、service metrics | direct MV | 待处理 | port 后台调度、cancel、backpressure 框架 | mvservice unit tests | `待处理` | 依赖 metadata、bootstrap table 和 internal session 变量。 |
+| S9 | Fast refresh planner | `pkg/planner/mview`、`pkg/planner/core`、plan guard、mview casetest | direct MV | 待处理 | 基于当前 planner 重写 fast-refresh plan derivation | planner casetest 和 unit tests | `待处理` | 包含 count/sum/min/max 和 bounded fast refresh planning。 |
+| S10 | Delta merge agg executor 和 aggregate prerequisite | `pkg/executor/mviewdeltamergeagg`、`pkg/executor/aggfuncs`、`pkg/expression/aggregation` | direct MV / prerequisite | aggregate prerequisite 部分 `master 已有` | port fast refresh 需要的 MV operator；`SUM_INT`、`MAX_COUNT`、`MIN_COUNT` 直接适配 `origin/master` 现有实现 | executor aggregate tests 和 mviewdeltamergeagg tests | `待处理` | `SUM_INT`、`MAX_COUNT`、`MIN_COUNT` 已有 parser / expression / executor / tipb pushdown / checker 支持。 |
+| S11 | Observability、metrics、stats 和 GC 处理 | `pkg/metrics`、`pkg/statistics`、`pkg/store/gcworker`、refresh observability | direct MV / hardening | 待处理 | port metrics、history、analyze skip/schedule、GC safeguard | targeted metrics / stats / gc tests | `待处理` | 通常放在 core refresh 和 service 之后更稳。 |
+| S12 | BR / import / restore / system-table 交互 | `br`、`pkg/executor/import_into.go`、importer tests、realtikv import test | prerequisite / candidate | 待处理 | 审计 MV system table 和 initial build 是否依赖这些改动 | 如果 port，则跑 targeted BR/import tests | `待处理` | 部分改动可能 master 已有，或者和 MV 无关。 |
+| S13 | 非 MV candidate drift | `cmd/mirror`、`full_outer_join`、`active_active/commit_ts`、TopSQL、build helpers、root metadata | non-MV candidate | 部分已确认 | agent docs、`.gitignore`、build helper、`cmd/mirror`、`google/skylark` 删除、root metadata、TopSQL network bytes、prepare dedup / plan cache、active-active commit TS 独立测试均不 cp；FULL OUTER JOIN 转入 prerequisite 审计；`_tidb_commit_ts` 底层能力 `origin/master` 已有，但 SQL 可引用策略仍需在 MV port 中处理；`SUM_INT`、`MAX_COUNT`、`MIN_COUNT` 已确认 `master` 已有 | 只有 port 时才跑 targeted test | `审计中` | integration result 不直接 cp，后续按 master port 后实际行为重新录制。 |
+| S14 | Bazel 和生成文件元数据 | `BUILD.bazel`、`DEPS.bzl`、`go.mod`、`go.sum`、generated parser output | build metadata | 待处理 | 源码改完后基于 master 重新生成 | `make bazel_prepare`；需要时跑 parser 生成命令 | `待处理` | 需要生成时不要手改 generated artifact。 |
+| S15 | Integration 和 regression tests | `tests/integrationtest`、executor/DDL/planner tests | tests | 待处理 | 按 slice port 测试和行为 | scoped integration / unit commands | `待处理` | 避免从无关 planner 改动带来大量 result churn。 |
+
 ## 非 MV / prerequisite 处理原则
 
 以下内容不进入 MV 主线 PR，除非后面另有单独决定：
