@@ -17,28 +17,28 @@ source commit 的新增或修正只用于更新最终 diff 边界，不直接对
 
 ```text
 base commit: f08c648a20380ea723449c6c3eb5b171d96fd567
-head commit: bf681b1b662a04c01dfdbf62507af90790df453d
+head commit: 9439fdfa65e065e838559f5f5f9429c661072852
 
 source range:
-  f08c648a20380ea723449c6c3eb5b171d96fd567..bf681b1b662a04c01dfdbf62507af90790df453d
+  f08c648a20380ea723449c6c3eb5b171d96fd567..9439fdfa65e065e838559f5f5f9429c661072852
 ```
 
 当前 source diff 规模：
 
 ```text
-499 files changed, 97274 insertions(+), 25112 deletions(-)
+500 files changed, 97367 insertions(+), 25104 deletions(-)
 ```
 
 后续 inventory 和 review 都以固定 commit range 为准：
 
 ```bash
-git diff --name-status f08c648a20380ea723449c6c3eb5b171d96fd567..bf681b1b662a04c01dfdbf62507af90790df453d
-git diff --stat f08c648a20380ea723449c6c3eb5b171d96fd567..bf681b1b662a04c01dfdbf62507af90790df453d
+git diff --name-status f08c648a20380ea723449c6c3eb5b171d96fd567..9439fdfa65e065e838559f5f5f9429c661072852
+git diff --stat f08c648a20380ea723449c6c3eb5b171d96fd567..9439fdfa65e065e838559f5f5f9429c661072852
 ```
 
 ### 新增 source commits
 
-相对原 tracking 文档的 head `6910cef840612ee85e171adb19d3e427697a65da`，新增以下 4 个 commit。
+相对原 tracking 文档的 head `6910cef840612ee85e171adb19d3e427697a65da`，新增以下 6 个 commit。
 它们已经纳入上面的最终 source range，但 port 时仍然必须按最终 diff 的语义边界拆分。
 
 | Commit | 最终改动 | 主要 port 归属 |
@@ -47,6 +47,8 @@ git diff --stat f08c648a20380ea723449c6c3eb5b171d96fd567..bf681b1b662a04c01dfdbf
 | `c226d73362` | `LAST_SUCCESS_REFRESH_ENDTIME datetime(6)` 改为 `LAST_SUCCESS_REFRESH_END_UNIX_SECONDS bigint`，并适配 create、refresh、out-of-place cutover、schedule duration | PR1 的 refresh-info schema；PR2 的 create/cutover metadata 初始化；PR5 的 refresh runtime 和 refresh observability |
 | `24eaea3dee` | refresh/purge history 和 alert 表的时间字段、索引名称统一为明确的 start/end/request/heartbeat/snapshot/update 命名 | PR1 的最终 schema/index；PR4/PR5/PR7 的 SQL、executor、service 和测试引用 |
 | `bf681b1b66` | 统一 MV/MLog 相关系统表字段和 Go 内部命名，例如 `MV_SCHEMA/MV_NAME -> MVIEW_SCHEMA/MVIEW_NAME`、`MVInitBuild* -> MViewInitBuild*`、`mv/mvLog -> mviewTask/mlogPurgeTask` | PR1 的最终系统表字段；PR2/PR4/PR5/PR6/PR7 各自 owning 模块的代码、测试和文档 |
+| `d05b5da91b` | 新增基于最终 MV 系统表 schema 的 rebuild SQL 脚本，包含删除旧表和重建最终结构的维护步骤 | PR1 的 bootstrap / system-table migration 文档 |
+| `9439fdfa65` | 按 spec 重排 `CREATE MATERIALIZED VIEW` 的 table options、`REFRESH`、`ATTRIBUTES`；同步 parser grammar、AST Restore/visitor、`SHOW CREATE` 和 parser/DDL 测试 | PR2a 的 parser/AST/语法 |
 
 其中 `f5dfdf58b9c98b21e8f384e40c11ff77cacd7222` 已经在原 tracking head 之后的历史中完成 bootstrap version 合并，
 本次 source boundary 更新也明确把这个 bootstrap 合并纳入 PR1 的最终 port 范围。
@@ -108,7 +110,7 @@ PR2b 使用最终 MV 系统表 schema 作为 source of truth。schedule timezone
 | S1 | 设计文档 | `docs/note/materialized_view/{mv_refresh,kill_refresh_purge,mv_log_purge,mv_compare,mv_init_build_state,mv_refresh_observability}.md` | docs | 待处理 | port 有用的设计文档，或保留为内部参考 | 文档 review | `待处理` | 文档内容要和最终 master 实现保持一致。 |
 | S2 | Parser、AST 和用户语法 | `pkg/parser`、`pkg/parser/ast`、`pkg/parser/mysql/privs.go`、`pkg/parser/mview_stmt_options.go` | direct MV | 待处理 | 基于当前 parser grammar 重写语法和 AST | parser unit test 和相关 integration test | `待处理` | 归 `PR2a`；包含 create/drop/alter/refresh/purge/cancel/show/compare 语法。 |
 | S3 | 元数据模型和 DDL job args | `pkg/meta`、`pkg/meta/model`、`TableInfo`、MV/MLog 依赖元数据、job args | direct MV | 待处理 | port metadata field 和 job argument 编解码 | model / job args tests | `待处理` | 归 `PR2b`；必须兼容 master 当前 metadata versioning 和 BR restore 语义。 |
-| S4 | Bootstrap、变量和 internal session prerequisite | `pkg/session`、`pkg/sessionctx`、`pkg/domain`、`pkg/privilege` | direct MV / prerequisite | 待处理 | port MV system table、sysvar、privilege hook、internal-session 行为 | bootstrap / sysvar / session tests | `待处理` | 需要确认 master 是否已有等价 internal-session helper。 |
+| S4 | Bootstrap、变量和 internal session prerequisite | `pkg/session`、`pkg/sessionctx`、`pkg/domain`、`pkg/privilege`、`docs/note/materialized_view/mv_system_tables_rebuild.sql` | direct MV / prerequisite | 待处理 | port MV system table、sysvar、privilege hook、internal-session 行为 | bootstrap / sysvar / session tests | `待处理` | rebuild SQL 脚本随 PR1 的最终 bootstrap/system-table 结构归属；需要确认 master 是否已有等价 internal-session helper。 |
 | S5 | MV/MLog DDL 执行 | `pkg/ddl/materialized_view.go`、`pkg/ddl/mview_schedule_expr.go`、`pkg/ddl/create_table.go`、DDL guard、notifier、schema tracker | direct MV | 待处理 | 基于 master 当前 DDL framework 重写 DDL flow | DDL executor tests | `待处理` | 归 `PR2b`，与 S3 合并；包含依赖校验、schedule expression、alter/drop/truncate guard。 |
 | S6 | MLog table 和 base-table DML capture | `pkg/table/tables/mview_log.go`、executor write path、`pkg/executor/internal/util/touched_rows.go` | direct MV | 待处理 | port mlog row 生成和事务写入行为 | writetest 和 integration DML tests | `待处理` | 验证 insert/update/delete、rollback、generated column、partition 行为。 |
 | S7 | Manual refresh、show 和 infoschema executor | `pkg/executor/materialized_view.go`、`pkg/executor/show.go`、`pkg/executor/infoschema_reader.go` | direct MV | 待处理 | port refresh executor、show command、infoschema reader | refresh 和 infoschema tests | `待处理` | 包含 complete refresh 变体和用户可见 metadata 输出。 |
@@ -143,3 +145,4 @@ PR2b 使用最终 MV 系统表 schema 作为 source of truth。schedule timezone
 | 日期 | 目标分支 | 动作 | 结果 |
 | --- | --- | --- | --- |
 | 2026-08-25 | `cp_mv_for_master_base` | 更新 source boundary 和最终 diff 统计 | head 从 `6910cef840` 更新为 `bf681b1b66`，纳入 bootstrap 合并、schedule timezone、Unix seconds、timestamp/MV naming refine 的后续 commit |
+| 2026-08-29 | `cp_mv_for_master_base` | 更新 source boundary，纳入 `cp_mv_for_master` 最新语法提交 | head 更新为 `9439fdfa65`，同时纳入 `d05b5da91b` 的 system-table rebuild SQL；最终 source diff 为 500 files changed、97367 insertions、25104 deletions，`9439fdfa65` 的语法调整归 PR2a |
