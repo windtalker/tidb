@@ -17,28 +17,28 @@ source commit 的新增或修正只用于更新最终 diff 边界，不直接对
 
 ```text
 base commit: f08c648a20380ea723449c6c3eb5b171d96fd567
-head commit: 9439fdfa65e065e838559f5f5f9429c661072852
+head commit: 8d2633e8e55a6e7d09649e650df39f1c9f64a7f2
 
 source range:
-  f08c648a20380ea723449c6c3eb5b171d96fd567..9439fdfa65e065e838559f5f5f9429c661072852
+  f08c648a20380ea723449c6c3eb5b171d96fd567..8d2633e8e55a6e7d09649e650df39f1c9f64a7f2
 ```
 
 当前 source diff 规模：
 
 ```text
-500 files changed, 97367 insertions(+), 25104 deletions(-)
+500 files changed, 97356 insertions(+), 25104 deletions(-)
 ```
 
 后续 inventory 和 review 都以固定 commit range 为准：
 
 ```bash
-git diff --name-status f08c648a20380ea723449c6c3eb5b171d96fd567..9439fdfa65e065e838559f5f5f9429c661072852
-git diff --stat f08c648a20380ea723449c6c3eb5b171d96fd567..9439fdfa65e065e838559f5f5f9429c661072852
+git diff --name-status f08c648a20380ea723449c6c3eb5b171d96fd567..8d2633e8e55a6e7d09649e650df39f1c9f64a7f2
+git diff --stat f08c648a20380ea723449c6c3eb5b171d96fd567..8d2633e8e55a6e7d09649e650df39f1c9f64a7f2
 ```
 
 ### 新增 source commits
 
-相对原 tracking 文档的 head `6910cef840612ee85e171adb19d3e427697a65da`，新增以下 6 个 commit。
+相对原 tracking 文档的 head `6910cef840612ee85e171adb19d3e427697a65da`，新增以下 7 个 commit。
 它们已经纳入上面的最终 source range，但 port 时仍然必须按最终 diff 的语义边界拆分。
 
 | Commit | 最终改动 | 主要 port 归属 |
@@ -49,6 +49,7 @@ git diff --stat f08c648a20380ea723449c6c3eb5b171d96fd567..9439fdfa65e065e838559f
 | `bf681b1b66` | 统一 MV/MLog 相关系统表字段和 Go 内部命名，例如 `MV_SCHEMA/MV_NAME -> MVIEW_SCHEMA/MVIEW_NAME`、`MVInitBuild* -> MViewInitBuild*`、`mv/mvLog -> mviewTask/mlogPurgeTask` | PR1 的最终系统表字段；PR2/PR4/PR5/PR6/PR7 各自 owning 模块的代码、测试和文档 |
 | `d05b5da91b` | 新增基于最终 MV 系统表 schema 的 rebuild SQL 脚本，包含删除旧表和重建最终结构的维护步骤 | PR1 的 bootstrap / system-table migration 文档 |
 | `9439fdfa65` | 按 spec 重排 `CREATE MATERIALIZED VIEW` 的 table options、`REFRESH`、`ATTRIBUTES`；同步 parser grammar、AST Restore/visitor、`SHOW CREATE` 和 parser/DDL 测试 | PR2a 的 parser/AST/语法 |
+| `8d2633e8e5` | 删除未使用的 `NEVER REFRESH` refresh method；同步 MViewRefreshMethod 枚举、AST Restore 和 DDL refresh metadata builder | PR2a 的 parser/AST/语法；PR2b 的 DDL metadata |
 
 其中 `f5dfdf58b9c98b21e8f384e40c11ff77cacd7222` 已经在原 tracking head 之后的历史中完成 bootstrap version 合并，
 本次 source boundary 更新也明确把这个 bootstrap 合并纳入 PR1 的最终 port 范围。
@@ -146,3 +147,4 @@ PR2b 使用最终 MV 系统表 schema 作为 source of truth。schedule timezone
 | --- | --- | --- | --- |
 | 2026-08-25 | `cp_mv_for_master_base` | 更新 source boundary 和最终 diff 统计 | head 从 `6910cef840` 更新为 `bf681b1b66`，纳入 bootstrap 合并、schedule timezone、Unix seconds、timestamp/MV naming refine 的后续 commit |
 | 2026-08-29 | `cp_mv_for_master_base` | 更新 source boundary，纳入 `cp_mv_for_master` 最新语法提交 | head 更新为 `9439fdfa65`，同时纳入 `d05b5da91b` 的 system-table rebuild SQL；最终 source diff 为 500 files changed、97367 insertions、25104 deletions，`9439fdfa65` 的语法调整归 PR2a |
+| 2026-08-29 | `cp_mv_for_master_base` | 更新 source boundary，纳入删除未使用 refresh method 的提交 | head 更新为 `8d2633e8e5`；最终 source diff 为 500 files changed、97356 insertions、25104 deletions，删除逻辑按 AST/Restore 归 PR2a，按 DDL metadata builder 归 PR2b |
