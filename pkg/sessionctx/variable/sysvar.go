@@ -65,6 +65,71 @@ import (
 	"go.uber.org/zap"
 )
 
+func normalizeIsolationReadEnginesValue(varName, normalizedValue string) (string, error) {
+	engines := strings.Split(normalizedValue, ",")
+	var formatVal string
+	for i, engine := range engines {
+		engine = strings.TrimSpace(engine)
+		if engine == "" {
+			return normalizedValue, ErrWrongValueForVar.GenWithStackByArgs(varName, normalizedValue)
+		}
+		if i != 0 {
+			formatVal += ","
+		}
+		switch {
+		case strings.EqualFold(engine, kv.TiKV.Name()):
+			formatVal += kv.TiKV.Name()
+		case strings.EqualFold(engine, kv.TiFlash.Name()):
+			formatVal += kv.TiFlash.Name()
+		case strings.EqualFold(engine, kv.TiDB.Name()):
+			formatVal += kv.TiDB.Name()
+		default:
+			return normalizedValue, ErrWrongValueForVar.GenWithStackByArgs(varName, normalizedValue)
+		}
+	}
+	return formatVal, nil
+}
+
+func defaultIsolationReadEnginesValue() string {
+	return strings.Join(config.GetGlobalConfig().IsolationRead.Engines, ",")
+}
+
+func setSessionIsolationReadEngines(s *SessionVars, val string) error {
+	s.IsolationReadEngines = make(map[kv.StoreType]struct{})
+	if val == "" {
+		return nil
+	}
+	for _, engine := range strings.Split(val, ",") {
+		switch engine {
+		case kv.TiKV.Name():
+			s.IsolationReadEngines[kv.TiKV] = struct{}{}
+		case kv.TiFlash.Name():
+			// If the tiflash is removed by the strict SQL mode. The hint should also not take effect.
+			if !s.StmtCtx.TiFlashEngineRemovedDueToStrictSQLMode {
+				s.IsolationReadEngines[kv.TiFlash] = struct{}{}
+			}
+		case kv.TiDB.Name():
+			s.IsolationReadEngines[kv.TiDB] = struct{}{}
+		}
+	}
+	return nil
+}
+
+func validateAutoAnalyzeRatio(varName string) func(*SessionVars, string, string, ScopeFlag) (string, error) {
+	return func(_ *SessionVars, normalizedValue string, _ string, _ ScopeFlag) (string, error) {
+		ratio, err := strconv.ParseFloat(normalizedValue, 64)
+		if err != nil {
+			return "", err
+		}
+		const minRatio = 0.00001
+		const tolerance = 1e-9
+		if ratio < minRatio && math.Abs(ratio-minRatio) > tolerance {
+			return "", errors.Errorf("the value of %s should be greater than or equal to %f", varName, minRatio)
+		}
+		return normalizedValue, nil
+	}
+}
+
 // All system variables declared here are ordered by their scopes, which follow the order of scopes below:
 //
 //	[NONE, SESSION, INSTANCE, GLOBAL, GLOBAL & SESSION]
@@ -330,42 +395,10 @@ var defaultSysVars = []*SysVar{
 		s.AllowRemoveAutoInc = TiDBOptOn(val)
 		return nil
 	}},
-	{Scope: ScopeSession, Name: TiDBIsolationReadEngines, Value: strings.Join(config.GetGlobalConfig().IsolationRead.Engines, ","), Validation: func(vars *SessionVars, normalizedValue string, originalValue string, scope ScopeFlag) (string, error) {
-		engines := strings.Split(normalizedValue, ",")
-		var formatVal string
-		for i, engine := range engines {
-			engine = strings.TrimSpace(engine)
-			if i != 0 {
-				formatVal += ","
-			}
-			switch {
-			case strings.EqualFold(engine, kv.TiKV.Name()):
-				formatVal += kv.TiKV.Name()
-			case strings.EqualFold(engine, kv.TiFlash.Name()):
-				formatVal += kv.TiFlash.Name()
-			case strings.EqualFold(engine, kv.TiDB.Name()):
-				formatVal += kv.TiDB.Name()
-			default:
-				return normalizedValue, ErrWrongValueForVar.GenWithStackByArgs(TiDBIsolationReadEngines, normalizedValue)
-			}
-		}
-		return formatVal, nil
+	{Scope: ScopeSession, Name: TiDBIsolationReadEngines, Value: defaultIsolationReadEnginesValue(), Validation: func(vars *SessionVars, normalizedValue string, originalValue string, scope ScopeFlag) (string, error) {
+		return normalizeIsolationReadEnginesValue(TiDBIsolationReadEngines, normalizedValue)
 	}, SetSession: func(s *SessionVars, val string) error {
-		s.IsolationReadEngines = make(map[kv.StoreType]struct{})
-		for _, engine := range strings.Split(val, ",") {
-			switch engine {
-			case kv.TiKV.Name():
-				s.IsolationReadEngines[kv.TiKV] = struct{}{}
-			case kv.TiFlash.Name():
-				// If the tiflash is removed by the strict SQL mode. The hint should also not take effect.
-				if !s.StmtCtx.TiFlashEngineRemovedDueToStrictSQLMode {
-					s.IsolationReadEngines[kv.TiFlash] = struct{}{}
-				}
-			case kv.TiDB.Name():
-				s.IsolationReadEngines[kv.TiDB] = struct{}{}
-			}
-		}
-		return nil
+		return setSessionIsolationReadEngines(s, val)
 	}},
 	{Scope: ScopeSession, Name: TiDBMetricSchemaStep, Value: strconv.Itoa(DefTiDBMetricSchemaStep), Type: TypeUnsigned, skipInit: true, MinValue: 10, MaxValue: 60 * 60 * 60, SetSession: func(s *SessionVars, val string) error {
 		s.MetricSchemaStep = TidbOptInt64(val, DefTiDBMetricSchemaStep)
@@ -753,25 +786,22 @@ var defaultSysVars = []*SysVar{
 		return nil
 	}},
 	{
-		Scope:    ScopeGlobal,
-		Name:     TiDBAutoAnalyzeRatio,
-		Value:    strconv.FormatFloat(DefAutoAnalyzeRatio, 'f', -1, 64),
-		Type:     TypeFloat,
-		MinValue: 0,
-		MaxValue: math.MaxUint64,
-		// The value of TiDBAutoAnalyzeRatio should be greater than 0.00001 or equal to 0.00001.
-		Validation: func(vars *SessionVars, normalizedValue string, originalValue string, scope ScopeFlag) (string, error) {
-			ratio, err := strconv.ParseFloat(normalizedValue, 64)
-			if err != nil {
-				return "", err
-			}
-			const minRatio = 0.00001
-			const tolerance = 1e-9
-			if ratio < minRatio && math.Abs(ratio-minRatio) > tolerance {
-				return "", errors.Errorf("the value of %s should be greater than or equal to %f", TiDBAutoAnalyzeRatio, minRatio)
-			}
-			return normalizedValue, nil
-		},
+		Scope:      ScopeGlobal,
+		Name:       TiDBAutoAnalyzeRatio,
+		Value:      strconv.FormatFloat(DefAutoAnalyzeRatio, 'f', -1, 64),
+		Type:       TypeFloat,
+		MinValue:   0,
+		MaxValue:   math.MaxUint64,
+		Validation: validateAutoAnalyzeRatio(TiDBAutoAnalyzeRatio),
+	},
+	{
+		Scope:      ScopeGlobal,
+		Name:       TiDBMLogAutoAnalyzeRatio,
+		Value:      strconv.FormatFloat(DefMLogAutoAnalyzeRatio, 'f', -1, 64),
+		Type:       TypeFloat,
+		MinValue:   0,
+		MaxValue:   math.MaxUint64,
+		Validation: validateAutoAnalyzeRatio(TiDBMLogAutoAnalyzeRatio),
 	},
 	{Scope: ScopeGlobal, Name: TiDBAutoAnalyzeStartTime, Value: DefAutoAnalyzeStartTime, Type: TypeTime},
 	{Scope: ScopeGlobal, Name: TiDBAutoAnalyzeEndTime, Value: DefAutoAnalyzeEndTime, Type: TypeTime},
@@ -2172,6 +2202,49 @@ var defaultSysVars = []*SysVar{
 		s.DMLBatchSize = int(TidbOptInt64(val, DefDMLBatchSize))
 		return nil
 	}},
+	{Scope: ScopeGlobal | ScopeSession, Name: TiDBMLogPurgeBatchSize, Value: strconv.Itoa(DefTiDBMLogPurgeBatchSize), Type: TypeUnsigned, MinValue: DefTiDBMLogPurgeBatchMinSize, MaxValue: DefTiDBMLogPurgeBatchMaxSize, SetSession: func(s *SessionVars, val string) error {
+		s.MLogPurgeBatchSize = int(TidbOptInt64(val, DefTiDBMLogPurgeBatchSize))
+		return nil
+	}},
+	{Scope: ScopeGlobal | ScopeSession, Name: TiDBMLogPurgeMinRate, Value: strconv.Itoa(DefTiDBMLogPurgeMinRate), Type: TypeUnsigned, MinValue: 0, MaxValue: math.MaxInt32, Validation: func(vars *SessionVars, normalizedValue string, originalValue string, scope ScopeFlag) (string, error) {
+		v, err := strconv.ParseUint(normalizedValue, 10, 64)
+		if err != nil {
+			return "", err
+		}
+		if v == 0 {
+			return normalizedValue, ErrWrongValueForVar.GenWithStackByArgs(TiDBMLogPurgeMinRate, originalValue)
+		}
+		return normalizedValue, nil
+	}, SetSession: func(s *SessionVars, val string) error {
+		s.MLogPurgeMinRate = int(TidbOptInt64(val, DefTiDBMLogPurgeMinRate))
+		return nil
+	}},
+	{Scope: ScopeGlobal | ScopeSession, Name: TiDBMLogPurgeRateBudgetRatio, Value: strconv.FormatFloat(DefTiDBMLogPurgeRateBudgetRatio, 'f', -1, 64), Type: TypeFloat, MinValue: 0, MaxValue: 1, Validation: func(vars *SessionVars, normalizedValue string, originalValue string, scope ScopeFlag) (string, error) {
+		v, err := strconv.ParseFloat(originalValue, 64)
+		if err != nil {
+			return "", err
+		}
+		if v <= 0 || v > 1 {
+			return normalizedValue, ErrWrongValueForVar.GenWithStackByArgs(TiDBMLogPurgeRateBudgetRatio, originalValue)
+		}
+		return normalizedValue, nil
+	}, SetSession: func(s *SessionVars, val string) error {
+		s.MLogPurgeRateBudgetRatio = tidbOptFloat64(val, DefTiDBMLogPurgeRateBudgetRatio)
+		return nil
+	}},
+	{Scope: ScopeGlobal | ScopeSession, Name: TiDBMLogPurgeDeleteTiFlashThreads, Value: strconv.Itoa(DefTiDBMLogPurgeDeleteTiFlashThreads), Type: TypeInt, MinValue: math.MinInt64, MaxValue: MaxConfigurableConcurrency, Validation: func(vars *SessionVars, normalizedValue string, originalValue string, scope ScopeFlag) (string, error) {
+		v, err := strconv.ParseInt(originalValue, 10, 64)
+		if err != nil {
+			return "", err
+		}
+		if v < 0 {
+			return normalizedValue, ErrWrongValueForVar.GenWithStackByArgs(TiDBMLogPurgeDeleteTiFlashThreads, originalValue)
+		}
+		return normalizedValue, nil
+	}, SetSession: func(s *SessionVars, val string) error {
+		s.MLogPurgeDeleteTiFlashThreads = TidbOptInt64(val, DefTiDBMLogPurgeDeleteTiFlashThreads)
+		return nil
+	}},
 	{Scope: ScopeGlobal | ScopeSession, Name: TiDBMaxChunkSize, Value: strconv.Itoa(DefMaxChunkSize), Type: TypeUnsigned, MinValue: maxChunkSizeLowerBound, MaxValue: math.MaxInt32, SetSession: func(s *SessionVars, val string) error {
 		s.MaxChunkSize = tidbOptPositiveInt32(val, DefMaxChunkSize)
 		return nil
@@ -2551,6 +2624,10 @@ var defaultSysVars = []*SysVar{
 			return nil
 		},
 	},
+	{Scope: ScopeGlobal | ScopeSession, Name: TiDBEnableFullOuterJoin, Value: BoolToOnOff(DefTiDBEnableFullOuterJoin), Type: TypeBool, SetSession: func(s *SessionVars, val string) error {
+		s.EnableFullOuterJoin = TiDBOptOn(val)
+		return nil
+	}},
 	{Scope: ScopeGlobal | ScopeSession, Name: TiDBOptEnableHashJoin, Value: BoolToOnOff(DefTiDBOptEnableHashJoin), Type: TypeBool, SetSession: func(s *SessionVars, val string) error {
 		s.DisableHashJoin = !TiDBOptOn(val)
 		return nil
@@ -2703,6 +2780,116 @@ var defaultSysVars = []*SysVar{
 		}
 		return normalizedValue, nil
 	}},
+	{Scope: ScopeGlobal | ScopeSession, Name: TiDBMVMaintainMemQuota, Value: strconv.FormatInt(DefTiDBMVMaintainMemQuota, 10), Type: TypeInt, MinValue: -1, MaxValue: math.MaxInt64, SetSession: func(s *SessionVars, val string) error {
+		s.MVMaintainMemQuota = TidbOptInt64(val, DefTiDBMVMaintainMemQuota)
+		return nil
+	}, Validation: func(vars *SessionVars, normalizedValue string, originalValue string, scope ScopeFlag) (string, error) {
+		intVal := TidbOptInt64(normalizedValue, DefTiDBMVMaintainMemQuota)
+		if intVal > 0 && intVal < 128 {
+			vars.StmtCtx.AppendWarning(ErrTruncatedWrongValue.FastGenByArgs(TiDBMVMaintainMemQuota, originalValue))
+			normalizedValue = "128"
+		}
+		return normalizedValue, nil
+	}},
+	{Scope: ScopeGlobal | ScopeSession, Name: TiDBMVMaintainIsolationReadEngines, Value: defaultIsolationReadEnginesValue(), Validation: func(vars *SessionVars, normalizedValue string, originalValue string, scope ScopeFlag) (string, error) {
+		return normalizeIsolationReadEnginesValue(TiDBMVMaintainIsolationReadEngines, normalizedValue)
+	}, SetSession: func(s *SessionVars, val string) error {
+		s.MVMaintainIsolationReadEngines = val
+		return nil
+	}},
+	{Scope: ScopeGlobal | ScopeSession, Name: TiDBMViewMaintainImportThreads, Value: strconv.Itoa(DefTiDBMViewMaintainImportThreads), Type: TypeInt, MinValue: 0, MaxValue: MaxConfigurableConcurrency, SetSession: func(s *SessionVars, val string) error {
+		s.MViewMaintainImportThreads = TidbOptInt(val, DefTiDBMViewMaintainImportThreads)
+		return nil
+	}},
+	{Scope: ScopeGlobal | ScopeSession, Name: TiDBMViewMaintainImportDiskQuota, Value: DefTiDBMViewMaintainImportDiskQuota, Type: TypeStr, Validation: func(vars *SessionVars, normalizedValue string, originalValue string, scope ScopeFlag) (string, error) {
+		if normalizedValue == "" {
+			return normalizedValue, nil
+		}
+		byteSize, err := units.RAMInBytes(normalizedValue)
+		if err != nil || byteSize <= 0 {
+			return "", ErrWrongValueForVar.GenWithStackByArgs(TiDBMViewMaintainImportDiskQuota, originalValue)
+		}
+		return normalizedValue, nil
+	}, SetSession: func(s *SessionVars, val string) error {
+		s.MViewMaintainImportDiskQuota = val
+		return nil
+	}},
+	{Scope: ScopeGlobal, Name: TiDBMViewTaskMax, Value: strconv.Itoa(DefTiDBMViewTaskMax), Type: TypeInt, MinValue: 0, MaxValue: 256, SetGlobal: func(_ context.Context, _ *SessionVars, s string) error {
+		val, err := strconv.Atoi(s)
+		if err != nil {
+			return err
+		}
+		if setter := SetMVServiceTaskMaxConcurrency.Load(); setter != nil {
+			(*setter)(val)
+		}
+		return nil
+	}},
+	{Scope: ScopeGlobal, Name: TiDBMViewTaskRefreshRatio, Value: strconv.FormatFloat(DefTiDBMViewTaskRefreshRatio, 'f', -1, 64), Type: TypeFloat, MinValue: 0, MaxValue: 1, Validation: func(vars *SessionVars, normalizedValue string, originalValue string, scope ScopeFlag) (string, error) {
+		val, err := strconv.ParseFloat(normalizedValue, 64)
+		if err != nil {
+			return "", err
+		}
+		if val <= 0 || val >= 1 {
+			return "", ErrWrongValueForVar.GenWithStackByArgs(TiDBMViewTaskRefreshRatio, originalValue)
+		}
+		return normalizedValue, nil
+	}, SetGlobal: func(_ context.Context, _ *SessionVars, s string) error {
+		val, err := strconv.ParseFloat(s, 64)
+		if err != nil {
+			return err
+		}
+		if setter := SetMVServiceRefreshTaskConcurrencyRatio.Load(); setter != nil {
+			(*setter)(val)
+		}
+		return nil
+	}},
+	{Scope: ScopeGlobal, Name: TiDBMViewTaskThresholdCPU, Value: strconv.FormatFloat(DefTiDBMViewTaskThresholdCPU, 'f', -1, 64), Type: TypeFloat, MinValue: 0, MaxValue: 1, SetGlobal: func(_ context.Context, _ *SessionVars, s string) error {
+		val, err := strconv.ParseFloat(s, 64)
+		if err != nil {
+			return err
+		}
+		if setter := SetMVServiceTaskThresholdCPU.Load(); setter != nil {
+			(*setter)(val)
+		}
+		return nil
+	}},
+	{Scope: ScopeGlobal, Name: TiDBMViewTaskThresholdMemory, Value: strconv.FormatFloat(DefTiDBMViewTaskThresholdMemory, 'f', -1, 64), Type: TypeFloat, MinValue: 0, MaxValue: 1, SetGlobal: func(_ context.Context, _ *SessionVars, s string) error {
+		val, err := strconv.ParseFloat(s, 64)
+		if err != nil {
+			return err
+		}
+		if setter := SetMVServiceTaskThresholdMemory.Load(); setter != nil {
+			(*setter)(val)
+		}
+		return nil
+	}},
+	{Scope: ScopeGlobal, Name: TiDBMViewRefreshHistTime, Value: strconv.Itoa(DefTiDBMViewRefreshHistTime), Type: TypeInt, MinValue: 1, MaxValue: 8760, SetGlobal: func(_ context.Context, _ *SessionVars, s string) error {
+		val, err := strconv.Atoi(s)
+		if err != nil {
+			return err
+		}
+		if setter := SetMVServiceMViewRefreshHistRetention.Load(); setter != nil {
+			(*setter)(time.Duration(val) * time.Hour)
+		}
+		return nil
+	}},
+	{Scope: ScopeGlobal, Name: TiDBMLogPurgeHistTime, Value: strconv.Itoa(DefTiDBMLogPurgeHistTime), Type: TypeInt, MinValue: 1, MaxValue: 8760, SetGlobal: func(_ context.Context, _ *SessionVars, s string) error {
+		val, err := strconv.Atoi(s)
+		if err != nil {
+			return err
+		}
+		if setter := SetMVServiceMLogPurgeHistRetention.Load(); setter != nil {
+			(*setter)(time.Duration(val) * time.Hour)
+		}
+		return nil
+	}},
+	{Scope: ScopeGlobal, Name: TiDBMLogLogSlowPurge, Value: BoolToOnOff(DefTiDBMLogLogSlowPurge), Type: TypeBool,
+		SetGlobal: func(_ context.Context, _ *SessionVars, val string) error {
+			MLogLogSlowPurge.Store(TiDBOptOn(val))
+			return nil
+		}, GetGlobal: func(_ context.Context, _ *SessionVars) (string, error) {
+			return BoolToOnOff(MLogLogSlowPurge.Load()), nil
+		}},
 	{Scope: ScopeGlobal | ScopeSession, Name: TiDBNonTransactionalIgnoreError, Value: BoolToOnOff(DefTiDBBatchDMLIgnoreError), Type: TypeBool,
 		SetSession: func(s *SessionVars, val string) error {
 			s.NonTransactionalIgnoreError = TiDBOptOn(val)
@@ -3533,6 +3720,10 @@ var defaultSysVars = []*SysVar{
 			return (*SetPDClientDynamicOption.Load())(TiDBTSOClientRPCMode, val)
 		},
 	},
+	{Scope: ScopeGlobal | ScopeSession, Name: TiDBEnableCachePrepareStmt, Value: BoolToOnOff(DefEnableCachePrepareStmt), Type: TypeBool, SetSession: func(s *SessionVars, val string) error {
+		s.EnableCachePrepareStmt = TiDBOptOn(val)
+		return nil
+	}},
 }
 
 // GlobalSystemVariableInitialValue gets the default value for a system variable including ones that are dynamically set (e.g. based on the store)

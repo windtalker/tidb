@@ -18,6 +18,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -463,6 +464,171 @@ func TestCombinedIDAllocation(t *testing.T) {
 		}
 		require.Len(t, uniqueIDs, allocatedIDCount)
 	})
+}
+
+func TestCreateMaterializedViewLogJobTableIDs(t *testing.T) {
+	store := testkit.CreateMockStore(t, mockstore.WithStoreType(mockstore.EmbedUnistore))
+	// disable DDL to avoid it interfere the test
+	tk := testkit.NewTestKit(t, store)
+	dom := domain.GetDomain(tk.Session())
+	dom.DDL().OwnerManager().CampaignCancel()
+	ctx := kv.WithInternalSourceType(context.Background(), kv.InternalTxnDDL)
+
+	const baseTableID int64 = 900000000000000000
+	jobW := ddl.NewJobWrapperWithArgs(
+		&model.Job{
+			Version:    model.GetJobVerInUse(),
+			Type:       model.ActionCreateMaterializedViewLog,
+			SchemaName: "test",
+			TableName:  "$mlog$t",
+		},
+		&model.CreateMaterializedViewLogArgs{
+			TableInfo: &model.TableInfo{
+				MaterializedViewLog: &model.MaterializedViewLogInfo{BaseTableID: baseTableID},
+			},
+		},
+		false,
+	)
+	submitter := ddl.NewJobSubmitterForTest()
+	require.NoError(t, submitter.GenGIDAndInsertJobsWithRetry(ctx, sess.NewSession(tk.Session()), []*ddl.JobWrapper{jobW}))
+
+	rows := tk.MustQuery(fmt.Sprintf("select table_ids from mysql.tidb_ddl_job where job_id = %d", jobW.ID)).Rows()
+	require.Len(t, rows, 1)
+
+	tableIDs := strings.Split(rows[0][0].(string), ",")
+	require.Len(t, tableIDs, 2)
+	require.ElementsMatch(t, []string{
+		strconv.FormatInt(jobW.TableID, 10),
+		strconv.FormatInt(baseTableID, 10),
+	}, tableIDs)
+}
+
+func TestCreateMaterializedViewJobTableIDs(t *testing.T) {
+	store := testkit.CreateMockStore(t, mockstore.WithStoreType(mockstore.EmbedUnistore))
+	// disable DDL to avoid it interfere the test
+	tk := testkit.NewTestKit(t, store)
+	dom := domain.GetDomain(tk.Session())
+	dom.DDL().OwnerManager().CampaignCancel()
+	ctx := kv.WithInternalSourceType(context.Background(), kv.InternalTxnDDL)
+
+	const (
+		baseTableID int64 = 900000000000000000
+		mlogTableID int64 = 900000000000000001
+	)
+	jobW := ddl.NewJobWrapperWithArgs(
+		&model.Job{
+			Version:    model.GetJobVerInUse(),
+			Type:       model.ActionCreateMaterializedView,
+			SchemaName: "test",
+			TableName:  "mv",
+		},
+		&model.CreateMaterializedViewArgs{
+			TableInfo: &model.TableInfo{
+				MaterializedView: &model.MaterializedViewInfo{BaseTableIDs: []int64{baseTableID}},
+			},
+			MLogTableIDs: []int64{mlogTableID},
+		},
+		false,
+	)
+	submitter := ddl.NewJobSubmitterForTest()
+	require.NoError(t, submitter.GenGIDAndInsertJobsWithRetry(ctx, sess.NewSession(tk.Session()), []*ddl.JobWrapper{jobW}))
+
+	rows := tk.MustQuery(fmt.Sprintf("select table_ids from mysql.tidb_ddl_job where job_id = %d", jobW.ID)).Rows()
+	require.Len(t, rows, 1)
+
+	tableIDs := strings.Split(rows[0][0].(string), ",")
+	require.Len(t, tableIDs, 2)
+	require.ElementsMatch(t, []string{
+		strconv.FormatInt(jobW.TableID, 10),
+		strconv.FormatInt(mlogTableID, 10),
+	}, tableIDs)
+}
+
+func TestCreateMaterializedViewJobTableIDsMultiMLog(t *testing.T) {
+	store := testkit.CreateMockStore(t, mockstore.WithStoreType(mockstore.EmbedUnistore))
+	// disable DDL to avoid it interfere the test
+	tk := testkit.NewTestKit(t, store)
+	dom := domain.GetDomain(tk.Session())
+	dom.DDL().OwnerManager().CampaignCancel()
+	ctx := kv.WithInternalSourceType(context.Background(), kv.InternalTxnDDL)
+
+	const (
+		baseTableID1 int64 = 900000000000000010
+		baseTableID2 int64 = 900000000000000011
+		mlogTableID1 int64 = 900000000000000012
+		mlogTableID2 int64 = 900000000000000013
+	)
+	jobW := ddl.NewJobWrapperWithArgs(
+		&model.Job{
+			Version:    model.GetJobVerInUse(),
+			Type:       model.ActionCreateMaterializedView,
+			SchemaName: "test",
+			TableName:  "mv_multi",
+		},
+		&model.CreateMaterializedViewArgs{
+			TableInfo: &model.TableInfo{
+				MaterializedView: &model.MaterializedViewInfo{BaseTableIDs: []int64{baseTableID1, baseTableID2}},
+			},
+			MLogTableIDs: []int64{mlogTableID1, mlogTableID2, mlogTableID1},
+		},
+		false,
+	)
+	submitter := ddl.NewJobSubmitterForTest()
+	require.NoError(t, submitter.GenGIDAndInsertJobsWithRetry(ctx, sess.NewSession(tk.Session()), []*ddl.JobWrapper{jobW}))
+
+	rows := tk.MustQuery(fmt.Sprintf("select table_ids from mysql.tidb_ddl_job where job_id = %d", jobW.ID)).Rows()
+	require.Len(t, rows, 1)
+
+	tableIDs := strings.Split(rows[0][0].(string), ",")
+	require.Len(t, tableIDs, 3)
+	require.ElementsMatch(t, []string{
+		strconv.FormatInt(jobW.TableID, 10),
+		strconv.FormatInt(mlogTableID1, 10),
+		strconv.FormatInt(mlogTableID2, 10),
+	}, tableIDs)
+}
+
+func TestRefreshMaterializedViewCompleteOutOfPlaceCutoverJobTableIDs(t *testing.T) {
+	store := testkit.CreateMockStore(t, mockstore.WithStoreType(mockstore.EmbedUnistore))
+	// disable DDL to avoid it interfere the test
+	tk := testkit.NewTestKit(t, store)
+	dom := domain.GetDomain(tk.Session())
+	dom.DDL().OwnerManager().CampaignCancel()
+	ctx := kv.WithInternalSourceType(context.Background(), kv.InternalTxnDDL)
+
+	const (
+		oldMViewID   int64  = 900000000000000020
+		shadowTblID  int64  = 900000000000000022
+		buildReadTSO uint64 = 12345
+	)
+	jobW := ddl.NewJobWrapperWithArgs(
+		&model.Job{
+			Version:    model.GetJobVerInUse(),
+			Type:       model.ActionMViewRefreshOutOfPlaceCutover,
+			SchemaName: "test",
+			TableName:  "mv_cutover",
+			TableID:    oldMViewID,
+		},
+		&model.RefreshMaterializedViewCompleteOutOfPlaceCutoverArgs{
+			OldMViewID:    oldMViewID,
+			ShadowTableID: shadowTblID,
+			BuildReadTSO:  buildReadTSO,
+		},
+		false,
+	)
+
+	submitter := ddl.NewJobSubmitterForTest()
+	require.NoError(t, submitter.GenGIDAndInsertJobsWithRetry(ctx, sess.NewSession(tk.Session()), []*ddl.JobWrapper{jobW}))
+
+	rows := tk.MustQuery(fmt.Sprintf("select table_ids from mysql.tidb_ddl_job where job_id = %d", jobW.ID)).Rows()
+	require.Len(t, rows, 1)
+
+	tableIDs := strings.Split(rows[0][0].(string), ",")
+	require.Len(t, tableIDs, 2)
+	require.ElementsMatch(t, []string{
+		strconv.FormatInt(oldMViewID, 10),
+		strconv.FormatInt(shadowTblID, 10),
+	}, tableIDs)
 }
 
 var (

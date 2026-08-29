@@ -275,6 +275,27 @@ func TestReorgExprContext(t *testing.T) {
 	}
 }
 
+func TestCreateMaterializedViewBuildSessionMVMaintenance(t *testing.T) {
+	store := &mockStorage{client: &mock.Client{}}
+	sctx := newMockReorgSessCtx(store)
+	originalInMaterializedViewMaintenance := sctx.GetSessionVars().InMaterializedViewMaintenance
+
+	reorgMeta := &model.DDLReorgMeta{
+		Location:          &model.TimeZoneLocation{Name: "UTC"},
+		ResourceGroupName: "default",
+	}
+	job := &model.Job{
+		ReorgMeta:   reorgMeta,
+		SessionVars: make(map[string]string),
+	}
+	restore, err := initCreateMaterializedViewBuildSession(sctx, job, sctx.GetSessionVars().CurrentDB)
+	require.NoError(t, err)
+	require.True(t, sctx.GetSessionVars().InMaterializedViewMaintenance)
+
+	restore()
+	require.Equal(t, originalInMaterializedViewMaintenance, sctx.GetSessionVars().InMaterializedViewMaintenance)
+}
+
 func TestReorgTableMutateContext(t *testing.T) {
 	originalRowFmt := variable.GetDDLReorgRowFormat()
 	defer variable.SetDDLReorgRowFormat(originalRowFmt)

@@ -43,6 +43,9 @@ const ExtraPhysTblID = -3
 // ExtraRowChecksumID is the column ID of column which holds the row checksum info.
 const ExtraRowChecksumID = -4
 
+// ExtraCommitTSID is the column ID of column which holds the commit timestamp.
+const ExtraCommitTSID = -5
+
 const (
 	// TableInfoVersion0 means the table info version is 0.
 	// Upgrade from v2.1.1 or v2.1.2 to v2.1.3 and later, and then execute a "change/modify column" statement
@@ -85,6 +88,9 @@ var ExtraHandleName = model.NewCIStr("_tidb_rowid")
 
 // ExtraPhysTblIDName is the name of ExtraPhysTblID Column.
 var ExtraPhysTblIDName = model.NewCIStr("_tidb_tid")
+
+// ExtraCommitTSName is the name of ExtraCommitTSID Column.
+var ExtraCommitTSName = model.NewCIStr("_tidb_commit_ts")
 
 // Deprecated: Use ExtraPhysTblIDName instead.
 // var ExtraPartitionIdName = NewCIStr("_tidb_pid") //nolint:revive
@@ -164,6 +170,11 @@ type TableInfo struct {
 
 	View *ViewInfo `json:"view"`
 
+	MaterializedViewBase   *MaterializedViewBaseInfo   `json:"materialized_view_base,omitempty"`
+	MaterializedView       *MaterializedViewInfo       `json:"materialized_view,omitempty"`
+	MaterializedViewShadow *MaterializedViewShadowInfo `json:"materialized_view_shadow,omitempty"`
+	MaterializedViewLog    *MaterializedViewLogInfo    `json:"materialized_view_log,omitempty"`
+
 	Sequence *SequenceInfo `json:"sequence"`
 
 	// Lock represent the table lock info.
@@ -238,6 +249,19 @@ func (t *TableInfo) Clone() *TableInfo {
 	}
 	if t.TTLInfo != nil {
 		nt.TTLInfo = t.TTLInfo.Clone()
+	}
+
+	if t.MaterializedViewBase != nil {
+		nt.MaterializedViewBase = t.MaterializedViewBase.Clone()
+	}
+	if t.MaterializedView != nil {
+		nt.MaterializedView = t.MaterializedView.Clone()
+	}
+	if t.MaterializedViewShadow != nil {
+		nt.MaterializedViewShadow = t.MaterializedViewShadow.Clone()
+	}
+	if t.MaterializedViewLog != nil {
+		nt.MaterializedViewLog = t.MaterializedViewLog.Clone()
 	}
 
 	return &nt
@@ -677,6 +701,226 @@ type ViewInfo struct {
 	SelectStmt  string                `json:"view_select"`
 	CheckOption model.ViewCheckOption `json:"view_checkoption"`
 	Cols        []model.CIStr         `json:"view_cols"`
+}
+
+// MaterializedViewBaseInfo is stored in TableInfo for a base table that has materialized view(s) and/or
+// a materialized view log.
+type MaterializedViewBaseInfo struct {
+	// MLogID is the table ID of the materialized view log for this base table. One base table can have
+	// at most one materialized view log.
+	MLogID int64 `json:"mlog_id"`
+
+	// MViewIDs is the list of materialized view table IDs that depend on this base table.
+	MViewIDs []int64 `json:"mview_ids"`
+}
+
+// Clone clones MaterializedViewBaseInfo.
+func (i *MaterializedViewBaseInfo) Clone() *MaterializedViewBaseInfo {
+	if i == nil {
+		return nil
+	}
+	ni := *i
+	ni.MViewIDs = append([]int64(nil), i.MViewIDs...)
+	return &ni
+}
+
+// MViewInitBuildState records the initial-build state of a materialized view.
+//
+// Keep MViewInitBuildReady as the zero value for compatibility with existing clusters,
+// whose persisted materialized view metadata does not contain this field.
+type MViewInitBuildState byte
+
+const (
+	// MViewInitBuildReady means the MV is ready for normal query and refresh.
+	MViewInitBuildReady MViewInitBuildState = iota
+	// MViewInitBuildDeferred means the MV exists but its initial build has not started yet.
+	MViewInitBuildDeferred
+	// MViewInitBuildBuilding means the MV initial build is currently in progress.
+	MViewInitBuildBuilding
+)
+
+// IsReady returns whether the initial build state allows normal query and refresh.
+func (s MViewInitBuildState) IsReady() bool {
+	return s == MViewInitBuildReady
+}
+
+// String implements fmt.Stringer.
+func (s MViewInitBuildState) String() string {
+	switch s {
+	case MViewInitBuildReady:
+		return "ready"
+	case MViewInitBuildDeferred:
+		return "deferred"
+	case MViewInitBuildBuilding:
+		return "building"
+	default:
+		return fmt.Sprintf("unknown(%d)", byte(s))
+	}
+}
+
+// AccessErrorMessage returns the user-facing error message for a non-ready MV access.
+func (s MViewInitBuildState) AccessErrorMessage(objectName string) string {
+	switch s {
+	case MViewInitBuildDeferred:
+		return fmt.Sprintf("materialized view %s is not ready: initial build has not completed", objectName)
+	case MViewInitBuildBuilding:
+		return fmt.Sprintf("materialized view %s initial build is in progress", objectName)
+	default:
+		return ""
+	}
+}
+
+// MaterializedViewInfo is stored in TableInfo for a materialized view table.
+type MaterializedViewInfo struct {
+	// BaseTableIDs is the table IDs of the base tables referenced by this MV.
+	// For Stage-1, it contains exactly one element.
+	// A slice is used here to keep metadata extensible for future multi-base-table support.
+	BaseTableIDs []int64 `json:"base_table_ids"`
+
+	// InitBuildState controls whether the MV is ready for normal query/refresh.
+	// Zero value means ready for backward compatibility with legacy persisted metadata.
+	InitBuildState MViewInitBuildState `json:"init_build_state,omitempty"`
+
+	// SQLContent is the SELECT statement in CREATE MATERIALIZED VIEW.
+	SQLContent string `json:"sql_content"`
+
+	// RefreshMethod is the refresh method specified in CREATE MATERIALIZED VIEW, for example, FAST.
+	RefreshMethod string `json:"refresh_method,omitempty"`
+
+	// RefreshStartWith is the expression string after "START WITH", stored in canonical SQL format.
+	RefreshStartWith string `json:"refresh_start_with,omitempty"`
+
+	// RefreshNext is the expression string after "NEXT", stored in canonical SQL format.
+	RefreshNext string `json:"refresh_next,omitempty"`
+
+	// AlertWarningSec controls warning log threshold (seconds) since LAST_SUCCESS_READ_TSO
+	// for automatically scheduled MV refresh tasks. 0 means disabled.
+	AlertWarningSec int64 `json:"alert_warning_sec,omitempty"`
+
+	// AlertOverdueSec controls overdue log threshold (seconds) since LAST_SUCCESS_READ_TSO
+	// for automatically scheduled MV refresh tasks. 0 means disabled.
+	AlertOverdueSec int64 `json:"alert_overdue_sec,omitempty"`
+
+	// AlertRefreshFailed controls whether refresh failures should be persisted into
+	// mysql.tidb_mview_refresh_alert and logged as Materialized_view_refresh_failed.
+	// false means disabled.
+	AlertRefreshFailed bool `json:"alert_refresh_failed,omitempty"`
+
+	// DefinitionSQLMode is the SQL mode captured from CREATE MATERIALIZED VIEW session.
+	DefinitionSQLMode mysql.SQLMode `json:"definition_sql_mode"`
+
+	// DefinitionTimeZone is the timezone captured from CREATE MATERIALIZED VIEW session.
+	DefinitionTimeZone TimeZoneLocation `json:"definition_time_zone"`
+
+	// RefreshScheduleTimeZone is the timezone used to evaluate refresh schedule expressions.
+	RefreshScheduleTimeZone TimeZoneLocation `json:"refresh_schedule_time_zone"`
+}
+
+// Clone clones MaterializedViewInfo.
+func (i *MaterializedViewInfo) Clone() *MaterializedViewInfo {
+	if i == nil {
+		return nil
+	}
+	ni := *i
+	ni.BaseTableIDs = append([]int64(nil), i.BaseTableIDs...)
+	return &ni
+}
+
+// GetInitBuildState returns the effective initial-build state.
+func (i *MaterializedViewInfo) GetInitBuildState() MViewInitBuildState {
+	if i == nil {
+		return MViewInitBuildReady
+	}
+	return i.InitBuildState
+}
+
+// MaterializedViewShadowInfo is stored in TableInfo for an out-of-place refresh shadow table.
+type MaterializedViewShadowInfo struct {
+	// SourceMViewID is the logical MV table ID this protected shadow belongs to.
+	SourceMViewID int64 `json:"source_mview_id"`
+}
+
+// Clone clones MaterializedViewShadowInfo.
+func (i *MaterializedViewShadowInfo) Clone() *MaterializedViewShadowInfo {
+	if i == nil {
+		return nil
+	}
+	ni := *i
+	return &ni
+}
+
+// MaterializedViewLogInfo is stored in TableInfo for a materialized view log table.
+type MaterializedViewLogInfo struct {
+	// BaseTableID is the table ID of the base table.
+	BaseTableID int64 `json:"base_table_id"`
+
+	// Columns is the base table column list recorded in the log (user-specified columns).
+	Columns []model.CIStr `json:"columns"`
+
+	// PurgeMethod is the purge method specified in CREATE MATERIALIZED VIEW LOG, for example, IMMEDIATE.
+	PurgeMethod string `json:"purge_method,omitempty"`
+
+	// PurgeStartWith is the expression string after "START WITH", stored in canonical SQL format.
+	PurgeStartWith string `json:"purge_start_with,omitempty"`
+
+	// PurgeNext is the expression string after "NEXT", stored in canonical SQL format.
+	PurgeNext string `json:"purge_next,omitempty"`
+
+	// LogAccumulationAlertRows is the user-specified threshold for emitting MV log accumulation alerts.
+	// nil means the CREATE statement did not specify ALERT ROWS and runtime keeps alerting disabled by default.
+	LogAccumulationAlertRows *uint64 `json:"log_accumulation_alert_rows,omitempty"`
+
+	// DefinitionSQLMode is the SQL mode captured from CREATE MATERIALIZED VIEW LOG session.
+	DefinitionSQLMode mysql.SQLMode `json:"definition_sql_mode"`
+
+	// PurgeScheduleTimeZone is the timezone used to evaluate purge schedule expressions.
+	PurgeScheduleTimeZone TimeZoneLocation `json:"purge_schedule_time_zone"`
+}
+
+const (
+	// MaterializedViewLogTableNamePrefix is the prefix of the physical table name for a materialized view log.
+	MaterializedViewLogTableNamePrefix = "$mlog$"
+
+	// MaterializedViewLogDMLTypeColumnName is the auto-added internal column on a materialized view log table,
+	// recording row operation type (I/U/D).
+	MaterializedViewLogDMLTypeColumnName = "_MLOG$_DML_TYPE"
+
+	// MaterializedViewLogOldNewColumnName is the auto-added internal column on a materialized view log table,
+	// recording row image kind (NEW=1, OLD=-1).
+	MaterializedViewLogOldNewColumnName = "_MLOG$_OLD_NEW"
+)
+
+// MaterializedViewLogTableName returns the physical materialized view log table name for a base table.
+func MaterializedViewLogTableName(baseTableName model.CIStr) model.CIStr {
+	baseTableNameRunes := []rune(baseTableName.O)
+	maxBaseTableNameLength := mysql.MaxTableNameLength - len([]rune(MaterializedViewLogTableNamePrefix))
+	if len(baseTableNameRunes) > maxBaseTableNameLength {
+		baseTableNameRunes = baseTableNameRunes[:maxBaseTableNameLength]
+	}
+	return model.NewCIStr(MaterializedViewLogTableNamePrefix + string(baseTableNameRunes))
+}
+
+// Clone clones MaterializedViewLogInfo.
+func (i *MaterializedViewLogInfo) Clone() *MaterializedViewLogInfo {
+	if i == nil {
+		return nil
+	}
+	ni := *i
+	ni.Columns = append([]model.CIStr(nil), i.Columns...)
+	if i.LogAccumulationAlertRows != nil {
+		rows := *i.LogAccumulationAlertRows
+		ni.LogAccumulationAlertRows = &rows
+	}
+	return &ni
+}
+
+// EffectiveLogAccumulationAlertRows returns the runtime threshold and whether alerting is enabled.
+// A nil configured threshold keeps alerting disabled by default; an explicit zero also disables alerting.
+func (i *MaterializedViewLogInfo) EffectiveLogAccumulationAlertRows() (uint64, bool) {
+	if i == nil || i.LogAccumulationAlertRows == nil || *i.LogAccumulationAlertRows == 0 {
+		return 0, false
+	}
+	return *i.LogAccumulationAlertRows, true
 }
 
 // Some constants for sequence.

@@ -44,6 +44,7 @@ import (
 	"github.com/pingcap/tidb/pkg/metrics"
 	"github.com/pingcap/tidb/pkg/parser"
 	"github.com/pingcap/tidb/pkg/parser/ast"
+	"github.com/pingcap/tidb/pkg/parser/format"
 	pmodel "github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
 	"github.com/pingcap/tidb/pkg/parser/terror"
@@ -1192,6 +1193,7 @@ func (a *ExecStmt) handlePessimisticLockError(ctx context.Context, lockErr error
 	}()
 
 	txnManager := sessiontxn.GetTxnManager(a.Ctx)
+	failpoint.InjectCall("beforePessimisticStmtErrorForNextAction")
 	action, err := txnManager.OnStmtErrorForNextAction(ctx, sessiontxn.StmtErrAfterPessimisticLock, lockErr)
 	if err != nil {
 		return nil, err
@@ -1526,6 +1528,9 @@ func (a *ExecStmt) FinishExecuteStmt(txnTS uint64, err error, hasMoreResults boo
 func (a *ExecStmt) recordAffectedRows2Metrics() {
 	sessVars := a.Ctx.GetSessionVars()
 	if affectedRows := sessVars.StmtCtx.AffectedRows(); affectedRows > 0 {
+		if shouldSkipAffectedRowsMetricForInternalMVMaintenance(sessVars) {
+			return
+		}
 		switch sessVars.StmtCtx.StmtType {
 		case "Insert":
 			metrics.AffectedRowsCounterInsert.Add(float64(affectedRows))
@@ -1543,7 +1548,26 @@ func (a *ExecStmt) recordAffectedRows2Metrics() {
 			metrics.AffectedRowsCounterNTDMLInsert.Add(float64(affectedRows))
 		case "NTDML-Replace":
 			metrics.AffectedRowsCounterNTDMLReplace.Add(float64(affectedRows))
+		case "RefreshMaterializedView":
+			metrics.AffectedRowsCounterRefreshMV.Add(float64(affectedRows))
+		case "PurgeMaterializedViewLog":
+			metrics.AffectedRowsCounterPurgeMVLog.Add(float64(affectedRows))
 		}
+	}
+}
+
+func shouldSkipAffectedRowsMetricForInternalMVMaintenance(sessVars *variable.SessionVars) bool {
+	if sessVars == nil || !sessVars.InRestrictedSQL || !sessVars.InMaterializedViewMaintenance {
+		return false
+	}
+	switch sessVars.StmtCtx.StmtType {
+	case "Insert", "Replace", "Delete", "Update",
+		"NTDML-Delete", "NTDML-Update", "NTDML-Insert", "NTDML-Replace":
+		// Internal MV maintenance DMLs are already rolled up and reported by the outer
+		// REFRESH MATERIALIZED VIEW / PURGE MATERIALIZED VIEW LOG statement.
+		return true
+	default:
+		return false
 	}
 }
 
@@ -1649,7 +1673,14 @@ func (a *ExecStmt) LogSlowQuery(txnTS uint64, succ bool, hasMoreResults bool) {
 	if (!enable || costTime < threshold) && !force {
 		return
 	}
-	sql := FormatSQL(a.GetTextToLog(true))
+	if shouldSkipSlowLogForInternalMVMaintenance(sessVars) {
+		return
+	}
+	sqlText := a.GetTextToLog(true)
+	if len(sqlText) == 0 {
+		sqlText = restoreStmtTextForSlowLogWhenEmptySQL(a.StmtNode)
+	}
+	sql := FormatSQL(sqlText)
 	_, digest := stmtCtx.SQLDigest()
 
 	var indexNames string
@@ -1814,6 +1845,14 @@ func (a *ExecStmt) LogSlowQuery(txnTS uint64, succ bool, hasMoreResults bool) {
 			Internal:   sessVars.InRestrictedSQL,
 		})
 	}
+}
+
+func shouldSkipSlowLogForInternalMVMaintenance(sessVars *variable.SessionVars) bool {
+	if sessVars == nil {
+		return false
+	}
+	// Controlled by tidb_mlog_log_slow_purge: ON -> log (don't skip), OFF -> skip.
+	return !variable.MLogLogSlowPurge.Load() && sessVars.StmtCtx.StmtType == "PurgeMaterializedViewLog"
 }
 
 func extractMsgFromSQLWarn(sqlWarn *contextutil.SQLWarn) string {
@@ -2133,6 +2172,21 @@ func (a *ExecStmt) GetTextToLog(keepHint bool) string {
 	return sql
 }
 
+func restoreStmtTextForSlowLogWhenEmptySQL(stmt ast.StmtNode) string {
+	implementStmt, ok := stmt.(*ast.RefreshMaterializedViewImplementStmt)
+	if !ok || implementStmt.RefreshStmt == nil {
+		return ""
+	}
+	var sb strings.Builder
+	sb.WriteString("IMPLEMENT FOR ")
+	if err := implementStmt.RefreshStmt.Restore(format.NewRestoreCtx(format.DefaultRestoreFlags, &sb)); err != nil {
+		logutil.BgLogger().Debug("restore refresh materialized view stmt for slow log failed", zap.Error(err))
+		return ""
+	}
+	sb.WriteString(" USING TIMESTAMP")
+	return sb.String()
+}
+
 // getLazyText is equivalent to `a.GetTextToLog(false)`. Note that the s.Params is a shallow copy of
 // `sessVars.PlanCacheParams`, so you can only use the lazy text within the current stmt context.
 func (a *ExecStmt) getLazyStmtText() (s variable.LazyStmtText) {
@@ -2191,13 +2245,13 @@ func (a *ExecStmt) observeStmtBeginForTopSQL(ctx context.Context) context.Contex
 		}
 		// Always attach the SQL and plan info uses to catch the running SQL when Top SQL is enabled in execution.
 		if stats != nil {
-			stats.OnExecutionBegin(sqlDigestByte, planDigestByte)
+			stats.OnExecutionBegin(sqlDigestByte, planDigestByte, vars.InPacketBytes.Load())
 		}
 		return topsql.AttachSQLAndPlanInfo(ctx, sqlDigest, planDigest)
 	}
 
 	if stats != nil {
-		stats.OnExecutionBegin(sqlDigestByte, planDigestByte)
+		stats.OnExecutionBegin(sqlDigestByte, planDigestByte, vars.InPacketBytes.Load())
 		// This is a special logic prepared for TiKV's SQLExecCount.
 		sc.KvExecCounter = stats.CreateKvExecCounter(sqlDigestByte, planDigestByte)
 	}
@@ -2222,7 +2276,7 @@ func (a *ExecStmt) observeStmtFinishedForTopSQL() {
 	if stats := a.Ctx.GetStmtStats(); stats != nil && topsqlstate.TopSQLEnabled() {
 		sqlDigest, planDigest := a.getSQLPlanDigest()
 		execDuration := vars.GetTotalCostDuration()
-		stats.OnExecutionFinished(sqlDigest, planDigest, execDuration)
+		stats.OnExecutionFinished(sqlDigest, planDigest, execDuration, vars.OutPacketBytes.Load())
 	}
 }
 
