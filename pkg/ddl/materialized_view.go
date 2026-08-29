@@ -1446,8 +1446,6 @@ func buildMViewRefreshMeta(sctx sessionctx.Context, refresh *ast.MViewRefreshCla
 		return "FAST", "", "", nil
 	}
 	switch refresh.Method {
-	case ast.MViewRefreshMethodNever:
-		return "NEVER", "", "", nil
 	case ast.MViewRefreshMethodFast:
 		method = "FAST"
 		if refresh.StartWith != nil {
