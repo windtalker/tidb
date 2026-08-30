@@ -276,6 +276,12 @@ func (h subscriber) handle(
 				)
 			}
 		}
+	case model.ActionAlterMaterializedViewRefresh,
+		model.ActionAlterMaterializedViewAttributes,
+		model.ActionAlterMaterializedViewLogPurge,
+		model.ActionCreateMaterializedViewLog,
+		model.ActionCreateMaterializedView:
+		// MV DDL updates metadata only and does not change table data or partition topology.
 	default:
 		intest.Assert(false)
 		logutil.StatsLogger().Error("Unhandled schema change event",
