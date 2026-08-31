@@ -1332,6 +1332,12 @@ func BuildTableInfoWithLike(ident ast.Ident, referTblInfo *model.TableInfo, s *a
 	tblInfo.Name = ident.Name
 	tblInfo.AutoIncID = 0
 	tblInfo.ForeignKeys = nil
+	// CREATE TABLE ... LIKE must always produce a normal table definition.
+	// Do not carry MV/MV LOG/base reverse metadata from the source table.
+	tblInfo.MaterializedViewBase = nil
+	tblInfo.MaterializedView = nil
+	tblInfo.MaterializedViewShadow = nil
+	tblInfo.MaterializedViewLog = nil
 	tblInfo.TableCacheStatusType = model.TableCacheStatusDisable
 	// Ignore TiFlash replicas for temporary tables.
 	if s.TemporaryKeyword != ast.TemporaryNone {

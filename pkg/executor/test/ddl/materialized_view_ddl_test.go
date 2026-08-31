@@ -1636,13 +1636,13 @@ func TestCreateMaterializedViewPauseAndResume(t *testing.T) {
 			return false
 		}
 		state := strings.ToLower(fmt.Sprint(rows[0][len(rows[0])-2]))
-		return state == "paused" || state == "pausing"
+		return state == "paused"
 	}, 30*time.Second, 100*time.Millisecond)
 
 	// Current Stage-1 semantics: MV table is visible once phase-1 finishes, even before job completion.
 	tk.MustQuery("show tables like 'mv_pause'").Check(testkit.Rows("mv_pause"))
 
-	tkCtl.MustExec("admin resume ddl jobs " + jobID)
+	tkCtl.MustQuery("admin resume ddl jobs " + jobID).Check(testkit.Rows(jobID + " successful"))
 	select {
 	case err := <-ddlDone:
 		if err != nil {
