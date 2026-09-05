@@ -968,7 +968,7 @@ func TestCreateMaterializedViewLogMetaColumnNameConflict(t *testing.T) {
 }
 
 func TestCreateMaterializedViewLogRejectNonBaseObject(t *testing.T) {
-	store := testkit.CreateMockStore(t)
+	store, dom := testkit.CreateMockStoreAndDomain(t)
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
 	tk.MustExec("create table t (a int)")
@@ -1003,8 +1003,15 @@ func TestCreateMaterializedViewLogRejectNonBaseObject(t *testing.T) {
 	err = tk.ExecToErr("create materialized view log on t (a)")
 	require.Equal(t, dbterror.ErrWrongObject.GenWithStackByArgs("test", "t", "BASE TABLE").Error(), err.Error())
 	err = tk.ExecToErr("create materialized view log on mv (a, cnt)")
-	require.Error(t, err)
-	require.Equal(t, dbterror.ErrWrongObject.GenWithStackByArgs("test", "mv", "BASE TABLE").Error(), err.Error())
+	require.NoError(t, err)
+	is := dom.InfoSchema()
+	mlogTable, err := is.TableByName(context.Background(), pmodel.NewCIStr("test"), pmodel.NewCIStr("$mlog$mv"))
+	require.NoError(t, err)
+	mvTable, err := is.TableByName(context.Background(), pmodel.NewCIStr("test"), pmodel.NewCIStr("mv"))
+	require.NoError(t, err)
+	require.NotNil(t, mvTable.Meta().MaterializedViewBase)
+	require.Equal(t, mlogTable.Meta().ID, mvTable.Meta().MaterializedViewBase.MLogID)
+	require.Equal(t, mvTable.Meta().ID, mlogTable.Meta().MaterializedViewLog.BaseTableID)
 
 	tk.MustExec("drop table t")
 	tk.MustExec("create table t (a int)")

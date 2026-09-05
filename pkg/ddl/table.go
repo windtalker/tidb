@@ -1227,6 +1227,10 @@ func (w *worker) onRefreshMaterializedViewCompleteOutOfPlaceCutover(jobCtx *jobC
 			"refresh materialized view complete OUT OF PLACE cutover: materialized view must reference exactly one base table in Stage-1",
 		)
 	}
+	if err := validateMaterializedViewCompleteOutOfPlaceTarget(job.SchemaName, oldMViewTblInfo); err != nil {
+		job.State = model.JobStateCancelled
+		return ver, err
+	}
 
 	shadowTblInfo, err := getTableInfo(jobCtx.metaMut, args.ShadowTableID, job.SchemaID)
 	if err != nil {
@@ -1319,6 +1323,21 @@ func (w *worker) onRefreshMaterializedViewCompleteOutOfPlaceCutover(jobCtx *jobC
 	}
 	job.FinishTableJob(model.JobStateDone, model.StatePublic, ver, newMViewTblInfo)
 	return ver, nil
+}
+
+func validateMaterializedViewCompleteOutOfPlaceTarget(schemaName string, tblInfo *model.TableInfo) error {
+	if tblInfo == nil || tblInfo.MaterializedViewBase == nil {
+		return nil
+	}
+	baseInfo := tblInfo.MaterializedViewBase
+	if baseInfo.MLogID == 0 && len(baseInfo.MViewIDs) == 0 {
+		return nil
+	}
+	return errors.Errorf(
+		"refresh materialized view complete OUT OF PLACE is not supported for materialized view %s.%s with a materialized view log or dependent materialized view",
+		schemaName,
+		tblInfo.Name.O,
+	)
 }
 
 func rewriteMaterializedViewBaseForOutOfPlaceCutover(
