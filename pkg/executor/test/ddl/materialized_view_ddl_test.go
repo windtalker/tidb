@@ -1880,6 +1880,48 @@ func TestCreateMaterializedViewBuildContextCanceledRollback(t *testing.T) {
 	require.Empty(t, baseTable.Meta().MaterializedViewBase.MViewIDs)
 }
 
+func TestCreateMaterializedViewOnMaterializedView(t *testing.T) {
+	store, dom := testkit.CreateMockStoreAndDomain(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("create table mv_on_mv_base (a int not null, b int not null)")
+	tk.MustExec("insert into mv_on_mv_base values (1, 10), (1, 5), (2, 7)")
+	tk.MustExec("create materialized view log on mv_on_mv_base (a, b)")
+	tk.MustExec("create materialized view mv_parent (a, cnt, total) refresh fast as select a, count(1), sum(b) from mv_on_mv_base group by a")
+	tk.MustExec("create materialized view log on mv_parent (a, cnt)")
+	tk.MustExec("create materialized view mv_child (a, parent_cnt, child_cnt) refresh fast as select a, sum(cnt), count(1) from mv_parent group by a")
+
+	tk.MustQuery("select a, parent_cnt, child_cnt from mv_child order by a").Check(testkit.Rows("1 2 1", "2 1 1"))
+
+	is := dom.InfoSchema()
+	parent, err := is.TableByName(context.Background(), pmodel.NewCIStr("test"), pmodel.NewCIStr("mv_parent"))
+	require.NoError(t, err)
+	child, err := is.TableByName(context.Background(), pmodel.NewCIStr("test"), pmodel.NewCIStr("mv_child"))
+	require.NoError(t, err)
+	parentMLog, err := is.TableByName(context.Background(), pmodel.NewCIStr("test"), pmodel.NewCIStr("$mlog$mv_parent"))
+	require.NoError(t, err)
+
+	require.Equal(t, []int64{parent.Meta().ID}, child.Meta().MaterializedView.BaseTableIDs)
+	require.NotNil(t, parent.Meta().MaterializedViewBase)
+	require.Equal(t, parentMLog.Meta().ID, parent.Meta().MaterializedViewBase.MLogID)
+	require.Equal(t, parent.Meta().ID, parentMLog.Meta().MaterializedViewLog.BaseTableID)
+	require.Contains(t, parent.Meta().MaterializedViewBase.MViewIDs, child.Meta().ID)
+}
+
+func TestCreateMaterializedViewOnMaterializedViewRequiresTrackedColumns(t *testing.T) {
+	store := testkit.CreateMockStore(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("create table mv_on_mv_missing_log_col_base (a int not null, b int not null)")
+	tk.MustExec("insert into mv_on_mv_missing_log_col_base values (1, 10)")
+	tk.MustExec("create materialized view log on mv_on_mv_missing_log_col_base (a, b)")
+	tk.MustExec("create materialized view mv_parent_missing_log_col (a, cnt) as select a, count(1) from mv_on_mv_missing_log_col_base group by a")
+	tk.MustExec("create materialized view log on mv_parent_missing_log_col (a)")
+
+	err := tk.ExecToErr("create materialized view mv_child_missing_log_col (a, parent_cnt, child_cnt) as select a, sum(cnt), count(1) from mv_parent_missing_log_col group by a")
+	require.ErrorContains(t, err, "materialized view log does not contain column cnt")
+}
+
 func TestCreateMaterializedViewRejectNonBaseObject(t *testing.T) {
 	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)

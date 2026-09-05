@@ -54,7 +54,6 @@ import (
 	"github.com/pingcap/tidb/pkg/util/chunk"
 	"github.com/pingcap/tidb/pkg/util/dbterror"
 	"github.com/pingcap/tidb/pkg/util/generatedexpr"
-	"github.com/pingcap/tidb/pkg/util/intest"
 	"github.com/pingcap/tidb/pkg/util/mviewutil"
 	"github.com/pingcap/tidb/pkg/util/set"
 	"github.com/pingcap/tidb/pkg/util/sqlescape"
@@ -349,13 +348,9 @@ func onCreateMaterializedViewBaseCheck(metaMut *meta.Mutator, schemaID int64, ba
 	if err != nil {
 		return nil, err
 	}
-	if baseTblInfo.IsView() || baseTblInfo.IsSequence() || baseTblInfo.TempTableType != model.TempTableNone {
-		return nil, dbterror.ErrWrongObject.GenWithStackByArgs(schemaName, baseTblInfo.Name, "BASE TABLE")
+	if err := validateMaterializedViewSourceState(schemaName, baseTblInfo); err != nil {
+		return nil, err
 	}
-	if baseTblInfo.GetPartitionInfo() != nil {
-		return nil, errUnsupportedMaterializedViewOnPartitionTable("CREATE MATERIALIZED VIEW")
-	}
-	intest.Assert(baseTblInfo.State == model.StatePublic)
 	if baseTblInfo.MaterializedViewBase == nil || baseTblInfo.MaterializedViewBase.MLogID == 0 {
 		return nil, dbterror.ErrInvalidDDLJob.GenWithStackByArgs("create materialized view: base table has no materialized view log")
 	}
@@ -363,10 +358,9 @@ func onCreateMaterializedViewBaseCheck(metaMut *meta.Mutator, schemaID int64, ba
 	if err != nil {
 		return nil, err
 	}
-	if mlogTblInfo.MaterializedViewLog == nil || mlogTblInfo.MaterializedViewLog.BaseTableID != baseTblInfo.ID {
+	if err := validateMaterializedViewSourceMLog(schemaName, baseTblInfo, mlogTblInfo); err != nil {
 		return nil, dbterror.ErrInvalidDDLJob.GenWithStackByArgs("create materialized view: invalid materialized view log metadata")
 	}
-	intest.Assert(mlogTblInfo.State == model.StatePublic)
 	return baseTblInfo, nil
 }
 
