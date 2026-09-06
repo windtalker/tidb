@@ -1972,6 +1972,52 @@ func TestCreateMaterializedViewOnMaterializedView(t *testing.T) {
 	require.Contains(t, parent.Meta().MaterializedViewBase.MViewIDs, child.Meta().ID)
 }
 
+func TestMaterializedViewNestedDependencyChain(t *testing.T) {
+	store, dom := testkit.CreateMockStoreAndDomain(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("create table mv_dependency_chain_base (a int not null, b int not null)")
+	tk.MustExec("insert into mv_dependency_chain_base values (1, 10), (1, 5), (2, 7)")
+	tk.MustExec("create materialized view log on mv_dependency_chain_base (a, b)")
+	tk.MustExec("create materialized view mv_dependency_chain_1 (a, cnt, total) refresh fast as select a, count(1), sum(b) from mv_dependency_chain_base group by a")
+	tk.MustExec("create materialized view log on mv_dependency_chain_1 (a, cnt, total)")
+	tk.MustExec("create materialized view mv_dependency_chain_2 (a, total, total_cnt, cnt) refresh fast as select a, sum(total), count(total), count(1) from mv_dependency_chain_1 group by a")
+	tk.MustExec("create materialized view log on mv_dependency_chain_2 (a, total, total_cnt, cnt)")
+	tk.MustExec("create materialized view mv_dependency_chain_3 (a, total, total_cnt, cnt) refresh fast as select a, sum(total), count(total), count(1) from mv_dependency_chain_2 group by a")
+
+	tk.MustQuery("select a, total, cnt from mv_dependency_chain_3 order by a").Check(testkit.Rows("1 15 1", "2 7 1"))
+
+	is := dom.InfoSchema()
+	base, err := is.TableByName(context.Background(), pmodel.NewCIStr("test"), pmodel.NewCIStr("mv_dependency_chain_base"))
+	require.NoError(t, err)
+	mv1, err := is.TableByName(context.Background(), pmodel.NewCIStr("test"), pmodel.NewCIStr("mv_dependency_chain_1"))
+	require.NoError(t, err)
+	mv2, err := is.TableByName(context.Background(), pmodel.NewCIStr("test"), pmodel.NewCIStr("mv_dependency_chain_2"))
+	require.NoError(t, err)
+	mv3, err := is.TableByName(context.Background(), pmodel.NewCIStr("test"), pmodel.NewCIStr("mv_dependency_chain_3"))
+	require.NoError(t, err)
+
+	require.Equal(t, []int64{base.Meta().ID}, mv1.Meta().MaterializedView.BaseTableIDs)
+	require.Equal(t, []int64{mv1.Meta().ID}, mv2.Meta().MaterializedView.BaseTableIDs)
+	require.Equal(t, []int64{mv2.Meta().ID}, mv3.Meta().MaterializedView.BaseTableIDs)
+	require.Contains(t, base.Meta().MaterializedViewBase.MViewIDs, mv1.Meta().ID)
+	require.Contains(t, mv1.Meta().MaterializedViewBase.MViewIDs, mv2.Meta().ID)
+	require.Contains(t, mv2.Meta().MaterializedViewBase.MViewIDs, mv3.Meta().ID)
+
+	err = tk.ExecToErr("drop materialized view mv_dependency_chain_1")
+	require.ErrorContains(t, err, "cannot drop materialized view test.mv_dependency_chain_1: dependent materialized views exist")
+	err = tk.ExecToErr("drop materialized view mv_dependency_chain_2")
+	require.ErrorContains(t, err, "cannot drop materialized view test.mv_dependency_chain_2: dependent materialized views exist")
+
+	tk.MustExec("drop materialized view mv_dependency_chain_3")
+	tk.MustExec("drop materialized view log on mv_dependency_chain_2")
+	tk.MustExec("drop materialized view mv_dependency_chain_2")
+	tk.MustExec("drop materialized view log on mv_dependency_chain_1")
+	tk.MustExec("drop materialized view mv_dependency_chain_1")
+	tk.MustExec("drop materialized view log on mv_dependency_chain_base")
+	tk.MustExec("drop table mv_dependency_chain_base")
+}
+
 func TestCreateMaterializedViewOnMaterializedViewRequiresTrackedColumns(t *testing.T) {
 	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
