@@ -1,12 +1,29 @@
 # MV on MV 端到端开发计划
 
-**状态：提案**
+**状态：已完成，待评审**
 **日期：2026-09-05**
 **关联范围文档：**[嵌套物化视图支持范围与工作量评估](mv_nested_scope_zh.md)
 
 本文将 `mv_nested_scope_zh.md` 中的 MV on MV 范围细化为可实现、可测试和可拆分提交的
 开发计划。本文中的 "source object" 指物理表或已完成 initial build 的物化视图；虽然现有
 metadata 字段仍名为 `BaseTableIDs` / `BaseTableID`，实现中不再把该名称解释为仅能指向物理表。
+
+## 实施记录
+
+本计划已在 `nested_mv` 分支完成，提交按可独立审阅和回滚的边界拆分如下：
+
+- `c0553cd1bd`：ready MV 上的 MLog DDL，以及 COMPLETE IN PLACE / OUT OF PLACE 的模式限制；
+- `bd65fb7d7a`：以 ready MV 为 source 创建 child MV，并维护直接依赖 metadata；
+- `9add297adc`：FAST 和 COMPLETE DELTA APPLY 对 parent MLog 的同事务 row-level I/U/D 写入；
+- `3110b5af03`：child FAST 从 parent MV MLog 消费 delta，并覆盖 parent FAST / COMPLETE DELTA APPLY；
+- `04d0d58b20`：parent MV drop 的 executor / worker 双层保护；
+- `900fc11d60`：OOP cutover 对并发创建 MLog 或 child MV 的 worker-side 保护和 shadow cleanup；
+- `def499d778`：parent MLog purge 按 nested child refresh checkpoint 保留未消费 delta 的回归；
+- `306adc1b2e`：三级 `t -> mv1 -> mv2 -> mv3` direct dependency metadata 和逆序 drop 保护回归。
+
+这些提交完成本文第 2 节的支持矩阵和第 4 节的阶段 A-E。第 2.3 节列出的非目标仍保持不变，
+尤其是不提供自动 refresh 调度、级联 refresh、optimizer rewrite，以及 COMPLETE OUT OF PLACE
+的依赖 metadata / MLog 迁移。
 
 ## 1. 目标与完成定义
 
