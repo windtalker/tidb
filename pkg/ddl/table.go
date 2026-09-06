@@ -1215,6 +1215,10 @@ func (w *worker) onRefreshMaterializedViewCompleteOutOfPlaceCutover(jobCtx *jobC
 		job.State = model.JobStateCancelled
 		return ver, dbterror.ErrWrongObject.GenWithStackByArgs(job.SchemaName, job.TableName, "MATERIALIZED VIEW")
 	}
+	if err := validateMaterializedViewCompleteOutOfPlaceTarget(job.SchemaName, oldMViewTblInfo); err != nil {
+		job.State = model.JobStateCancelled
+		return ver, err
+	}
 	if args.ExpectedOldMViewRevision != nil && oldMViewTblInfo.Revision != *args.ExpectedOldMViewRevision {
 		job.State = model.JobStateCancelled
 		return ver, dbterror.ErrInvalidDDLJob.GenWithStackByArgs(
@@ -1231,11 +1235,6 @@ func (w *worker) onRefreshMaterializedViewCompleteOutOfPlaceCutover(jobCtx *jobC
 			"refresh materialized view complete OUT OF PLACE cutover: materialized view must reference exactly one base table in Stage-1",
 		)
 	}
-	if err := validateMaterializedViewCompleteOutOfPlaceTarget(job.SchemaName, oldMViewTblInfo); err != nil {
-		job.State = model.JobStateCancelled
-		return ver, err
-	}
-
 	shadowTblInfo, err := getTableInfo(jobCtx.metaMut, args.ShadowTableID, job.SchemaID)
 	if err != nil {
 		if infoschema.ErrDatabaseNotExists.Equal(err) || infoschema.ErrTableNotExists.Equal(err) {

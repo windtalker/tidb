@@ -3238,6 +3238,119 @@ func TestMaterializedViewRefreshCompleteOutOfPlaceRejectsMLog(t *testing.T) {
 	tk.MustQuery("show tables like '\\_\\_mv\\_shadow\\_%'").Check(testkit.Rows())
 }
 
+func TestMaterializedViewRefreshCompleteOutOfPlaceRejectsDependentMaterializedView(t *testing.T) {
+	store := testkit.CreateMockStore(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("create table t_oop_child_guard (a int not null, b int not null)")
+	tk.MustExec("insert into t_oop_child_guard values (1, 10), (2, 20)")
+	tk.MustExec("create materialized view log on t_oop_child_guard (a, b)")
+	tk.MustExec("create materialized view mv_oop_child_guard (a, s, cnt) refresh fast as select a, sum(b), count(1) from t_oop_child_guard group by a")
+	tk.MustExec("create materialized view log on mv_oop_child_guard (a, s, cnt)")
+	tk.MustExec("create materialized view mv_oop_child_guard_dependent (a, s, cnt, cnt_s) refresh fast as select a, sum(s), count(1), count(s) from mv_oop_child_guard group by a")
+
+	err := tk.ExecToErr("refresh materialized view mv_oop_child_guard complete out of place")
+	require.ErrorContains(t, err, "complete OUT OF PLACE is not supported")
+	require.ErrorContains(t, err, "dependent materialized view")
+	tk.MustQuery("show tables like '\\_\\_mv\\_shadow\\_%'").Check(testkit.Rows())
+
+	tk.MustExec("drop materialized view mv_oop_child_guard_dependent")
+	tk.MustExec("drop materialized view log on mv_oop_child_guard")
+	tk.MustExec("drop materialized view mv_oop_child_guard")
+	tk.MustExec("drop materialized view log on t_oop_child_guard")
+	tk.MustExec("drop table t_oop_child_guard")
+}
+
+func TestMaterializedViewRefreshCompleteOutOfPlaceWorkerRejectsConcurrentMLog(t *testing.T) {
+	store, _ := testkit.CreateMockStoreAndDomain(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("create table t_oop_mlog_race (a int not null, b int not null)")
+	tk.MustExec("insert into t_oop_mlog_race values (1, 10), (2, 20)")
+	tk.MustExec("create materialized view log on t_oop_mlog_race (a, b)")
+	tk.MustExec("create materialized view mv_oop_mlog_race (a, s, cnt) refresh fast as select a, sum(b), count(1) from t_oop_mlog_race group by a")
+	tk.MustExec("insert into t_oop_mlog_race values (3, 30)")
+
+	const pauseCreateShadowFailpoint = "github.com/pingcap/tidb/pkg/executor/pauseRefreshMaterializedViewOutOfPlaceAfterCreateShadow"
+	require.NoError(t, failpoint.Enable(pauseCreateShadowFailpoint, "pause"))
+	enabled := true
+	defer func() {
+		if enabled {
+			require.NoError(t, failpoint.Disable(pauseCreateShadowFailpoint))
+		}
+	}()
+
+	refreshDone := make(chan error, 1)
+	go func() {
+		tkRefresh := testkit.NewTestKit(t, store)
+		tkRefresh.MustExec("use test")
+		refreshDone <- tkRefresh.ExecToErr("refresh materialized view mv_oop_mlog_race complete out of place")
+	}()
+
+	require.Eventually(t, func() bool {
+		return len(tk.MustQuery("show tables like '\\_\\_mv\\_shadow\\_%'").Rows()) == 1
+	}, 30*time.Second, 100*time.Millisecond)
+	tk.MustExec("create materialized view log on mv_oop_mlog_race (a, s, cnt)")
+
+	require.NoError(t, failpoint.Disable(pauseCreateShadowFailpoint))
+	enabled = false
+	err := <-refreshDone
+	require.ErrorContains(t, err, "complete OUT OF PLACE is not supported")
+	require.ErrorContains(t, err, "materialized view log or dependent materialized view")
+	tk.MustQuery("show tables like '\\_\\_mv\\_shadow\\_%'").Check(testkit.Rows())
+
+	tk.MustExec("drop materialized view log on mv_oop_mlog_race")
+	tk.MustExec("drop materialized view mv_oop_mlog_race")
+	tk.MustExec("drop materialized view log on t_oop_mlog_race")
+	tk.MustExec("drop table t_oop_mlog_race")
+}
+
+func TestMaterializedViewRefreshCompleteOutOfPlaceWorkerRejectsConcurrentDependentMaterializedView(t *testing.T) {
+	store, _ := testkit.CreateMockStoreAndDomain(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("create table t_oop_child_race (a int not null, b int not null)")
+	tk.MustExec("insert into t_oop_child_race values (1, 10), (2, 20)")
+	tk.MustExec("create materialized view log on t_oop_child_race (a, b)")
+	tk.MustExec("create materialized view mv_oop_child_race (a, s, cnt) refresh fast as select a, sum(b), count(1) from t_oop_child_race group by a")
+	tk.MustExec("insert into t_oop_child_race values (3, 30)")
+
+	const pauseCreateShadowFailpoint = "github.com/pingcap/tidb/pkg/executor/pauseRefreshMaterializedViewOutOfPlaceAfterCreateShadow"
+	require.NoError(t, failpoint.Enable(pauseCreateShadowFailpoint, "pause"))
+	enabled := true
+	defer func() {
+		if enabled {
+			require.NoError(t, failpoint.Disable(pauseCreateShadowFailpoint))
+		}
+	}()
+
+	refreshDone := make(chan error, 1)
+	go func() {
+		tkRefresh := testkit.NewTestKit(t, store)
+		tkRefresh.MustExec("use test")
+		refreshDone <- tkRefresh.ExecToErr("refresh materialized view mv_oop_child_race complete out of place")
+	}()
+
+	require.Eventually(t, func() bool {
+		return len(tk.MustQuery("show tables like '\\_\\_mv\\_shadow\\_%'").Rows()) == 1
+	}, 30*time.Second, 100*time.Millisecond)
+	tk.MustExec("create materialized view log on mv_oop_child_race (a, s, cnt)")
+	tk.MustExec("create materialized view mv_oop_child_race_dependent (a, s, cnt, cnt_s) refresh fast as select a, sum(s), count(1), count(s) from mv_oop_child_race group by a")
+
+	require.NoError(t, failpoint.Disable(pauseCreateShadowFailpoint))
+	enabled = false
+	err := <-refreshDone
+	require.ErrorContains(t, err, "complete OUT OF PLACE is not supported")
+	require.ErrorContains(t, err, "materialized view log or dependent materialized view")
+	tk.MustQuery("show tables like '\\_\\_mv\\_shadow\\_%'").Check(testkit.Rows())
+
+	tk.MustExec("drop materialized view mv_oop_child_race_dependent")
+	tk.MustExec("drop materialized view log on mv_oop_child_race")
+	tk.MustExec("drop materialized view mv_oop_child_race")
+	tk.MustExec("drop materialized view log on t_oop_child_race")
+	tk.MustExec("drop table t_oop_child_race")
+}
+
 func TestMaterializedViewRefreshCompleteDeltaApplyImplementStmt(t *testing.T) {
 	testCases := []struct {
 		name     string
