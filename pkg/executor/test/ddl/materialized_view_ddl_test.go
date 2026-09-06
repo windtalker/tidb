@@ -110,6 +110,70 @@ func TestDropMaterializedViewIfExists(t *testing.T) {
 	tk.MustExec("drop materialized view log if exists on t_drop_if_exists")
 }
 
+func TestDropMaterializedViewWithDependentMaterializedView(t *testing.T) {
+	store := testkit.CreateMockStore(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("create table t_nested_drop (a int not null, b int not null)")
+	tk.MustExec("insert into t_nested_drop values (1, 10), (2, 20)")
+	tk.MustExec("create materialized view log on t_nested_drop (a, b)")
+	tk.MustExec("create materialized view mv_nested_parent_drop (a, s, cnt) refresh fast as select a, sum(b), count(1) from t_nested_drop group by a")
+	tk.MustExec("create materialized view log on mv_nested_parent_drop (a, s, cnt)")
+	tk.MustExec("create materialized view mv_nested_child_drop (a, s, cnt, cnt_s) refresh fast as select a, sum(s), count(1), count(s) from mv_nested_parent_drop group by a")
+
+	err := tk.ExecToErr("drop materialized view mv_nested_parent_drop")
+	require.ErrorContains(t, err, "cannot drop materialized view test.mv_nested_parent_drop: dependent materialized views exist")
+	tk.MustQuery("select a, s, cnt from mv_nested_parent_drop order by a").Check(testkit.Rows("1 10 1", "2 20 1"))
+
+	tk.MustExec("drop materialized view mv_nested_child_drop")
+	tk.MustExec("drop materialized view log on mv_nested_parent_drop")
+	tk.MustExec("drop materialized view mv_nested_parent_drop")
+	tk.MustExec("drop materialized view log on t_nested_drop")
+	tk.MustExec("drop table t_nested_drop")
+}
+
+func TestDropMaterializedViewRecheckWithConcurrentCreateMaterializedView(t *testing.T) {
+	store := testkit.CreateMockStore(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("create table t_nested_drop_race (a int not null, b int not null)")
+	tk.MustExec("insert into t_nested_drop_race values (1, 10), (2, 20)")
+	tk.MustExec("create materialized view log on t_nested_drop_race (a, b)")
+	tk.MustExec("create materialized view mv_nested_parent_drop_race (a, s, cnt) refresh fast as select a, sum(b), count(1) from t_nested_drop_race group by a")
+	tk.MustExec("create materialized view log on mv_nested_parent_drop_race (a, s, cnt)")
+
+	const pauseDropFailpoint = "github.com/pingcap/tidb/pkg/ddl/pauseDropMaterializedViewAfterCheck"
+	require.NoError(t, failpoint.Enable(pauseDropFailpoint, "pause"))
+	enabled := true
+	defer func() {
+		if enabled {
+			require.NoError(t, failpoint.Disable(pauseDropFailpoint))
+		}
+	}()
+
+	dropErrCh := make(chan error, 1)
+	go func() {
+		tkDrop := testkit.NewTestKit(t, store)
+		tkDrop.MustExec("use test")
+		dropErrCh <- tkDrop.ExecToErr("drop materialized view mv_nested_parent_drop_race")
+	}()
+
+	time.Sleep(500 * time.Millisecond)
+	tk.MustExec("create materialized view mv_nested_child_drop_race (a, s, cnt, cnt_s) refresh fast as select a, sum(s), count(1), count(s) from mv_nested_parent_drop_race group by a")
+
+	require.NoError(t, failpoint.Disable(pauseDropFailpoint))
+	enabled = false
+	err := <-dropErrCh
+	require.ErrorContains(t, err, "cannot drop materialized view test.mv_nested_parent_drop_race: dependent materialized views exist")
+	tk.MustQuery("show tables like 'mv_nested_parent_drop_race'").Check(testkit.Rows("mv_nested_parent_drop_race"))
+
+	tk.MustExec("drop materialized view mv_nested_child_drop_race")
+	tk.MustExec("drop materialized view log on mv_nested_parent_drop_race")
+	tk.MustExec("drop materialized view mv_nested_parent_drop_race")
+	tk.MustExec("drop materialized view log on t_nested_drop_race")
+	tk.MustExec("drop table t_nested_drop_race")
+}
+
 func involvingSchemaInfoSet(involving []model.InvolvingSchemaInfo) map[string]struct{} {
 	got := make(map[string]struct{}, len(involving))
 	for _, info := range involving {

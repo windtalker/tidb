@@ -82,6 +82,10 @@ func (w *worker) onDropTableOrView(jobCtx *jobContext, job *model.Job) (ver int6
 			if err != nil {
 				return ver, err
 			}
+			err = checkDropMaterializedViewHasNoDependentMVs(jobCtx, job, tblInfo)
+			if err != nil {
+				return ver, err
+			}
 			err = checkDropMaterializedViewLogHasNoDependentMVs(jobCtx, job, tblInfo)
 			if err != nil {
 				return ver, err
@@ -1903,6 +1907,14 @@ func onRepairTable(jobCtx *jobContext, job *model.Job) (ver int64, _ error) {
 	default:
 		return ver, dbterror.ErrInvalidDDLState.GenWithStackByArgs("table", tblInfo.State)
 	}
+}
+
+func checkDropMaterializedViewHasNoDependentMVs(_ *jobContext, job *model.Job, droppingTable *model.TableInfo) error {
+	if droppingTable.MaterializedView == nil || !hasMaterializedViewDependsOnBaseTable(droppingTable) {
+		return nil
+	}
+	job.State = model.JobStateCancelled
+	return errDropMaterializedViewDependent(job.SchemaName, droppingTable.Name.O)
 }
 
 func checkDropMaterializedViewLogHasNoDependentMVs(jobCtx *jobContext, job *model.Job, droppingTable *model.TableInfo) error {

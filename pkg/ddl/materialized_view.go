@@ -427,6 +427,13 @@ func (e *executor) DropMaterializedView(ctx sessionctx.Context, s *ast.DropMater
 	if tbl.Meta().MaterializedView == nil {
 		return dbterror.ErrWrongObject.GenWithStackByArgs(schemaName.O, s.ViewName.Name, "MATERIALIZED VIEW")
 	}
+	if hasMaterializedViewDependsOnBaseTable(tbl.Meta()) {
+		return errDropMaterializedViewDependent(schemaName.O, s.ViewName.Name.O)
+	}
+
+	// Re-checking in the DDL worker still exists; this failpoint verifies that worker-side
+	// validation rejects a stale executor pre-check under concurrent child MV creation.
+	failpoint.Inject("pauseDropMaterializedViewAfterCheck", func() {})
 
 	dropStmt := &ast.DropTableStmt{IfExists: s.IfExists, Tables: []*ast.TableName{{Schema: schemaName, Name: s.ViewName.Name}}}
 	return e.dropTableObject(ctx, dropStmt.Tables, dropStmt.IfExists, tableObject, true)
@@ -1901,6 +1908,10 @@ func validateMaterializedViewSourceMLog(schemaName string, source, mlog *model.T
 
 func errDropMaterializedViewLogDependent(schemaName, baseTableName string) error {
 	return errors.Errorf("cannot drop materialized view log on %s.%s: dependent materialized views exist", schemaName, baseTableName)
+}
+
+func errDropMaterializedViewDependent(schemaName, materializedViewName string) error {
+	return errors.Errorf("cannot drop materialized view %s.%s: dependent materialized views exist", schemaName, materializedViewName)
 }
 
 func restoreNodeToCanonicalSQL(node ast.Node) (string, error) {
