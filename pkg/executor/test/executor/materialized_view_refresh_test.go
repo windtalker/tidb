@@ -581,6 +581,78 @@ func TestMaterializedViewRefreshCompleteDeltaApplyWritesMLog(t *testing.T) {
 	testMaterializedViewRefreshWritesMLog(t, "complete delta apply")
 }
 
+func TestNestedMaterializedViewFastRefresh(t *testing.T) {
+	for _, parentRefreshMethod := range []string{"fast", "complete delta apply"} {
+		t.Run(parentRefreshMethod, func(t *testing.T) {
+			store := testkit.CreateMockStore(t)
+			tk := testkit.NewTestKit(t, store)
+			tk.MustExec("use test")
+			tk.MustExec("create table t_nested_mv_refresh (a int not null, b int not null, v int not null)")
+			tk.MustExec("insert into t_nested_mv_refresh values (1, 1, 10), (1, 1, 5), (1, 2, 7), (2, 1, 4)")
+			tk.MustExec("create materialized view log on t_nested_mv_refresh (a, b, v)")
+			tk.MustExec("create materialized view mv_nested_parent (a, b, s, cnt) refresh fast as select a, b, sum(v), count(1) from t_nested_mv_refresh group by a, b")
+			tk.MustExec("create materialized view log on mv_nested_parent (a, b, s, cnt)")
+			tk.MustExec("create materialized view mv_nested_child (a, s, cnt, cnt_s) refresh fast as select a, sum(s), count(1), count(s) from mv_nested_parent group by a")
+
+			tk.MustQuery("select a, s, cnt, cnt_s from mv_nested_child order by a").Check(testkit.Rows(
+				"1 22 2 2",
+				"2 4 1 1",
+			))
+
+			// These mutations make the parent update one group, delete another, and insert a third.
+			tk.MustExec("update t_nested_mv_refresh set v = 11 where a = 1 and b = 1 and v = 10")
+			tk.MustExec("delete from t_nested_mv_refresh where a = 1 and b = 2")
+			tk.MustExec("insert into t_nested_mv_refresh values (3, 1, 8)")
+			tk.MustExec("refresh materialized view mv_nested_parent " + parentRefreshMethod)
+			tk.MustExec("refresh materialized view mv_nested_child fast")
+
+			tk.MustQuery("select a, b, s, cnt from mv_nested_parent order by a, b").Check(testkit.Rows(
+				"1 1 16 2",
+				"2 1 4 1",
+				"3 1 8 1",
+			))
+			tk.MustQuery("select a, s, cnt, cnt_s from mv_nested_child order by a").Check(testkit.Rows(
+				"1 16 1 1",
+				"2 4 1 1",
+				"3 8 1 1",
+			))
+		})
+	}
+}
+
+func TestNestedMaterializedViewFastRefreshMinMax(t *testing.T) {
+	store := testkit.CreateMockStore(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("create table t_nested_mv_minmax (a int not null, b int not null, v int not null, key idx_ab (a, b))")
+	tk.MustExec("insert into t_nested_mv_minmax values (1, 1, 10), (1, 1, 30), (1, 2, 5), (2, 1, 8)")
+	tk.MustExec("create materialized view log on t_nested_mv_minmax (a, b, v)")
+	tk.MustExec("create materialized view mv_nested_parent_minmax (a, b, cnt, mx, mn) refresh fast as select a, b, count(1), max(v), min(v) from t_nested_mv_minmax group by a, b")
+	tk.MustExec("create materialized view log on mv_nested_parent_minmax (a, b, cnt, mx, mn)")
+	tk.MustExec("create materialized view mv_nested_child_minmax (a, cnt, mx, mn) refresh fast as select a, count(1), max(mx), min(mn) from mv_nested_parent_minmax group by a")
+
+	tk.MustQuery("select a, cnt, mx, mn from mv_nested_child_minmax order by a").Check(testkit.Rows(
+		"1 2 30 5",
+		"2 1 8 8",
+	))
+
+	// Removing the parent group's MAX forces the child MAX fallback to probe the parent MV by its
+	// group-key index, rather than treating the source as a physical base table.
+	tk.MustExec("delete from t_nested_mv_minmax where a = 1 and b = 1 and v = 30")
+	tk.MustExec("refresh materialized view mv_nested_parent_minmax fast")
+	tk.MustExec("refresh materialized view mv_nested_child_minmax fast")
+
+	tk.MustQuery("select a, b, cnt, mx, mn from mv_nested_parent_minmax order by a, b").Check(testkit.Rows(
+		"1 1 1 10 10",
+		"1 2 1 5 5",
+		"2 1 1 8 8",
+	))
+	tk.MustQuery("select a, cnt, mx, mn from mv_nested_child_minmax order by a").Check(testkit.Rows(
+		"1 2 10 5",
+		"2 1 8 8",
+	))
+}
+
 func testMaterializedViewRefreshWritesMLog(t *testing.T, refreshMethod string) {
 	t.Helper()
 
