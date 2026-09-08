@@ -84,24 +84,37 @@ git diff --stat f08c648a20380ea723449c6c3eb5b171d96fd567..8d2633e8e55a6e7d09649e
 系统表阶段已经拆成两个子 PR：`PR1a` 是 MV 业务系统表，已合入
 `master`；`PR1b` 是权限相关系统表，当前权限分支上的改动。
 
-第二阶段统一定义为 MV/MLog DDL 生命周期，并拆成两个有先后依赖的子 PR：
+第二阶段统一定义为 MV/MLog DDL 生命周期，实际按最终 diff 拆成四个有先后依赖的子 PR：
 
 ```text
-PR2a parser/AST/语法  ->  PR2b metadata/job args/DDL 实现
+PR2a parser/AST/语法
+    -> PR2b-create CREATE MV/MLog
+    -> PR2b-drop DROP MV/MLog
+    -> PR2b-alter ALTER MV/MLog
 ```
 
 | PR | 范围 | 说明 |
 | --- | --- | --- |
 | PR2a | MV/MLog parser 和语法 | 覆盖 `CREATE`、`DROP`、`ALTER MATERIALIZED VIEW`、`ALTER MATERIALIZED VIEW LOG` 的全部 grammar、AST、Restore、Digest、关键字和 parser 测试；只负责语法和 AST，不实现 DDL 行为。 |
-| PR2b | MV/MLog DDL 实现 | 包含 `pkg/meta/model` 的 MV/MLog `TableInfo` 和 job args、DDL dispatcher、schema tracker、validation、notifier、rollback/sanity check，以及 create/drop/alter 的完整 DDL 执行和测试。 |
+| PR2b-create | CREATE MV/MLog DDL 实现 | 包含 CREATE 的 metadata、job args、DDL dispatcher、schema tracker、validation、notifier、rollback/sanity check，以及 CREATE 相关测试。 |
+| PR2b-drop | DROP MV/MLog DDL 实现 | 包含 DROP 的 metadata 清理、依赖检查、schema tracker、普通表/数据库相关约束、notifier、rollback/sanity check，以及 DROP 相关测试。 |
+| PR2b-alter | ALTER MV/MLog DDL 实现 | 包含 ALTER 的 metadata 更新、schedule/attributes 处理、schema tracker、validation、notifier、rollback/sanity check，以及 ALTER 相关测试。 |
 
-PR2b 使用最终 MV 系统表 schema 作为 source of truth。schedule timezone、Unix-seconds
-字段和 MV/MLog 命名 refine 在 CREATE/ALTER DDL 路径中的适配归 PR2b；purge、refresh
+上述四个切片共同使用最终 MV 系统表 schema 作为 source of truth。schedule timezone、Unix-seconds
+字段和 MV/MLog 命名 refine 在 CREATE/ALTER DDL 路径中的适配归 `PR2b-create`/`PR2b-alter`；purge、refresh
 和 service runtime 的对应逻辑分别归后续 owning PR。
 
-如果 PR2b 仍然过大，可以继续拆成 `PR2b1`（metadata + create/drop）和 `PR2b2`
-（alter + schema tracker/validation），但不应把 metadata/job args 放到 PR2a，或推迟
-到 refresh/service PR。
+### PR2 Port 状态
+
+| Slice | 分支 | PR | 状态 |
+| --- | --- | --- | --- |
+| PR2a | `mv_pr2a_parser_for_master` | #70744 | 已合入 `master` |
+| PR2b-create | `mv_pr2b_create_for_master` | #70789 | 已合入 `master` |
+| PR2b-drop | `mv_pr2b_drop_for_master` | #70874 | 已合入 `master` |
+| PR2b-alter | `mv_pr2b_alter_for_master` | 待提 PR | port 已完成，分支已推送；尚未合入 `master` |
+
+因此，PR2 的四个 port 切片已经完成实现级拆分，前三个已经合入 `master`；在
+`PR2b-alter` 提 PR 并合入之前，不能把 PR2 整体标记为已合入 `master`。
 
 ## Port Slice
 
@@ -109,10 +122,10 @@ PR2b 使用最终 MV 系统表 schema 作为 source of truth。schedule timezone
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | S0 | 跟踪文档 | `docs/note/materialized_view/mv_master_port_tracking.md` | 流程 | N/A | 创建 tracking doc | N/A | `已移植` | 每完成一个有意义的 port 步骤后更新本文档。 |
 | S1 | 设计文档 | `docs/note/materialized_view/{mv_refresh,kill_refresh_purge,mv_log_purge,mv_compare,mv_init_build_state,mv_refresh_observability}.md` | docs | 待处理 | port 有用的设计文档，或保留为内部参考 | 文档 review | `待处理` | 文档内容要和最终 master 实现保持一致。 |
-| S2 | Parser、AST 和用户语法 | `pkg/parser`、`pkg/parser/ast`、`pkg/parser/mysql/privs.go`、`pkg/parser/mview_stmt_options.go` | direct MV | 待处理 | 基于当前 parser grammar 重写语法和 AST | parser unit test 和相关 integration test | `待处理` | 归 `PR2a`；包含 create/drop/alter/refresh/purge/cancel/show/compare 语法。 |
-| S3 | 元数据模型和 DDL job args | `pkg/meta`、`pkg/meta/model`、`TableInfo`、MV/MLog 依赖元数据、job args | direct MV | 待处理 | port metadata field 和 job argument 编解码 | model / job args tests | `待处理` | 归 `PR2b`；必须兼容 master 当前 metadata versioning 和 BR restore 语义。 |
+| S2 | Parser、AST 和用户语法 | `pkg/parser`、`pkg/parser/ast`、`pkg/parser/mysql/privs.go`、`pkg/parser/mview_stmt_options.go` | direct MV | 已合入 `master`（#70744） | 基于当前 parser grammar 重写语法和 AST | parser unit test 和相关 integration test | `已移植` | 归 `PR2a`；包含 create/drop/alter/refresh/purge/cancel/show/compare 语法。 |
+| S3 | 元数据模型和 DDL job args | `pkg/meta`、`pkg/meta/model`、`TableInfo`、MV/MLog 依赖元数据、job args | direct MV | CREATE/DROP 已合入；ALTER 待 PR | port metadata field 和 job argument 编解码 | model / job args tests | `部分已移植` | 分别归 `PR2b-create`、`PR2b-drop`、`PR2b-alter`；必须兼容 master 当前 metadata versioning 和 BR restore 语义。 |
 | S4 | Bootstrap、变量和 internal session prerequisite | `pkg/session`、`pkg/sessionctx`、`pkg/domain`、`pkg/privilege`、`docs/note/materialized_view/mv_system_tables_rebuild.sql` | direct MV / prerequisite | 待处理 | port MV system table、sysvar、privilege hook、internal-session 行为 | bootstrap / sysvar / session tests | `待处理` | rebuild SQL 脚本随 PR1 的最终 bootstrap/system-table 结构归属；需要确认 master 是否已有等价 internal-session helper。 |
-| S5 | MV/MLog DDL 执行 | `pkg/ddl/materialized_view.go`、`pkg/ddl/mview_schedule_expr.go`、`pkg/ddl/create_table.go`、DDL guard、notifier、schema tracker | direct MV | 待处理 | 基于 master 当前 DDL framework 重写 DDL flow | DDL executor tests | `待处理` | 归 `PR2b`，与 S3 合并；包含依赖校验、schedule expression、alter/drop/truncate guard。 |
+| S5 | MV/MLog DDL 执行 | `pkg/ddl/materialized_view.go`、`pkg/ddl/mview_schedule_expr.go`、`pkg/ddl/create_table.go`、DDL guard、notifier、schema tracker | direct MV | CREATE/DROP 已合入；ALTER 待 PR | 基于 master 当前 DDL framework 重写 DDL flow | DDL executor tests | `部分已移植` | 分别归 `PR2b-create`、`PR2b-drop`、`PR2b-alter`；包含依赖校验、schedule expression、alter/drop/truncate guard。 |
 | S6 | MLog table 和 base-table DML capture | `pkg/table/tables/mview_log.go`、executor write path、`pkg/executor/internal/util/touched_rows.go` | direct MV | 待处理 | port mlog row 生成和事务写入行为 | writetest 和 integration DML tests | `待处理` | 验证 insert/update/delete、rollback、generated column、partition 行为。 |
 | S7 | Manual refresh、show 和 infoschema executor | `pkg/executor/materialized_view.go`、`pkg/executor/show.go`、`pkg/executor/infoschema_reader.go` | direct MV | 待处理 | port refresh executor、show command、infoschema reader | refresh 和 infoschema tests | `待处理` | 包含 complete refresh 变体和用户可见 metadata 输出。 |
 | S8 | MV service 框架 | `pkg/mvservice`、`pkg/domain`、`pkg/server`、service metrics | direct MV | 待处理 | port 后台调度、cancel、backpressure 框架 | mvservice unit tests | `待处理` | 依赖 metadata、bootstrap table 和 internal session 变量。 |
@@ -148,3 +161,4 @@ PR2b 使用最终 MV 系统表 schema 作为 source of truth。schedule timezone
 | 2026-08-25 | `cp_mv_for_master_base` | 更新 source boundary 和最终 diff 统计 | head 从 `6910cef840` 更新为 `bf681b1b66`，纳入 bootstrap 合并、schedule timezone、Unix seconds、timestamp/MV naming refine 的后续 commit |
 | 2026-08-29 | `cp_mv_for_master_base` | 更新 source boundary，纳入 `cp_mv_for_master` 最新语法提交 | head 更新为 `9439fdfa65`，同时纳入 `d05b5da91b` 的 system-table rebuild SQL；最终 source diff 为 500 files changed、97367 insertions、25104 deletions，`9439fdfa65` 的语法调整归 PR2a |
 | 2026-08-29 | `cp_mv_for_master_base` | 更新 source boundary，纳入删除未使用 refresh method 的提交 | head 更新为 `8d2633e8e5`；最终 source diff 为 500 files changed、97356 insertions、25104 deletions，删除逻辑按 AST/Restore 归 PR2a，按 DDL metadata builder 归 PR2b |
+| 2026-09-08 | `cp_mv_for_master_base` | 更新 PR2 的最终 diff 拆分和完成状态 | PR2 拆分为 `PR2a`、`PR2b-create`、`PR2b-drop`、`PR2b-alter`；#70744、#70789、#70874 已合入 `master`，`mv_pr2b_alter_for_master` 已完成 port 并推送，待提 PR |
