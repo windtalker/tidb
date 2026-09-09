@@ -5,7 +5,7 @@
 Source range:
 
 ```text
-f08c648a20380ea723449c6c3eb5b171d96fd567..bf681b1b662a04c01dfdbf62507af90790df453d
+f08c648a20380ea723449c6c3eb5b171d96fd567..8d2633e8e55a6e7d09649e650df39f1c9f64a7f2
 ```
 
 本文档的目标不是决定最终实现细节，而是先回答两个问题：
@@ -54,7 +54,7 @@ MV 实现或设计文档明确依赖这些能力。
 
 | 类别 | 主要路径 | MV 依赖原因 | 初步决策 |
 | --- | --- | --- | --- |
-| FULL OUTER JOIN | `docs/note/fullouter_join_dev_note.md`、`pkg/parser/*`、`pkg/planner/core/*`、`pkg/executor/join/*`、`tests/integrationtest/*full_outer_join*` | `COMPARE MATERIALIZED VIEW` 和 `COMPLETE DELTA APPLY` 使用 FULL OUTER JOIN 作为 diff source | 作为 MV prerequisite 审计；如果 master 没有等价能力，需要 port 或替换实现 |
+| FULL OUTER JOIN | `docs/note/fullouter_join_dev_note.md`、`pkg/parser/*`、`pkg/planner/core/*`、`pkg/executor/join/*`、`tests/integrationtest/*full_outer_join*` | `COMPARE MATERIALIZED VIEW` 和 `COMPLETE DELTA APPLY` 使用 FULL OUTER JOIN 作为 diff source | 已由 #69999、#70185、#70462、#70562 合入 `master`；MV 直接复用现有实现，不再单独 port prerequisite |
 | `_tidb_commit_ts` / commit TS 下传 | `pkg/util/rowcodec/decoder.go`、`pkg/store/mockstore/unistore/*`、`tests/integrationtest/active_active/commit_ts.*` | MLog purge 和 fast refresh 依赖 `_tidb_commit_ts` 做 `(fromTS, targetTSO]` 过滤和 purge 边界 | `origin/master` 已有底层 commitTS 下传；SQL 层直接引用仍被禁用，MV port 需要单独处理可引用策略 |
 | 新 aggregate 表达式 | `pkg/expression/aggregation/*`、`pkg/executor/aggfuncs/*`、`pkg/kv/checker.go`、`go.mod` 中 `tipb` bump | fast refresh count/sum/min/max 依赖 `SUM_INT`、`MAX_COUNT`、`MIN_COUNT` 等能力 | `origin/master` 已有 `SUM_INT`、`MAX_COUNT`、`MIN_COUNT` 的 parser、executor、expression、tipb pushdown 和 checker 支持；fast refresh 只适配现有实现 |
 | chunk / serialization helper | `pkg/util/chunk/column.go`、`pkg/util/serialization/*` | 新 executor、agg spill、vector 类型处理可能依赖这些 helper | 逐个 hunk 审计；只带实际依赖 |
@@ -79,9 +79,9 @@ MV 实现或设计文档明确依赖这些能力。
 
 | 问题 | 说明 | 状态 |
 | --- | --- | --- |
-| `master` 是否已有 FULL OUTER JOIN | 如果已有等价实现，MV 只需要适配；如果没有，需要决定是否把 FULL OUTER JOIN 作为前置 slice port | 待确认 |
+| `master` 是否已有 FULL OUTER JOIN | parser、planner、executor、TiFlash MPP 相关实现均已合入 `master`（#69999、#70185、#70462、#70562），并包含 `tipb.JoinType_TypeFullOuterJoin` | 已确认：无需单独 port，MV 直接适配现有实现 |
 | `master` 是否已有 `_tidb_commit_ts` 底层下传和 SQL 可引用支持 | `origin/master` 已有 `ExtraCommitTSID`、DataSource 隐藏列、table scan / MPP / rowcodec 的 commitTS 传递；但 preprocess 仍禁止 SELECT/UPDATE/DELETE/SET OPR 直接引用 `_tidb_commit_ts`，integration test 也仍期望报错。MV 后续若继续通过内部 SQL `WHERE _tidb_commit_ts ...` 做 purge/refresh，需要 port “允许引用”的最小改动，或改成只允许 internal/MLog 路径的 gate。 | 已确认：底层已有，SQL 可引用未启用 |
-| `master` 的 `tipb` 是否已包含新 agg / join enum | `origin/master` 已包含 `tipb.ExprType_SumInt`、`tipb.ExprType_MaxCount`、`tipb.ExprType_MinCount`，并在 `agg_to_pb.go` / `kv/checker.go` 接入；FULL OUTER JOIN 相关 enum 仍需单独审计。 | 新 agg 已确认；join enum 待确认 |
+| `master` 的 `tipb` 是否已包含新 agg / join enum | `origin/master` 已包含 `tipb.ExprType_SumInt`、`tipb.ExprType_MaxCount`、`tipb.ExprType_MinCount`，并在 `agg_to_pb.go` / `kv/checker.go` 接入；FULL OUTER JOIN 使用的 `tipb.JoinType_TypeFullOuterJoin` 也已存在并被 planner/executor 使用。 | 已确认：新 agg 和 FULL OUTER JOIN enum 均已具备 |
 | TopSQL network bytes 是否和 MV observability 有实际依赖 | 已确认不是本次 MV port 内容 | 不 cp |
 | prepare dedup cache 是否为 MV 性能目标必需 | 已确认不是本次 MV port 内容 | 不 cp |
 
@@ -90,14 +90,14 @@ MV 实现或设计文档明确依赖这些能力。
 筛出名字上不带 MV 的文件：
 
 ```bash
-git diff --name-status f08c648a20380ea723449c6c3eb5b171d96fd567..bf681b1b662a04c01dfdbf62507af90790df453d \
+git diff --name-status f08c648a20380ea723449c6c3eb5b171d96fd567..8d2633e8e55a6e7d09649e650df39f1c9f64a7f2 \
   | rg -v '(materialized|Materialized|mview|MView|mv_|mlog|MLog|MLOG|tidb_mview|tidb_mlog|TIDB_MVIEW|TIDB_MLOG)'
 ```
 
 查看非 MV candidate 的 diff 概览：
 
 ```bash
-git diff --stat f08c648a20380ea723449c6c3eb5b171d96fd567..bf681b1b662a04c01dfdbf62507af90790df453d -- \
+git diff --stat f08c648a20380ea723449c6c3eb5b171d96fd567..8d2633e8e55a6e7d09649e650df39f1c9f64a7f2 -- \
   br cmd build pkg/util/topsql pkg/executor/join \
   pkg/planner/core/casetest/fulljoin \
   tests/integrationtest/t/active_active tests/integrationtest/r/active_active \
@@ -109,7 +109,7 @@ git diff --stat f08c648a20380ea723449c6c3eb5b171d96fd567..bf681b1b662a04c01dfdbf
 检查 FULL OUTER JOIN 是否被 MV 引用：
 
 ```bash
-git grep -n -i 'full outer\|fullouter\|FullOuter' bf681b1b66 -- \
+git grep -n -i 'full outer\|fullouter\|FullOuter' 8d2633e8e5 -- \
   pkg/executor pkg/planner/mview pkg/ddl pkg/sessionctx pkg/parser \
   tests/integrationtest/t/executor/mview_refresh.test docs/note/materialized_view
 ```
@@ -118,7 +118,7 @@ git grep -n -i 'full outer\|fullouter\|FullOuter' bf681b1b66 -- \
 
 ```bash
 git grep -n '_tidb_commit_ts\|CommitTs\|commit ts\|DecodeToChunkWithCommitTS' \
-  bf681b1b66 -- \
+  8d2633e8e5 -- \
   pkg/executor/materialized_view.go pkg/executor/mv_refresh_observability.go \
   pkg/planner/mview pkg/table/tables/mview_log.go \
   pkg/store pkg/util docs/note/materialized_view \
@@ -142,7 +142,7 @@ git grep -n "Usage of column name '_tidb_commit_ts'\|select _tidb_commit_ts" \
 
 ```bash
 git grep -n 'OnExecutionBegin\|OnExecutionFinished\|NetworkInBytes\|NetworkOutBytes' \
-  bf681b1b66 -- \
+  8d2633e8e5 -- \
   pkg/server pkg/session pkg/executor pkg/util/topsql pkg/mvservice docs/note/materialized_view
 ```
 
@@ -166,3 +166,4 @@ git grep -n 'ExprType_SumInt\|ExprType_MaxCount\|ExprType_MinCount' origin/maste
 | 2026-07-22 | 人工确认第一批非 MV drift 的 port 决策 | agent docs、`.gitignore`、build helper、`cmd/mirror`、`google/skylark` 删除、root metadata、TopSQL network bytes、prepare dedup / plan cache、active-active commit TS 独立测试均不 cp；integration result 后续重新录制 |
 | 2026-07-22 | 对最新 `origin/master` 确认 `_tidb_commit_ts` 状态 | `master` 已有底层 commitTS 下传和隐藏列建模，但普通 SQL 直接引用仍被 preprocess 禁止；MV port 需要单独处理内部 SQL 使用 `_tidb_commit_ts` 的可引用策略 |
 | 2026-07-22 | 对最新 `origin/master` 确认新 aggregate 状态 | `SUM_INT`、`MAX_COUNT`、`MIN_COUNT` 已有 parser / expression / executor / tipb pushdown / checker 支持；fast refresh 后续只适配，不重复 port 这些通用 aggregate |
+| 2026-09-09 | 更新最终 source range 并复核 prerequisite 状态 | source range 更新到 `8d2633e8e5`；FULL OUTER JOIN parser/planner/executor/MPP 及 `tipb.JoinType_TypeFullOuterJoin` 已确认合入 `master`，不再作为待 port 的独立 prerequisite；PR1/PR2 已完成，PR3 #70941 已创建 |
