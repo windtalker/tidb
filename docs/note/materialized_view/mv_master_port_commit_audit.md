@@ -15,13 +15,13 @@
 
 ```text
 base: xufei/cp_mv_for_master_base
-      8ca8747cbb3ced8e87f82d047b0e8f6f865566bd
+      2c66f412d3c333fca544b8fffc90d150a8b12dd6
 
 head: xufei/cp_mv_for_master
       8d2633e8e55a6e7d09649e650df39f1c9f64a7f2
 
 master: origin/master
-        fe7ae3611c83bdf64c911d496ec0509ef63cb27a
+        c5c97d97a64597686d602d9742910dd0a6009902
 ```
 
 本范围包含 **113 个 commit**。最终 source diff 的规模为：
@@ -49,7 +49,7 @@ git diff --stat \
 | Master commit | 内容 | 对应 port slice |
 | --- | --- | --- |
 | `d6afc7d9912` | session/meta: add materialized view bootstrap system tables (#70599) | PR1 bootstrap / MV 系统表 |
-| `5e8a1a229a7` | parser: port materialized view DDL syntax (#70744) | PR2a parser / AST / 语法 |
+| `5e8a1a229a7` | parser: port materialized view DDL syntax (#70744) | PR2a 基础 DDL parser / AST / 语法（不含 REFRESH） |
 | `8cde78af3c5` | session/parser/privilege/executor: add OPERATE VIEW privilege (#70694) | 独立权限闭环 |
 | `94a9cbedabb` | ddl: support create materialized view and log (#70789) | PR2b-create |
 | `f3f7b3bb4dd` | ddl: support drop materialized view and log (#70874) | PR2b-drop |
@@ -65,7 +65,7 @@ patch-id 一致；port 时应以当前 master 的 API、DDL worker 状态机、�
 | Slice | 范围 | 当前结论 |
 | --- | --- | --- |
 | PR1 | bootstrap、MV 专用系统表及最终 schema | 已进入 master |
-| PR2a | MV/MLog parser、AST、Restore、Digest 和语法测试 | 已进入 master |
+| PR2a | MV/MLog 基础 DDL parser、AST、Restore、Digest 和语法测试 | 已进入 master（REFRESH parser 随 PR5） |
 | PR2b-create | CREATE MV/MLog 的 DDL 实现、validation、schema tracker 和测试 | 已进入 master |
 | PR2b-drop | DROP MV/MLog、依赖清理、普通 DDL 约束和测试 | 已进入 master |
 | PR2b-alter | ALTER MV/MLog、base-table DDL 约束和测试 | 已进入 master |
@@ -86,20 +86,37 @@ patch-id 一致；port 时应以当前 master 的 API、DDL worker 状态机、�
 - `非 MV，不纳入`：branch drift 或独立通用改动，不进入 MV 主线 port。
 - `混合 commit`：必须按 hunk/语义拆分，不能整体判断。
 
+## 前 10 个 Commit 的测试复核
+
+下面单独核对前 10 个 source commit 中新增或修改的测试 hunk。这里的“覆盖”按测试意图和断言语义判断，不要求测试文件路径、测试函数名或固定 ID 与 source 一致；branch drift 带来的大规模通用 testdata 结果变化不计作 MV 测试 port。
+
+| # | Source 测试内容 | Master 对照和结论 |
+| ---: | --- | --- |
+| 1 | 未修改或新增测试文件。 | **不适用**。该 commit 只有 `TableInfo` 元数据实现，测试由后续 DDL/metadata 测试覆盖。 |
+| 2 | 新增 bootstrap/upgrade MV 系统表测试，及 restore 的 bootstrap version 断言。 | **MV 测试意图覆盖（100%）**。测试已迁移到 `pkg/session/test/bootstraptest/boot_test.go` 和 `bootstrap_upgrade_test.go`，并扩展为最终 5 张系统表及完整列定义；restore 测试仍校验当前 bootstrap version（现为 287）。 |
+| 3 | parser/AST visitor、MV DDL restore/parse、错误和关键字测试。 | **部分覆盖**。CREATE/DROP/ALTER MV/MLog 的 parser 测试已在 master；source 的 `REFRESH MATERIALIZED VIEW` parse cases、`TestMaterializedViewCreateRefreshOnClauseSyntax` 以及 AST visitor 覆盖项在 master 中找不到，随 PR5 处理。 |
+| 4 | 5 个 CREATE MLog executor 测试，以及 `TestCheckHistoryJobStmtType`。 | **主体测试覆盖，非 100%**。5 个 CREATE MLog 测试已拆到 `materialized_view_basic_test.go`/`materialized_view_create_test.go` 并保留；`TestCheckHistoryJobStmtType` 及其旧 helper 在 DDL framework 重构后不再存在。 |
+| 5 | `_tidb_commit_ts` 相关通用测试结果、planner/testdata 同步。 | **不适用（非 MV 测试 port）**。这是混合 branch-sync commit，没有新增 MV 专属测试；通用 golden/testdata 的逐项结果变化不应作为 MV port 完整性指标。 |
+| 6 | 36 个 MLog DML writetest，以及 `mview_log_dml` integration test。 | **语义覆盖，非逐字 100%**。master 保留其中 34 个测试并拆分文件；两个旧的 tracked-column “CurrentBehavior” case 已被后续“Rejected”行为测试替代，integration case 也已保留并扩展。 |
+| 7 | `TestReservedRowIDAlloc` 的 `Current()` 断言，以及 MLog row-ID integration 回归。 | **部分覆盖**。master 的 MLog integration 已包含 row-ID 回归场景，`ReservedRowIDAlloc.Current()` 实现也存在，但 source 新增的两个 unit-test `Current()` 断言未保留。 |
+| 8 | IndexJoin/IndexHashJoin 的 4 个 NULL-safe equality 测试及 benchmark 初始化。 | **覆盖（100%）**。测试文件迁移到 `pkg/executor/join/test/indexjoin/index_lookup_join_test.go`，4 个测试函数和 `HashIsNullEQ` benchmark 初始化均存在。 |
+| 9 | `SUM_INT` 的 aggfunc、executor、expression、tipb/checker 测试。 | **覆盖（100%）**。source 新增的 SUM_INT 断言在 master 对应测试中均存在，并有后续 distinct/pushdown 扩展。 |
+| 10 | CREATE MLog `table_ids` 测试，以及 2 个 metadata-lock blocking 测试。 | **部分覆盖**。`TestCreateMaterializedViewLogJobTableIDs` 已在 master；两个 `TestMDLCreateMaterializedViewLog...` 并发 MDL 测试在当前 master 中找不到。 |
+
 ## 全部 Commit 审计
 
 | # | Source commit | 日期 | Subject | 主要最终语义 | Port 归属 | Master 对照和结论 |
 | ---: | --- | --- | --- | --- | --- | --- |
-| 1 | `f3af7d5a83fd` | 2026-02-05 | `pkg/meta: store mview/mlog dependency metadata in TableInfo (#66023)` | 在 `TableInfo` 中加入 base table、MV、MLog 之间的反向依赖元数据。 | PR2b-create/drop/alter；元数据基础 | **重构后覆盖**。依赖字段和 clone/metadata 逻辑已经随 #70789、#70874、#70927 进入 master；最终实现还包含 `DependentMViewIDs` 等后续设计，不能按原 patch 直接复制。 |
-| 2 | `e0d58ec5ca8c` | 2026-02-06 | `pkg/session: bootstrap mview refresh/purge system tables (#66024)` | 首次 bootstrap MV refresh/purge 信息、历史和 alert 相关系统表，并补充 bootstrap 测试及 restore 行为。 | PR1 | **已覆盖**。最终系统表 schema 以 master #70599 为准；source 后续的字段、索引和命名 refine 必须合并看，不能只 port 这个早期版本。 |
-| 3 | `96a16b284bc8` | 2026-02-06 | `*: add materialized view DDL syntax (#66022)` | 增加 CREATE/DROP/ALTER MV/MLog 语法、AST、Restore、关键字和 parser 测试。 | PR2a | **重构后覆盖**。master #70744 提供最终 parser/AST 基础；source 后续 parser spec refine 和 `NEVER REFRESH` 删除也要以最终 parser diff 合并判断。 |
-| 4 | `d56cc857183c` | 2026-02-07 | `executor: support CREATE MATERIALIZED VIEW LOG (#66080)` | 实现 CREATE MLog 的 DDL dispatcher、job args、schema tracker、内部表构造和测试。 | PR2b-create | **已覆盖**。master #70789 已按当前 DDL framework 重写并覆盖 CREATE MLog。 |
-| 5 | `6fb36360b1cd` | 2026-02-09 | `*: Cherry-pick pr-66089 into materialized_view branch (#66163)` | 大量 branch 同步内容，包含 `_tidb_commit_ts` extra column、planner/point-get/sample 适配以及大量通用测试结果变化。 | 混合 commit；commit-ts prerequisite；非 MV 测试 drift | **混合 commit**。MV 后续使用的 commit-ts 底层能力在 master 已有或由对应 slice 适配；大量 planner/testdata churn 不应整体 port。 |
-| 6 | `1587a903f980` | 2026-02-12 | `table,executor: sync base-table DML to materialized-view log tables (#66204)` | base-table INSERT/UPDATE/DELETE 等 DML 生成并写入 MLog，新增 MLog table 实现和 writetest/integration test。 | PR3 | **已覆盖**。master #70941 已包含最终 MLog DML capture 逻辑和测试；source 旧测试文件组织不直接照搬。 |
-| 7 | `b476f8f72604` | 2026-02-13 | `table, sessionctx: fix bug where mlog consumes reserved row IDs from base table (#66246)` | 修正 MLog 写入对 base table 保留 row ID/handle 的影响。 | PR3 | **已覆盖**。master #70941 包含对应 row ID 处理和回归覆盖。 |
-| 8 | `581718f52f96` | 2026-02-14 | `planner, executor: support nulleq for IndexJoin and IndexHashJoin (#66017) (#66199)` | 为通用 IndexJoin/IndexHashJoin 增加 NULL-safe equality 支持。 | 通用 prerequisite | **master 已有等价 prerequisite**。该能力不是 MV 专属 port；MV 后续 planner 直接复用 master 实现。 |
-| 9 | `6ac0a2fb86f5` | 2026-02-14 | `*: add aggregate function sum_int (#66085)` | 增加 `SUM_INT` 的 parser、expression、executor、tipb pushdown 和测试。 | 通用 prerequisite；PR5/快速刷新只适配 | **master 已有等价 prerequisite**。master 已有 #69457 等价能力，不重复移植 source 的旧 aggregate 实现。 |
-| 10 | `f7f7e7f85cda` | 2026-02-15 | `pkg/ddl: include base table id for create mlog MDL table ids (#66266)` | CREATE MLog 的 metadata lock involving tables 加入 base table，保证相关 DDL 串行化。 | PR2b-create | **已覆盖**。master CREATE MLog 的 involving-table 逻辑已经包含 base table。 |
+| 1 | `f3af7d5a83fd` | 2026-02-05 | `pkg/meta: store mview/mlog dependency metadata in TableInfo (#66023)` | 在 `TableInfo` 中加入 base table、MV、MLog 之间的反向依赖元数据。 | PR2b-create/drop/alter；元数据基础 | **重构后覆盖（100%）**。源 commit 新增的三个 `TableInfo` 指针、`MViewIDs`/`BaseTableIDs`/`BaseTableID` 字段及三类 `Clone` 深拷贝，均可在 master `pkg/meta/model/table.go` 找到；master #70789 及后续 DDL commit 还扩展了 `DependentMViewIDs`、schedule/alert/time-zone 字段。字段布局和 clone 实现已演进，但该 commit 的元数据语义完整保留。 |
+| 2 | `e0d58ec5ca8c` | 2026-02-06 | `pkg/session: bootstrap mview refresh/purge system tables (#66024)` | 首次 bootstrap MV refresh/purge 信息、历史和 alert 相关系统表，并补充 bootstrap 测试及 restore 行为。 | PR1 | **重构后覆盖（100%）**。源 commit 的 4 张 current/history 表和 version-221 upgrade 在 master #70599 中改为 `pkg/meta/metadef/system_tables_def.go` 定义、`systemTablesOfMaterializedViewNextGenVersion` 注册及 `TestBootstrapMaterializedViewSystemTables`/`TestUpgradeVersion285MaterializedViewBootstrap` 测试；current 表最终命名为 `tidb_mview_refresh_info`/`tidb_mlog_purge_info`，并由后续演进增加 `tidb_mview_refresh_alert`。列、索引和 history schema 经过后续 refine，但源 commit 的 refresh/purge current-state、history bootstrap/restore 语义均已覆盖。 |
+| 3 | `96a16b284bc8` | 2026-02-06 | `*: add materialized view DDL syntax (#66022)` | 增加 CREATE/DROP/ALTER MV/MLog 语法、AST、Restore、关键字和 parser 测试，同时引入早期 `REFRESH MATERIALIZED VIEW` 语法。 | PR2a；REFRESH 部分属于 PR5 | **部分覆盖**。master #70744 已覆盖 CREATE/DROP/ALTER MV/MLog 的 grammar、AST、Restore、visitor、关键字和 parser 测试；源 commit 中的 `REFRESH MATERIALIZED VIEW` AST/grammar（以及其 planner 入口）在当前 `origin/master` 不存在，仍属于后续 PR5。源后续 #79 删除的 `NEVER REFRESH` 分支不计为待 port 内容。 |
+| 4 | `d56cc857183c` | 2026-02-07 | `executor: support CREATE MATERIALIZED VIEW LOG (#66080)` | 实现 CREATE MLog 的 DDL dispatcher、job args、schema tracker、内部表构造和测试。 | PR2b-create | **重构后覆盖（100%）**。master #70789 的 `CreateMaterializedViewLog` executor/worker、专用 `ActionCreateMaterializedViewLog`、job args、schema tracker、infoschema placement 更新和 DDL 测试完整覆盖源 commit；action 数值因 master 中已有 action 扩展而重新编号，但 action 语义和持久化路径一致。 |
+| 5 | `6fb36360b1cd` | 2026-02-09 | `*: Cherry-pick pr-66089 into materialized_view branch (#66163)` | 混合 branch 同步内容，包含 `_tidb_commit_ts` extra column、planner/sample/point-get 适配、notifier 行为调整以及大量通用测试结果变化。 | 混合 commit；commit-ts prerequisite；非 MV 测试 drift | **混合 commit，未完全覆盖**。源 commit 的 `_tidb_commit_ts` 元数据、planner/schema/sample/row-size 适配在 master #65620（`0dd5a8be21`）及后续 rowcodec 实现中已有等价代码，notifier hunk 也已被 master 的 `EnableInternalCheck` 逻辑重构；但源 `pkg/executor/point_get.go` 对旧 row format 缺少列信息时调用 `NewExtraCommitTSColInfo` 的 hunk 在当前 master 中找不到。因此不能把整个 commit 标为已覆盖；其余大规模 planner/testdata 和通用同步内容也不应整体 port。 |
+| 6 | `1587a903f980` | 2026-02-12 | `table,executor: sync base-table DML to materialized-view log tables (#66204)` | base-table INSERT/UPDATE/DELETE/REPLACE/LOAD DATA 等 DML 生成并写入 MLog，新增 MLog table 实现和 writetest/integration test。 | PR3 | **已覆盖（100%）**。master #70941 保留 `WrapTableWithMaterializedViewLog`、各 DML builder 的包装、tracked-column 判断、I/U/D 与 OLD/NEW 行写入，以及 `mview_log_dml` integration 和 writetest 覆盖；实现已增加校验和资源处理，但源 commit 的 DML 语义完整闭环。 |
+| 7 | `b476f8f72604` | 2026-02-13 | `table, sessionctx: fix bug where mlog consumes reserved row IDs from base table (#66246)` | 修正 MLog 写入对 base table 保留 row ID/handle 的影响。 | PR3 | **已覆盖（100%）**。master `pkg/table/tables/mview_log.go` 在写 MLog 前暂时清空 `ReservedRowIDAlloc`、写入后恢复 base-table allocation；`TestReservedRowIDAlloc` 和 `mview_log_dml.test` 的 issue-66245 场景均存在，回归语义可直接对应源 commit。 |
+| 8 | `581718f52f96` | 2026-02-14 | `planner, executor: support nulleq for IndexJoin and IndexHashJoin (#66017) (#66199)` | 为通用 IndexJoin/IndexHashJoin 增加 NULL-safe equality 支持。 | 通用 prerequisite | **master 已有等价 prerequisite（100%）**。master 已包含原始 #66017 的 `c6d1fffb98` 实现及 index-join NULL-EQ 测试；`HashIsNullEQ`、物理计划 `IsNullEQ` 传播和运行时 NULL lookup 逻辑均在当前 master，MV 不需要再 port 该源分支同步版本。 |
+| 9 | `6ac0a2fb86f5` | 2026-02-14 | `*: add aggregate function sum_int (#66085)` | 增加 `SUM_INT` 的 parser、expression、executor、tipb pushdown 和测试。 | 通用 prerequisite；PR5/快速刷新只适配 | **master 已有等价 prerequisite（100%）**。master #69457（`b212b93152`）及其后续 parallel-distinct/agg-elimination 修订包含 `SUM_INT` 的 parser、expression、executor、spill、tipb/checker 和测试闭环；源 commit 的旧实现和依赖变更不应重复移植。 |
+| 10 | `f7f7e7f85cda` | 2026-02-15 | `pkg/ddl: include base table id for create mlog MDL table ids (#66266)` | CREATE MLog 的 metadata lock involving tables 加入 base table，保证相关 DDL 串行化。 | PR2b-create | **已覆盖（100%）**。master `pkg/ddl/jobsubmit/submit.go` 的 `job2TableIDs` 对 `ActionCreateMaterializedViewLog` 将 job table ID 与 `MaterializedViewLog.BaseTableID` 一并写入 `table_ids`，`TestCreateMaterializedViewLogJobTableIDs` 验证两者；同时 CREATE MLog job 的 involving schema 也包含 base table。 |
 | 11 | `a76fec7f4d03` | 2026-02-15 | `executor: support CREATE/DROP MATERIALIZED VIEW (#66083)` | 初始 CREATE/DROP MV/MLog DDL worker、依赖元数据更新、清理和测试。 | 拆分到 PR2b-create、PR2b-drop | **重构后覆盖**。原 commit 已被拆成 master #70789、#70874；不能把该 commit 整体作为一个 PR port。 |
 | 12 | `800fad39c987` | 2026-02-19 | `*: sync AGENTS/.gitignore and Bazel helper updates from master (#66308)` | 同步 AGENTS、`.gitignore`、Makefile/build helper 和开发流程内容。 | 非 MV | **非 MV，不纳入**。这些是 branch drift，不属于 MV 功能。 |
 | 13 | `76ef4adbc110` | 2026-02-21 | `ddl, executor: fix CREATE MATERIALIZED VIEW validation (#66316)` | 修正 CREATE MV 的对象类型、查询和依赖 validation。 | PR2b-create | **已覆盖**。master #70789 的最终 CREATE validation 已覆盖该语义，并结合后续 DDL review 修复。 |
