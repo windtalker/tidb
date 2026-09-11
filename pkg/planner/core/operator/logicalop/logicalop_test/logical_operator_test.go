@@ -18,7 +18,9 @@ import (
 	"testing"
 
 	"github.com/pingcap/tidb/pkg/expression"
+	metamodel "github.com/pingcap/tidb/pkg/meta/model"
 	"github.com/pingcap/tidb/pkg/parser/model"
+	"github.com/pingcap/tidb/pkg/parser/mysql"
 	"github.com/pingcap/tidb/pkg/planner/core/operator/logicalop"
 	"github.com/pingcap/tidb/pkg/testkit"
 	"github.com/pingcap/tidb/pkg/testkit/testdata"
@@ -68,6 +70,23 @@ func TestLogicalSchemaClone(t *testing.T) {
 	// the column slice inside schema will grow at both case.
 	require.Equal(t, cloneSp.Schema().Len(), 2)
 	require.Equal(t, sp.Schema().Len(), 2)
+}
+
+func TestNewExtraCommitTSSchemaColType(t *testing.T) {
+	ctx := mock.NewContext()
+	ds := &logicalop.DataSource{
+		DBName: model.NewCIStr("test"),
+		TableInfo: &metamodel.TableInfo{
+			Name: model.NewCIStr("t"),
+		},
+	}
+	ds.LogicalSchemaProducer = logicalop.LogicalSchemaProducer{
+		BaseLogicalPlan: logicalop.NewBaseLogicalPlan(ctx, "DataSource", ds, 0),
+	}
+
+	col := ds.NewExtraCommitTSSchemaCol()
+	require.Equal(t, mysql.TypeLonglong, col.RetType.GetType())
+	require.True(t, mysql.HasUnsignedFlag(col.RetType.GetFlag()))
 }
 
 func TestLogicalApplyClone(t *testing.T) {
@@ -131,21 +150,21 @@ ORDER BY CONVERT(column16 USING GBK) ASC,column17 ASC
 LIMIT 0,
       20;`
 	tk.MustQuery(sql).Check(testkit.Rows(
-		"Projection 20.00 root  Column#4, Column#5",
-		"└─TopN 20.00 root  Column#6, Column#5, offset:0, count:20",
-		"  └─Projection 10000.00 root  Column#4, Column#5, convert(cast(Column#4, var_string(16777216)), gbk)->Column#6",
+		"Projection 20.00 root  Column#5, Column#6",
+		"└─TopN 20.00 root  Column#7, Column#6, offset:0, count:20",
+		"  └─Projection 10000.00 root  Column#5, Column#6, convert(cast(Column#5, var_string(16777216)), gbk)->Column#7",
 		"    └─TableReader 10000.00 root  data:Projection",
-		"      └─Projection 10000.00 cop[tikv]  json_extract(test.table_test.col16, $[].optUid)->Column#4, json_unquote(cast(json_extract(test.table_test.col17, $[0].value), var_string(16777216)))->Column#5",
+		"      └─Projection 10000.00 cop[tikv]  json_extract(test.table_test.col16, $[].optUid)->Column#5, json_unquote(cast(json_extract(test.table_test.col17, $[0].value), var_string(16777216)))->Column#6",
 		"        └─TableFullScan 10000.00 cop[tikv] table:table_test keep order:false, stats:pseudo"))
 	tk.MustExec(`INSERT INTO mysql.opt_rule_blacklist VALUES("topn_push_down");`)
 	tk.MustExec(`admin reload opt_rule_blacklist;`)
 	tk.MustQuery(sql).Check(testkit.Rows(
 		"Limit 20.00 root  offset:0, count:20",
-		"└─Projection 20.00 root  Column#4, Column#5",
-		"  └─Sort 20.00 root  Column#6, Column#5",
-		"    └─Projection 10000.00 root  Column#4, Column#5, convert(cast(Column#4, var_string(16777216)), gbk)->Column#6",
+		"└─Projection 20.00 root  Column#5, Column#6",
+		"  └─Sort 20.00 root  Column#7, Column#6",
+		"    └─Projection 10000.00 root  Column#5, Column#6, convert(cast(Column#5, var_string(16777216)), gbk)->Column#7",
 		"      └─TableReader 10000.00 root  data:Projection",
-		"        └─Projection 10000.00 cop[tikv]  json_extract(test.table_test.col16, $[].optUid)->Column#4, json_unquote(cast(json_extract(test.table_test.col17, $[0].value), var_string(16777216)))->Column#5",
+		"        └─Projection 10000.00 cop[tikv]  json_extract(test.table_test.col16, $[].optUid)->Column#5, json_unquote(cast(json_extract(test.table_test.col17, $[0].value), var_string(16777216)))->Column#6",
 		"          └─TableFullScan 10000.00 cop[tikv] table:table_test keep order:false, stats:pseudo"))
 }
 

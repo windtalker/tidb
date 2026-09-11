@@ -365,8 +365,12 @@ func JobNeedGC(job *model.Job) bool {
 			model.ActionDropColumn, model.ActionModifyColumn,
 			model.ActionAddIndex, model.ActionAddPrimaryKey,
 			model.ActionReorganizePartition, model.ActionRemovePartitioning,
-			model.ActionAlterTablePartitioning:
+			model.ActionAlterTablePartitioning, model.ActionMViewRefreshOutOfPlaceCutover:
 			return true
+		case model.ActionCreateMaterializedView:
+			// CREATE MATERIALIZED VIEW may create and then roll back a physical table.
+			// Only rollback-done jobs with valid table IDs need delete-range GC.
+			return job.IsRollbackDone() && job.TableID != 0
 		case model.ActionDropIndex:
 			args, err := model.GetFinishedModifyIndexArgs(job)
 			if err != nil {
@@ -495,10 +499,11 @@ func (w *ReorgContext) setDDLLabelForTopSQL(jobQuery string) {
 
 // DDLBackfillers contains the DDL need backfill step.
 var DDLBackfillers = map[model.ActionType]string{
-	model.ActionAddIndex:            "add_index",
-	model.ActionModifyColumn:        "modify_column",
-	model.ActionDropIndex:           "drop_index",
-	model.ActionReorganizePartition: "reorganize_partition",
+	model.ActionAddIndex:               "add_index",
+	model.ActionModifyColumn:           "modify_column",
+	model.ActionDropIndex:              "drop_index",
+	model.ActionReorganizePartition:    "reorganize_partition",
+	model.ActionCreateMaterializedView: "create_materialized_view",
 }
 
 func getDDLRequestSource(jobType model.ActionType) string {
@@ -947,6 +952,12 @@ func (w *worker) runOneJobStep(
 		ver, err = onModifySchemaDefaultPlacement(jobCtx, job)
 	case model.ActionCreateTable:
 		ver, err = w.onCreateTable(jobCtx, job)
+	case model.ActionCreateMaterializedViewShadow:
+		ver, err = w.onCreateMaterializedViewShadow(jobCtx, job)
+	case model.ActionCreateMaterializedViewLog:
+		ver, err = w.onCreateMaterializedViewLog(jobCtx, job)
+	case model.ActionCreateMaterializedView:
+		ver, err = w.onCreateMaterializedView(jobCtx, job)
 	case model.ActionCreateTables:
 		ver, err = w.onCreateTables(jobCtx, job)
 	case model.ActionRepairTable:
@@ -976,7 +987,7 @@ func (w *worker) runOneJobStep(
 	case model.ActionAddVectorIndex:
 		ver, err = w.onCreateVectorIndex(jobCtx, job)
 	case model.ActionDropIndex, model.ActionDropPrimaryKey:
-		ver, err = onDropIndex(jobCtx, job)
+		ver, err = onDropIndex(w.sess.Session(), jobCtx, job)
 	case model.ActionRenameIndex:
 		ver, err = onRenameIndex(jobCtx, job)
 	case model.ActionAddForeignKey:
@@ -995,6 +1006,14 @@ func (w *worker) runOneJobStep(
 		ver, err = w.onShardRowID(jobCtx, job)
 	case model.ActionModifyTableComment:
 		ver, err = onModifyTableComment(jobCtx, job)
+	case model.ActionAlterMaterializedViewRefresh:
+		ver, err = onAlterMaterializedViewRefresh(jobCtx, job, w.sess)
+	case model.ActionAlterMaterializedViewAttributes:
+		ver, err = onAlterMaterializedViewAttributes(jobCtx, job, w.sess)
+	case model.ActionAlterMaterializedViewLogPurge:
+		ver, err = onAlterMaterializedViewLogPurge(jobCtx, job, w.sess)
+	case model.ActionMViewRefreshOutOfPlaceCutover:
+		ver, err = w.onRefreshMaterializedViewCompleteOutOfPlaceCutover(jobCtx, job)
 	case model.ActionModifyTableAutoIDCache:
 		ver, err = onModifyTableAutoIDCache(jobCtx, job)
 	case model.ActionAddTablePartition:
@@ -1014,7 +1033,7 @@ func (w *worker) runOneJobStep(
 	case model.ActionCreateSequence:
 		ver, err = onCreateSequence(jobCtx, job)
 	case model.ActionAlterIndexVisibility:
-		ver, err = onAlterIndexVisibility(jobCtx, job)
+		ver, err = onAlterIndexVisibility(w.sess.Session(), jobCtx, job)
 	case model.ActionAlterSequence:
 		ver, err = onAlterSequence(jobCtx, job)
 	case model.ActionRenameTables:

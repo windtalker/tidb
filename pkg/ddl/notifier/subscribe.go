@@ -69,6 +69,8 @@ const (
 	StatsMetaHandlerID HandlerID = 1
 	// PriorityQueueHandlerID is used to update the priority queue.
 	PriorityQueueHandlerID HandlerID = 2
+	// MVServiceHandlerID is used to notify MV jobs manager for DDL events.
+	MVServiceHandlerID HandlerID = 3
 )
 
 // String implements fmt.Stringer interface.
@@ -78,6 +80,8 @@ func (id HandlerID) String() string {
 		return "TestHandler"
 	case StatsMetaHandlerID:
 		return "StatsMetaHandler"
+	case MVServiceHandlerID:
+		return "MVServiceHandler"
 	default:
 		return fmt.Sprintf("HandlerID(%d)", id)
 	}
@@ -336,7 +340,7 @@ func (n *DDLNotifier) OnBecomeOwner() {
 			return
 		}
 		// In unit tests, we want to panic directly to find the root cause.
-		if intest.InTest {
+		if intest.InTest && !strings.Contains(util.GetRecoverError(r).Error(), "failpoint") {
 			panic(r)
 		}
 		logutil.BgLogger().Error("panic in ddl notifier", zap.Any("recover", r), zap.Stack("stack"))

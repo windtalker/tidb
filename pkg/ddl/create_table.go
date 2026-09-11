@@ -20,6 +20,7 @@ import (
 	"math"
 	"strings"
 	"sync/atomic"
+	"time"
 	"unicode/utf8"
 
 	"github.com/pingcap/errors"
@@ -28,6 +29,7 @@ import (
 	"github.com/pingcap/tidb/pkg/ddl/logutil"
 	"github.com/pingcap/tidb/pkg/ddl/notifier"
 	"github.com/pingcap/tidb/pkg/ddl/placement"
+	sess "github.com/pingcap/tidb/pkg/ddl/session"
 	"github.com/pingcap/tidb/pkg/domain/infosync"
 	"github.com/pingcap/tidb/pkg/errctx"
 	"github.com/pingcap/tidb/pkg/expression"
@@ -43,13 +45,18 @@ import (
 	pmodel "github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
 	field_types "github.com/pingcap/tidb/pkg/parser/types"
+	"github.com/pingcap/tidb/pkg/sessionctx"
 	"github.com/pingcap/tidb/pkg/sessionctx/variable"
 	"github.com/pingcap/tidb/pkg/table"
 	"github.com/pingcap/tidb/pkg/table/tables"
 	"github.com/pingcap/tidb/pkg/types"
 	driver "github.com/pingcap/tidb/pkg/types/parser_driver"
+	"github.com/pingcap/tidb/pkg/util/chunk"
 	"github.com/pingcap/tidb/pkg/util/dbterror"
+	"github.com/pingcap/tidb/pkg/util/generatedexpr"
+	"github.com/pingcap/tidb/pkg/util/intest"
 	"github.com/pingcap/tidb/pkg/util/set"
+	"github.com/pingcap/tidb/pkg/util/sqlescape"
 	"go.uber.org/zap"
 )
 
@@ -191,6 +198,1331 @@ func (w *worker) onCreateTable(jobCtx *jobContext, job *model.Job) (ver int64, _
 	// Finish this job.
 	job.FinishTableJob(model.JobStateDone, model.StatePublic, ver, tbInfo)
 	return ver, errors.Trace(err)
+}
+
+func (*worker) onCreateMaterializedViewShadow(jobCtx *jobContext, job *model.Job) (ver int64, _ error) {
+	args, err := model.GetCreateTableArgs(job)
+	if err != nil {
+		job.State = model.JobStateCancelled
+		return ver, errors.Trace(err)
+	}
+	jobCtx.jobArgs = args
+
+	shadowTblInfo := args.TableInfo
+	if shadowTblInfo == nil || shadowTblInfo.MaterializedViewShadow == nil {
+		job.State = model.JobStateCancelled
+		return ver, dbterror.ErrInvalidDDLJob.GenWithStackByArgs(
+			"create materialized view shadow table: invalid shadow metadata",
+		)
+	}
+	if shadowTblInfo.MaterializedView != nil || shadowTblInfo.MaterializedViewLog != nil || shadowTblInfo.View != nil || shadowTblInfo.Sequence != nil {
+		job.State = model.JobStateCancelled
+		return ver, dbterror.ErrInvalidDDLJob.GenWithStackByArgs(
+			"create materialized view shadow table: shadow table must be a protected physical table",
+		)
+	}
+
+	sourceMViewID := shadowTblInfo.MaterializedViewShadow.SourceMViewID
+	if sourceMViewID == 0 {
+		job.State = model.JobStateCancelled
+		return ver, dbterror.ErrInvalidDDLJob.GenWithStackByArgs(
+			"create materialized view shadow table: invalid source materialized view id",
+		)
+	}
+	sourceMViewInfo, err := getTableInfo(jobCtx.metaMut, sourceMViewID, job.SchemaID)
+	if err != nil {
+		if infoschema.ErrDatabaseNotExists.Equal(err) || infoschema.ErrTableNotExists.Equal(err) {
+			job.State = model.JobStateCancelled
+		}
+		return ver, errors.Trace(err)
+	}
+	if sourceMViewInfo.MaterializedView == nil {
+		job.State = model.JobStateCancelled
+		return ver, dbterror.ErrWrongObject.GenWithStackByArgs(job.SchemaName, sourceMViewInfo.Name, "MATERIALIZED VIEW")
+	}
+	if sourceMViewInfo.State != model.StatePublic {
+		job.State = model.JobStateCancelled
+		return ver, dbterror.ErrInvalidDDLState.GenWithStackByArgs("table", sourceMViewInfo.State)
+	}
+
+	shadowTblInfo, err = createTable(jobCtx, job, args)
+	if err != nil {
+		return ver, errors.Trace(err)
+	}
+
+	ver, err = updateSchemaVersion(jobCtx, job)
+	if err != nil {
+		return ver, errors.Trace(err)
+	}
+
+	job.FinishTableJob(model.JobStateDone, model.StatePublic, ver, shadowTblInfo)
+	return ver, nil
+}
+
+func (w *worker) onCreateMaterializedViewLog(jobCtx *jobContext, job *model.Job) (ver int64, _ error) {
+	args, err := model.GetCreateMaterializedViewLogArgs(job)
+	if err != nil {
+		// Invalid arguments, cancel this job.
+		job.State = model.JobStateCancelled
+		return ver, errors.Trace(err)
+	}
+	jobCtx.jobArgs = args
+
+	mlogTableInfo := args.TableInfo
+	if mlogTableInfo == nil || mlogTableInfo.MaterializedViewLog == nil {
+		job.State = model.JobStateCancelled
+		return ver, dbterror.ErrInvalidDDLJob.GenWithStackByArgs("create materialized view log: invalid job args")
+	}
+
+	baseTableID := mlogTableInfo.MaterializedViewLog.BaseTableID
+	if baseTableID == 0 {
+		job.State = model.JobStateCancelled
+		return ver, dbterror.ErrInvalidDDLJob.GenWithStackByArgs("create materialized view log: invalid base table id")
+	}
+
+	baseTblInfo, err := getTableInfo(jobCtx.metaMut, baseTableID, job.SchemaID)
+	if err != nil {
+		if infoschema.ErrDatabaseNotExists.Equal(err) || infoschema.ErrTableNotExists.Equal(err) {
+			job.State = model.JobStateCancelled
+		}
+		return ver, errors.Trace(err)
+	}
+	if !isValidMaterializedViewLogBaseTable(strings.ToLower(job.SchemaName), baseTblInfo) {
+		job.State = model.JobStateCancelled
+		return ver, dbterror.ErrWrongObject.GenWithStackByArgs(job.SchemaName, baseTblInfo.Name, "BASE TABLE")
+	}
+	if baseTblInfo.GetPartitionInfo() != nil {
+		job.State = model.JobStateCancelled
+		return ver, errUnsupportedMaterializedViewOnPartitionTable("CREATE MATERIALIZED VIEW LOG")
+	}
+	if baseTblInfo.State != model.StatePublic {
+		job.State = model.JobStateCancelled
+		return ver, dbterror.ErrInvalidDDLState.GenWithStack("table %s is not in public, but %s", baseTblInfo.Name, baseTblInfo.State)
+	}
+	if baseTblInfo.MaterializedViewBase != nil && baseTblInfo.MaterializedViewBase.MLogID != 0 {
+		job.State = model.JobStateCancelled
+		return ver, infoschema.ErrTableExists.GenWithStackByArgs(ast.Ident{Schema: pmodel.NewCIStr(job.SchemaName), Name: mlogTableInfo.Name})
+	}
+
+	mlogTableInfo.State = model.StateNone
+	mlogTableInfo, err = createTable(jobCtx, job, &model.CreateTableArgs{TableInfo: mlogTableInfo, FKCheck: false})
+	if err != nil {
+		return ver, errors.Trace(err)
+	}
+
+	if baseTblInfo.MaterializedViewBase == nil {
+		baseTblInfo.MaterializedViewBase = &model.MaterializedViewBaseInfo{}
+	}
+	baseTblInfo.MaterializedViewBase.MLogID = mlogTableInfo.ID
+
+	err = updateTable(jobCtx.metaMut, job.SchemaID, baseTblInfo)
+	if err != nil {
+		return ver, errors.Trace(err)
+	}
+
+	// Upsert the purge-state row used by PURGE MATERIALIZED VIEW LOG for mutual
+	// exclusion and deferred schedule bookkeeping.
+	if err = w.upsertCreateMaterializedViewLogPurgeInfo(jobCtx, job.SchemaName, mlogTableInfo); err != nil {
+		if dbterror.ErrInvalidDDLJob.Equal(err) {
+			job.State = model.JobStateCancelled
+		}
+		return ver, errors.Trace(err)
+	}
+
+	ver, err = updateSchemaVersion(jobCtx, job, schemaIDAndTableInfo{schemaID: job.SchemaID, tblInfo: baseTblInfo})
+	if err != nil {
+		return ver, errors.Trace(err)
+	}
+	createTableEvent := notifier.NewCreateTableEvent(mlogTableInfo)
+	err = asyncNotifyEvent(jobCtx, createTableEvent, job, noSubJob, w.sess)
+	if err != nil {
+		return ver, errors.Trace(err)
+	}
+
+	job.FinishMultipleTableJob(model.JobStateDone, model.StatePublic, ver, []*model.TableInfo{baseTblInfo, mlogTableInfo})
+	return ver, nil
+}
+
+func onCreateMaterializedViewBaseCheck(metaMut *meta.Mutator, schemaID int64, baseTableID int64, schemaName string) (*model.TableInfo, error) {
+	baseTblInfo, err := getTableInfo(metaMut, baseTableID, schemaID)
+	if err != nil {
+		return nil, err
+	}
+	if baseTblInfo.IsView() || baseTblInfo.IsSequence() || baseTblInfo.TempTableType != model.TempTableNone {
+		return nil, dbterror.ErrWrongObject.GenWithStackByArgs(schemaName, baseTblInfo.Name, "BASE TABLE")
+	}
+	if baseTblInfo.GetPartitionInfo() != nil {
+		return nil, errUnsupportedMaterializedViewOnPartitionTable("CREATE MATERIALIZED VIEW")
+	}
+	intest.Assert(baseTblInfo.State == model.StatePublic)
+	if baseTblInfo.MaterializedViewBase == nil || baseTblInfo.MaterializedViewBase.MLogID == 0 {
+		return nil, dbterror.ErrInvalidDDLJob.GenWithStackByArgs("create materialized view: base table has no materialized view log")
+	}
+	mlogTableInfo, err := getTableInfo(metaMut, baseTblInfo.MaterializedViewBase.MLogID, schemaID)
+	if err != nil {
+		return nil, err
+	}
+	if mlogTableInfo.MaterializedViewLog == nil || mlogTableInfo.MaterializedViewLog.BaseTableID != baseTblInfo.ID {
+		return nil, dbterror.ErrInvalidDDLJob.GenWithStackByArgs("create materialized view: invalid materialized view log metadata")
+	}
+	intest.Assert(mlogTableInfo.State == model.StatePublic)
+	return baseTblInfo, nil
+}
+
+func isCreateMaterializedViewBaseCheckCancelledErr(err error) bool {
+	return infoschema.ErrDatabaseNotExists.Equal(err) ||
+		infoschema.ErrTableNotExists.Equal(err) ||
+		dbterror.ErrInvalidDDLJob.Equal(err) ||
+		dbterror.ErrWrongObject.Equal(err) ||
+		dbterror.ErrInvalidDDLState.Equal(err) ||
+		dbterror.ErrGeneralUnsupportedDDL.Equal(err)
+}
+
+func (w *worker) onCreateMaterializedView(jobCtx *jobContext, job *model.Job) (ver int64, _ error) {
+	args, err := model.GetCreateMaterializedViewArgs(job)
+	if err != nil {
+		job.State = model.JobStateCancelled
+		return ver, errors.Trace(err)
+	}
+	if args == nil {
+		job.State = model.JobStateCancelled
+		return ver, dbterror.ErrInvalidDDLJob.GenWithStackByArgs("create materialized view: invalid job args")
+	}
+	jobCtx.jobArgs = args
+
+	mviewTableInfo := args.TableInfo
+	if mviewTableInfo == nil || mviewTableInfo.MaterializedView == nil {
+		job.State = model.JobStateCancelled
+		return ver, dbterror.ErrInvalidDDLJob.GenWithStackByArgs("create materialized view: invalid job args")
+	}
+	baseTableIDs := mviewTableInfo.MaterializedView.BaseTableIDs
+	if len(baseTableIDs) == 0 {
+		job.State = model.JobStateCancelled
+		return ver, dbterror.ErrInvalidDDLJob.GenWithStackByArgs("create materialized view: invalid base table id")
+	}
+	seenBaseTableIDs := make(map[int64]struct{}, len(baseTableIDs))
+	for _, baseTableID := range baseTableIDs {
+		if baseTableID == 0 {
+			job.State = model.JobStateCancelled
+			return ver, dbterror.ErrInvalidDDLJob.GenWithStackByArgs("create materialized view: invalid base table id")
+		}
+		if _, ok := seenBaseTableIDs[baseTableID]; ok {
+			job.State = model.JobStateCancelled
+			return ver, dbterror.ErrInvalidDDLJob.GenWithStackByArgs("create materialized view: duplicate base table id")
+		}
+		seenBaseTableIDs[baseTableID] = struct{}{}
+	}
+
+	if job.IsRollingback() {
+		return w.rollbackCreateMaterializedView(jobCtx, job, mviewTableInfo)
+	}
+
+	switch job.SchemaState {
+	case model.StateNone:
+		// Phase-1: create MV physical table and atomically wire base<->mv metadata.
+		for _, baseTableID := range baseTableIDs {
+			if _, err := onCreateMaterializedViewBaseCheck(jobCtx.metaMut, job.SchemaID, baseTableID, job.SchemaName); err != nil {
+				if isCreateMaterializedViewBaseCheckCancelledErr(err) {
+					job.State = model.JobStateCancelled
+				}
+				return ver, errors.Trace(err)
+			}
+		}
+
+		mviewTableInfo.State = model.StateNone
+		mviewTableInfo, err = createTable(jobCtx, job, &model.CreateTableArgs{TableInfo: mviewTableInfo, FKCheck: false})
+		if err != nil {
+			return ver, errors.Trace(err)
+		}
+		job.TableID = mviewTableInfo.ID
+
+		var extraInfos []schemaIDAndTableInfo
+		extras, err := updateMaterializedViewBaseInfoOnCreate(jobCtx, job, mviewTableInfo)
+		if err != nil {
+			return ver, errors.Trace(err)
+		}
+		extraInfos = append(extraInfos, extras...)
+
+		ver, err = updateSchemaVersion(jobCtx, job, extraInfos...)
+		if err != nil {
+			return ver, errors.Trace(err)
+		}
+		createTableEvent := notifier.NewCreateTableEvent(mviewTableInfo)
+		err = asyncNotifyEvent(jobCtx, createTableEvent, job, noSubJob, w.sess)
+		if err != nil {
+			return ver, errors.Trace(err)
+		}
+		// Publish the prewrite row before entering build stage.
+		// See prewriteCreateMaterializedViewRefreshInfo for the purge-safety contract.
+		if err = w.prewriteCreateMaterializedViewRefreshInfo(jobCtx, mviewTableInfo.ID); err != nil {
+			job.State = model.JobStateRollingback
+			return ver, errors.Trace(err)
+		}
+
+		job.SchemaState = model.StateWriteReorganization
+		job.State = model.JobStateRunning
+		return ver, nil
+
+	case model.StateWriteReorganization:
+		// Phase-2: run initial build and persist refresh read tso in mysql.tidb_mview_refresh_info.
+		// CREATE MATERIALIZED VIEW build is non-resumable in this stage. For normal retry/recovery
+		// paths, if this step restarts without an active reorg context and MV table already has
+		// rows, fail fast and roll back the whole job to avoid duplicate build writes.
+		if w.getReorgCtx(job.ID) == nil {
+			hasRows, checkErr := w.hasCreateMaterializedViewBuildRows(jobCtx.stepCtx, job.SchemaName, mviewTableInfo.Name.O)
+			if checkErr != nil {
+				job.State = model.JobStateRollingback
+				return ver, errors.Trace(checkErr)
+			}
+			if hasRows {
+				job.State = model.JobStateRollingback
+				return ver, dbterror.ErrInvalidDDLJob.GenWithStackByArgs("create materialized view: detected residual build rows on retry")
+			}
+		}
+		reorg := &reorgInfo{Job: job, jobCtx: jobCtx}
+		storeName := ""
+		if jobCtx.store != nil {
+			storeName = jobCtx.store.Name()
+		}
+		err = w.runReorgJob(jobCtx, reorg, mviewTableInfo, func() error {
+			return w.buildCreateMaterializedViewData(jobCtx.stepCtx, storeName, job, mviewTableInfo)
+		})
+		if err != nil {
+			if dbterror.ErrPausedDDLJob.Equal(err) || isCreateMaterializedViewPausedErr(jobCtx, err) || dbterror.ErrWaitReorgTimeout.Equal(err) {
+				return ver, nil
+			}
+			if isCreateMaterializedViewCancelledErr(jobCtx, err) {
+				job.State = model.JobStateRollingback
+				return ver, nil
+			}
+			if errors.Cause(err) == context.Canceled {
+				// IMPORT FROM SELECT has no resumable checkpoint in this path.
+				// Fail fast and rollback the whole CREATE MATERIALIZED VIEW job to avoid duplicate build attempts.
+				job.State = model.JobStateRollingback
+				return ver, errors.Trace(err)
+			}
+			job.State = model.JobStateRollingback
+			return ver, errors.Trace(err)
+		}
+
+		failpoint.Inject("mockCreateMaterializedViewPostBuildRetryableErr", func(val failpoint.Value) {
+			if val.(bool) {
+				failpoint.Return(ver, dbterror.ErrWaitReorgTimeout)
+			}
+		})
+
+		if job.SnapshotVer == 0 {
+			job.State = model.JobStateRollingback
+			return ver, dbterror.ErrInvalidDDLJob.GenWithStackByArgs("create materialized view: invalid build read tso")
+		}
+
+		if err = w.upsertCreateMaterializedViewRefreshInfo(jobCtx, job.SchemaName, mviewTableInfo, job.SnapshotVer, job.SQLMode); err != nil {
+			job.State = model.JobStateRollingback
+			return ver, errors.Trace(err)
+		}
+		failpoint.InjectCall("afterCreateMaterializedViewSuccessRefreshInfoUpsert")
+		failpoint.Inject("mockCreateMaterializedViewPostBuildAfterRefreshInfoUpsertRetryableErr", func(val failpoint.Value) {
+			if val.(bool) {
+				failpoint.Return(ver, dbterror.ErrWaitReorgTimeout)
+			}
+		})
+
+		mviewTableInfo.MaterializedView.InitBuildState = model.MViewInitBuildReady
+		if err := updateTable(jobCtx.metaMut, job.SchemaID, mviewTableInfo); err != nil {
+			job.State = model.JobStateRollingback
+			return ver, errors.Trace(err)
+		}
+		ver, err = updateSchemaVersion(jobCtx, job)
+		if err != nil {
+			job.State = model.JobStateRollingback
+			return ver, errors.Trace(err)
+		}
+		finishedTableInfos := make([]*model.TableInfo, 0, len(baseTableIDs)+1)
+		finishedTableInfos = append(finishedTableInfos, mviewTableInfo)
+		for _, baseTableID := range baseTableIDs {
+			baseTblInfo, getErr := getTableInfo(jobCtx.metaMut, baseTableID, job.SchemaID)
+			if getErr != nil {
+				return ver, errors.Trace(getErr)
+			}
+			finishedTableInfos = append(finishedTableInfos, baseTblInfo)
+		}
+		job.FinishMultipleTableJob(model.JobStateDone, model.StatePublic, ver, finishedTableInfos)
+		return ver, nil
+
+	default:
+		return ver, dbterror.ErrInvalidDDLState.GenWithStack("invalid create materialized view schema state %s", job.SchemaState)
+	}
+}
+
+func isCreateMaterializedViewCancelledErr(jobCtx *jobContext, err error) bool {
+	if dbterror.ErrCancelledDDLJob.Equal(err) {
+		return true
+	}
+	if errors.Cause(err) != context.Canceled || jobCtx.stepCtx == nil {
+		return false
+	}
+	return dbterror.ErrCancelledDDLJob.Equal(context.Cause(jobCtx.stepCtx))
+}
+
+func isCreateMaterializedViewPausedErr(jobCtx *jobContext, err error) bool {
+	if dbterror.ErrPausedDDLJob.Equal(err) {
+		return true
+	}
+	if errors.Cause(err) != context.Canceled || jobCtx.stepCtx == nil {
+		return false
+	}
+	return dbterror.ErrPausedDDLJob.Equal(context.Cause(jobCtx.stepCtx))
+}
+
+func (w *worker) rollbackCreateMaterializedView(jobCtx *jobContext, job *model.Job, mviewTableInfo *model.TableInfo) (ver int64, _ error) {
+	droppingTblInfo := mviewTableInfo
+	actualTblInfo, err := getTableInfo(jobCtx.metaMut, job.TableID, job.SchemaID)
+	if err == nil {
+		droppingTblInfo = actualTblInfo
+	} else if !infoschema.ErrDatabaseNotExists.Equal(err) && !infoschema.ErrTableNotExists.Equal(err) {
+		return ver, errors.Trace(err)
+	}
+
+	var extraInfos []schemaIDAndTableInfo
+	if droppingTblInfo != nil {
+		extras, err := updateMaterializedViewBaseInfoOnDrop(jobCtx, job, droppingTblInfo)
+		if err != nil {
+			return ver, errors.Trace(err)
+		}
+		for _, extra := range extras {
+			if err := updateTable(jobCtx.metaMut, extra.schemaID, extra.tblInfo); err != nil {
+				return ver, errors.Trace(err)
+			}
+			extraInfos = append(extraInfos, extra)
+		}
+	}
+
+	if actualTblInfo != nil {
+		if err := jobCtx.metaMut.DropTableOrView(job.SchemaID, job.TableID); err != nil {
+			return ver, errors.Trace(err)
+		}
+		if err := jobCtx.metaMut.GetAutoIDAccessors(job.SchemaID, job.TableID).Del(); err != nil {
+			return ver, errors.Trace(err)
+		}
+	}
+
+	if err := w.deleteCreateMaterializedViewRefreshInfo(jobCtx, job.TableID); err != nil {
+		return ver, errors.Trace(err)
+	}
+	if err := w.deleteCreateMaterializedViewRefreshAlert(jobCtx, job.TableID); err != nil {
+		logutil.DDLLogger().Warn(
+			"create materialized view rollback: failed to delete refresh alert",
+			zap.String("schemaName", job.SchemaName),
+			zap.String("tableName", mviewTableInfo.Name.O),
+			zap.Int64("mviewID", job.TableID),
+			zap.Error(err),
+		)
+	}
+
+	job.State = model.JobStateRollbackDone
+	job.SchemaState = model.StateNone
+	ver, err = updateSchemaVersion(jobCtx, job, extraInfos...)
+	if err != nil {
+		return ver, errors.Trace(err)
+	}
+	var mlogTableIDs []int64
+	if args, ok := jobCtx.jobArgs.(*model.CreateMaterializedViewArgs); ok && args != nil {
+		mlogTableIDs = args.MLogTableIDs
+	}
+	job.FillArgs(&model.CreateMaterializedViewArgs{
+		TableInfo:    mviewTableInfo,
+		MLogTableIDs: mlogTableIDs,
+	})
+	return ver, nil
+}
+
+func buildCreateMaterializedViewImportSQL(schemaName string, mviewTableInfo *model.TableInfo, threadCnt int, diskQuota string) (string, error) {
+	if mviewTableInfo.MaterializedView == nil || len(mviewTableInfo.MaterializedView.SQLContent) == 0 {
+		return "", dbterror.ErrInvalidDDLJob.GenWithStackByArgs("create materialized view: invalid select sql")
+	}
+	// IMPORT FROM SELECT doesn't support session tidb_snapshot historical read.
+	// Build uses current visible data of the source query directly.
+	selectSQL := mviewTableInfo.MaterializedView.SQLContent
+	prefix := sqlescape.MustEscapeSQL("IMPORT INTO %n.%n FROM ", schemaName, mviewTableInfo.Name.O)
+	options := BuildMViewImportIntoOptions(threadCnt, diskQuota)
+	return prefix + "(" + selectSQL + ") WITH " + strings.Join(options, ", "), nil
+}
+
+func getCreateMaterializedViewBuildReadTS(ctx context.Context, ddlSess *sess.Session) (uint64, error) {
+	rows, err := ddlSess.Execute(ctx,
+		"SELECT COALESCE(CAST(JSON_UNQUOTE(JSON_EXTRACT(@@tidb_last_query_info, '$.start_ts')) AS UNSIGNED), CAST(0 AS UNSIGNED))",
+		"create-materialized-view-build-read-ts",
+	)
+	if err != nil {
+		return 0, errors.Trace(err)
+	}
+	if len(rows) == 0 {
+		return 0, dbterror.ErrInvalidDDLJob.GenWithStackByArgs("create materialized view: cannot fetch build read tso")
+	}
+	readTS := rows[0].GetUint64(0)
+	if readTS == 0 {
+		return 0, dbterror.ErrInvalidDDLJob.GenWithStackByArgs("create materialized view: invalid build read tso")
+	}
+	return readTS, nil
+}
+
+func getCreateMaterializedViewTxnStartTS(ddlSess *sess.Session) (uint64, error) {
+	startTS := ddlSess.GetSessionVars().TxnCtx.StartTS
+	if startTS != 0 {
+		return startTS, nil
+	}
+	txn, err := ddlSess.Txn()
+	if err != nil {
+		return 0, errors.Trace(err)
+	}
+	startTS = txn.StartTS()
+	if startTS == 0 {
+		return 0, dbterror.ErrInvalidDDLJob.GenWithStackByArgs("create materialized view: invalid init refresh tso")
+	}
+	return startTS, nil
+}
+
+func buildCreateMaterializedViewInsertSQL(schemaName string, mviewTableInfo *model.TableInfo) (string, error) {
+	if mviewTableInfo.MaterializedView == nil || len(mviewTableInfo.MaterializedView.SQLContent) == 0 {
+		return "", dbterror.ErrInvalidDDLJob.GenWithStackByArgs("create materialized view: invalid select sql")
+	}
+	prefix := sqlescape.MustEscapeSQL("REPLACE INTO %n.%n ", schemaName, mviewTableInfo.Name.O)
+	return prefix + mviewTableInfo.MaterializedView.SQLContent, nil
+}
+
+func (w *worker) hasCreateMaterializedViewBuildRows(ctx context.Context, schemaName, mvTableName string) (bool, error) {
+	if ctx == nil {
+		ctx = w.workCtx
+	}
+	origInMaterializedViewMaintenance := w.sess.GetSessionVars().InMaterializedViewMaintenance
+	w.sess.GetSessionVars().InMaterializedViewMaintenance = true
+	defer func() {
+		w.sess.GetSessionVars().InMaterializedViewMaintenance = origInMaterializedViewMaintenance
+	}()
+
+	checkSQL := sqlescape.MustEscapeSQL("SELECT 1 FROM %n.%n LIMIT 1", schemaName, mvTableName)
+	rows, err := w.sess.Execute(ctx, checkSQL, "create-materialized-view-check-build-rows")
+	if err != nil {
+		return false, errors.Trace(err)
+	}
+	return len(rows) > 0, nil
+}
+
+func initCreateMaterializedViewBuildSession(sessCtx sessionctx.Context, job *model.Job, currentDB string) (func(), error) {
+	if job == nil || job.ReorgMeta == nil {
+		return nil, dbterror.ErrInvalidDDLJob.GenWithStackByArgs("create materialized view: missing reorg metadata")
+	}
+	restore := restoreSessCtx(sessCtx)
+	origInMaterializedViewMaintenance := sessCtx.GetSessionVars().InMaterializedViewMaintenance
+	origCurrentDB := sessCtx.GetSessionVars().CurrentDB
+	if err := initSessCtx(sessCtx, job.ReorgMeta); err != nil {
+		// initSessCtx may mutate session vars before returning error (for example invalid timezone).
+		// Restore immediately to avoid leaking partial state into the pooled session.
+		restore(sessCtx)
+		return nil, errors.Trace(err)
+	}
+	targetExecutionVars, err := MViewExecutionSessionVarsFromJob(job, sessCtx.GetSessionVars())
+	if err != nil {
+		restore(sessCtx)
+		return nil, errors.Trace(err)
+	}
+	restoreExecutionVars, err := ApplyMViewExecutionSessionVars(sessCtx.GetSessionVars(), targetExecutionVars)
+	if err != nil {
+		restore(sessCtx)
+		return nil, err
+	}
+	sessCtx.GetSessionVars().CurrentDB = currentDB
+	// MV init build should follow the same TiFlash strict-mode bypass path as MV refresh.
+	// Also marks the session as MV maintenance context so writes bypass the explicit-DML guard.
+	sessCtx.GetSessionVars().InMaterializedViewMaintenance = true
+	failpoint.InjectCall("createMaterializedViewBuildMaintainMemQuotaApplied", sessCtx.GetSessionVars().MemQuotaQuery)
+	failpoint.InjectCall(
+		"createMaterializedViewBuildTiFlashSessionVarsApplied",
+		sessCtx.GetSessionVars().TiFlashMaxThreads,
+		sessCtx.GetSessionVars().TiFlashFineGrainedShuffleStreamCount,
+		sessCtx.GetSessionVars().TiFlashFineGrainedShuffleBatchSize,
+	)
+	failpoint.InjectCall(
+		"createMaterializedViewBuildTiFlashSpillSessionVarsApplied",
+		sessCtx.GetSessionVars().TiFlashMaxBytesBeforeExternalJoin,
+		sessCtx.GetSessionVars().TiFlashMaxBytesBeforeExternalGroupBy,
+		sessCtx.GetSessionVars().TiFlashMaxBytesBeforeExternalSort,
+		sessCtx.GetSessionVars().TiFlashMaxQueryMemoryPerNode,
+		sessCtx.GetSessionVars().TiFlashQuerySpillRatio,
+	)
+	failpoint.InjectCall(
+		"createMaterializedViewBuildImportSessionVarsApplied",
+		sessCtx.GetSessionVars().MViewMaintainImportThreads,
+		sessCtx.GetSessionVars().MViewMaintainImportDiskQuota,
+	)
+	return func() {
+		restoreExecutionVars()
+		restore(sessCtx)
+		sessCtx.GetSessionVars().InMaterializedViewMaintenance = origInMaterializedViewMaintenance
+		sessCtx.GetSessionVars().CurrentDB = origCurrentDB
+	}, nil
+}
+
+func (w *worker) setCreateMaterializedViewBuildReadTSInReorgCtx(jobID int64, readTS uint64) error {
+	rc := w.getReorgCtx(jobID)
+	if rc == nil {
+		return dbterror.ErrInvalidDDLJob.GenWithStackByArgs("create materialized view: reorg context missing")
+	}
+	rc.setSnapshotVer(readTS)
+	return nil
+}
+
+func (w *worker) buildCreateMaterializedViewDataByImport(ctx context.Context, job *model.Job, mviewTableInfo *model.TableInfo) error {
+	sessCtx, err := w.sessPool.Get()
+	if err != nil {
+		return errors.Trace(err)
+	}
+	restoreSess, err := initCreateMaterializedViewBuildSession(sessCtx, job, job.SchemaName)
+	if err != nil {
+		w.sessPool.Put(sessCtx)
+		return errors.Trace(err)
+	}
+	defer func() {
+		restoreSess()
+		w.sessPool.Put(sessCtx)
+	}()
+
+	ddlSess := sess.NewSession(sessCtx)
+	threadCnt := sessCtx.GetSessionVars().MViewMaintainImportThreads
+	diskQuota := sessCtx.GetSessionVars().MViewMaintainImportDiskQuota
+	buildSQL, err := buildCreateMaterializedViewImportSQL(job.SchemaName, mviewTableInfo, threadCnt, diskQuota)
+	if err != nil {
+		return errors.Trace(err)
+	}
+	_, err = ddlSess.Execute(ctx, buildSQL, "create-materialized-view-build-import")
+	if err != nil {
+		return errors.Trace(err)
+	}
+	readTS, err := getCreateMaterializedViewBuildReadTS(ctx, ddlSess)
+	if err != nil {
+		return errors.Trace(err)
+	}
+	if err := w.setCreateMaterializedViewBuildReadTSInReorgCtx(job.ID, readTS); err != nil {
+		return errors.Trace(err)
+	}
+	return nil
+}
+
+func (w *worker) buildCreateMaterializedViewDataByInsert(ctx context.Context, job *model.Job, mviewTableInfo *model.TableInfo) error {
+	sessCtx, err := w.sessPool.Get()
+	if err != nil {
+		return errors.Trace(err)
+	}
+	restoreSess, err := initCreateMaterializedViewBuildSession(sessCtx, job, job.SchemaName)
+	if err != nil {
+		w.sessPool.Put(sessCtx)
+		return errors.Trace(err)
+	}
+	defer func() {
+		restoreSess()
+		w.sessPool.Put(sessCtx)
+	}()
+
+	buildSQL, err := buildCreateMaterializedViewInsertSQL(job.SchemaName, mviewTableInfo)
+	if err != nil {
+		return errors.Trace(err)
+	}
+	ddlSess := sess.NewSession(sessCtx)
+	_, err = ddlSess.Execute(ctx, buildSQL, "create-materialized-view-build-insert")
+	if err != nil {
+		return errors.Trace(err)
+	}
+	readTS, err := getCreateMaterializedViewBuildReadTS(ctx, ddlSess)
+	if err != nil {
+		return errors.Trace(err)
+	}
+	return errors.Trace(w.setCreateMaterializedViewBuildReadTSInReorgCtx(job.ID, readTS))
+}
+
+func (w *worker) buildCreateMaterializedViewData(ctx context.Context, storeName string, job *model.Job, mviewTableInfo *model.TableInfo) error {
+	if ctx == nil {
+		ctx = w.workCtx
+	}
+
+	failpoint.Inject("pauseCreateMaterializedViewBuild", func() {})
+
+	failpoint.Inject("mockCreateMaterializedViewBuildErr", func(val failpoint.Value) {
+		if msg, ok := val.(string); ok && msg == "context-canceled" {
+			failpoint.Return(context.Canceled)
+		}
+		failpoint.Return(errors.New("mock create materialized view build error"))
+	})
+
+	method := "insert-into"
+	if storeName == "TiKV" {
+		method = "import-into"
+	}
+	logutil.DDLLogger().Info(
+		"create materialized view: choose init build method",
+		zap.Int64("jobID", job.ID),
+		zap.String("schema", job.SchemaName),
+		zap.String("mview", mviewTableInfo.Name.O),
+		zap.String("storeName", storeName),
+		zap.String("method", method),
+	)
+
+	if storeName != "TiKV" {
+		return w.buildCreateMaterializedViewDataByInsert(ctx, job, mviewTableInfo)
+	}
+	return w.buildCreateMaterializedViewDataByImport(ctx, job, mviewTableInfo)
+}
+
+// prewriteCreateMaterializedViewRefreshInfo upserts a metadata row for CREATE
+// MATERIALIZED VIEW before the initial build starts, in an independent
+// transaction.
+//
+// Rationale (see docs/design/materialized_view/mv_log_purge.md):
+//  1. PURGE MATERIALIZED VIEW LOG computes safe_purge_tso from
+//     MIN(COALESCE(LAST_SUCCESS_READ_TSO, 0)) across dependent MVs,
+//     including in-building CREATE MATERIALIZED VIEW jobs.
+//  2. If the refresh row is only visible after the DDL step transaction commits,
+//     purge can miss this in-building MV and delete MLog rows that are still
+//     needed by the initial build.
+//  3. Prewrite stores this transaction startTS as a conservative lower bound
+//     during build. The final success upsert (in the DDL step transaction)
+//     overwrites it with the actual build readTS (job.SnapshotVer).
+//  4. If CREATE MATERIALIZED VIEW rolls back, rollbackCreateMaterializedView
+//     deletes this row, so failed jobs do not leave stale refresh metadata.
+func (w *worker) prewriteCreateMaterializedViewRefreshInfo(jobCtx *jobContext, mviewID int64) error {
+	ctx := jobCtx.stepCtx
+	if ctx == nil {
+		ctx = w.workCtx
+	}
+	sessCtx, err := w.sessPool.Get()
+	if err != nil {
+		return errors.Trace(err)
+	}
+	ddlSess := sess.NewSession(sessCtx)
+	defer w.sessPool.Put(sessCtx)
+
+	err = ddlSess.Begin(ctx)
+	if err != nil {
+		return errors.Trace(err)
+	}
+	// Run a lightweight statement right after BEGIN so startTS remains available
+	// even if transaction start becomes lazy in future implementations.
+	if err = warmupCreateMaterializedViewRefreshInfoTxn(ctx, ddlSess, mviewID); err != nil {
+		return errors.Trace(err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			ddlSess.Rollback()
+		}
+	}()
+	startTS, err := getCreateMaterializedViewTxnStartTS(ddlSess)
+	if err != nil {
+		return errors.Trace(err)
+	}
+	if err = execCreateMaterializedViewRefreshInfoUpsert(ctx, ddlSess, mviewID, startTS, nil, nil, false); err != nil {
+		return errors.Trace(err)
+	}
+	if err = ddlSess.Commit(ctx); err != nil {
+		return errors.Trace(err)
+	}
+	committed = true
+	return nil
+}
+
+func (w *worker) upsertCreateMaterializedViewRefreshInfo(jobCtx *jobContext, mviewSchemaName string, mviewTableInfo *model.TableInfo, readTS uint64, sqlMode mysql.SQLMode) error {
+	if mviewTableInfo == nil || mviewTableInfo.MaterializedView == nil {
+		return dbterror.ErrInvalidDDLJob.GenWithStackByArgs("create materialized view: invalid materialized view metadata")
+	}
+	ctx := jobCtx.stepCtx
+	if ctx == nil {
+		ctx = w.workCtx
+	}
+
+	evalSessCtx, err := w.sessPool.Get()
+	if err != nil {
+		return errors.Trace(err)
+	}
+	defer w.sessPool.Put(evalSessCtx)
+	evalSess := sess.NewSession(evalSessCtx)
+	scheduleTimeZone, err := mviewTableInfo.MaterializedView.RefreshScheduleTimeZone.GetLocation()
+	if err != nil {
+		return errors.Trace(err)
+	}
+	restoreEvalSession := setCreateMaterializedViewScheduleEvalSession(evalSessCtx, sqlMode, scheduleTimeZone)
+	defer restoreEvalSession()
+
+	nextRefreshUnixSeconds, shouldUpdateNextRefreshUnixSeconds, err := deriveCreateMaterializedViewNextUnixSeconds(ctx, evalSess, mviewSchemaName, mviewTableInfo.Name.O, mviewTableInfo.MaterializedView)
+	if err != nil {
+		return errors.Trace(err)
+	}
+	lastSuccessRefreshEndUnixSeconds := time.Now().Unix()
+	return errors.Trace(execCreateMaterializedViewRefreshInfoUpsert(ctx, w.sess, mviewTableInfo.ID, readTS, &lastSuccessRefreshEndUnixSeconds, nextRefreshUnixSeconds, shouldUpdateNextRefreshUnixSeconds))
+}
+
+func (w *worker) upsertCreateMaterializedViewLogPurgeInfo(jobCtx *jobContext, mlogSchemaName string, mlogTableInfo *model.TableInfo) error {
+	if mlogTableInfo == nil || mlogTableInfo.MaterializedViewLog == nil {
+		return dbterror.ErrInvalidDDLJob.GenWithStackByArgs("create materialized view log: invalid materialized view log metadata")
+	}
+	ctx := jobCtx.stepCtx
+	if ctx == nil {
+		ctx = w.workCtx
+	}
+
+	evalSessCtx, err := w.sessPool.Get()
+	if err != nil {
+		return errors.Trace(err)
+	}
+	defer w.sessPool.Put(evalSessCtx)
+	evalSess := sess.NewSession(evalSessCtx)
+	evalSQLMode := mlogTableInfo.MaterializedViewLog.DefinitionSQLMode
+	scheduleTimeZone, err := mlogTableInfo.MaterializedViewLog.PurgeScheduleTimeZone.GetLocation()
+	if err != nil {
+		return errors.Trace(err)
+	}
+	restoreEvalSession := setCreateMaterializedViewScheduleEvalSession(evalSessCtx, evalSQLMode, scheduleTimeZone)
+	defer restoreEvalSession()
+
+	nextPurgeUnixSeconds, shouldUpdateNextPurgeUnixSeconds, err := deriveCreateMaterializedViewLogNextUnixSeconds(ctx, evalSess, mlogSchemaName, mlogTableInfo.Name.O, mlogTableInfo.MaterializedViewLog)
+	if err != nil {
+		return errors.Trace(err)
+	}
+	return errors.Trace(execCreateMaterializedViewLogPurgeInfoUpsert(ctx, w.sess, mlogTableInfo.ID, nextPurgeUnixSeconds, shouldUpdateNextPurgeUnixSeconds))
+}
+
+func warmupCreateMaterializedViewRefreshInfoTxn(
+	ctx context.Context,
+	ddlSess *sess.Session,
+	mviewID int64,
+) error {
+	warmupSQL := sqlescape.MustEscapeSQL(
+		"SELECT 1 FROM mysql.tidb_mview_refresh_info WHERE MVIEW_ID = %? LIMIT 1",
+		mviewID,
+	)
+	_, err := ddlSess.Execute(ctx, warmupSQL, "mview-refresh-info-prewrite-warmup")
+	return errors.Trace(convertCreateMaterializedViewRefreshInfoTableNotExistsErr(err))
+}
+
+func execCreateMaterializedViewRefreshInfoUpsert(
+	ctx context.Context,
+	ddlSess *sess.Session,
+	mviewID int64,
+	readTS uint64,
+	lastSuccessRefreshEndUnixSeconds *int64,
+	nextRefreshUnixSeconds *int64,
+	shouldUpdateNextRefreshUnixSeconds bool,
+) error {
+	upsertSQL := buildCreateMaterializedViewRefreshInfoUpsertSQL(mviewID, readTS, lastSuccessRefreshEndUnixSeconds, nextRefreshUnixSeconds, shouldUpdateNextRefreshUnixSeconds)
+	_, err := ddlSess.Execute(ctx, upsertSQL, "mview-refresh-info-upsert")
+	failpoint.Inject("mockUpsertCreateMaterializedViewRefreshInfoTableNotExists", func(val failpoint.Value) {
+		if val.(bool) {
+			err = infoschema.ErrTableNotExists.GenWithStackByArgs("mysql", "tidb_mview_refresh_info")
+		}
+	})
+	return errors.Trace(convertCreateMaterializedViewRefreshInfoTableNotExistsErr(err))
+}
+
+func convertCreateMaterializedViewRefreshInfoTableNotExistsErr(err error) error {
+	if infoschema.ErrTableNotExists.Equal(err) {
+		return dbterror.ErrInvalidDDLJob.GenWithStackByArgs("create materialized view: required system table mysql.tidb_mview_refresh_info does not exist")
+	}
+	return err
+}
+
+func (w *worker) deleteCreateMaterializedViewRefreshInfo(jobCtx *jobContext, mviewID int64) error {
+	ctx := jobCtx.stepCtx
+	if ctx == nil {
+		ctx = w.workCtx
+	}
+	deleteSQL := sqlescape.MustEscapeSQL("DELETE FROM mysql.tidb_mview_refresh_info WHERE MVIEW_ID = %?", mviewID)
+	_, err := w.sess.Execute(ctx, deleteSQL, "mview-refresh-info-delete")
+	failpoint.Inject("mockDeleteCreateMaterializedViewRefreshInfoTableNotExists", func(val failpoint.Value) {
+		if val.(bool) {
+			err = infoschema.ErrTableNotExists.GenWithStackByArgs("mysql", "tidb_mview_refresh_info")
+		}
+	})
+	if infoschema.ErrTableNotExists.Equal(err) {
+		return nil
+	}
+	return errors.Trace(err)
+}
+
+func (w *worker) deleteCreateMaterializedViewRefreshAlert(jobCtx *jobContext, mviewID int64) error {
+	var err error
+	failpoint.Inject("mockDeleteCreateMaterializedViewRefreshAlertErr", func(val failpoint.Value) {
+		err = errors.New(val.(string))
+	})
+	if err == nil {
+		err = w.executeDeleteMViewRefreshAlert(jobCtx, mviewID, "mview-refresh-alert-delete")
+	}
+	if infoschema.ErrTableNotExists.Equal(err) {
+		return nil
+	}
+	return errors.Trace(err)
+}
+
+// deriveCreateMaterializedViewNextUnixSeconds computes the next refresh Unix
+// seconds for CREATE MATERIALIZED VIEW post-build upsert.
+//
+// Rules:
+//  1. If both START WITH and NEXT are absent, the persisted schedule is updated to NULL.
+//  2. Otherwise expressions are evaluated in the prepared eval session
+//     (schedule timezone + job SQL mode).
+//  3. START WITH has higher priority unless it is "near now" (START WITH < now + 10s) and NEXT exists.
+//  4. If the chosen expression evaluates to NULL, the persisted schedule is updated to NULL.
+func deriveCreateMaterializedViewNextUnixSeconds(
+	ctx context.Context,
+	ddlSess *sess.Session,
+	mviewSchemaName string,
+	mvTableName string,
+	mviewInfo *model.MaterializedViewInfo,
+) (*int64, bool, error) {
+	if mviewInfo == nil {
+		return nil, false, nil
+	}
+	scheduleTimeZone, err := mviewInfo.RefreshScheduleTimeZone.GetLocation()
+	if err != nil {
+		return nil, false, errors.Trace(err)
+	}
+	return deriveCreateMaterializedScheduleNextUnixSeconds(
+		ctx,
+		ddlSess,
+		mviewSchemaName,
+		mvTableName,
+		mviewInfo.RefreshStartWith,
+		mviewInfo.RefreshNext,
+		scheduleTimeZone,
+		logCreateMaterializedViewNextUnixSecondsUpdateNull,
+	)
+}
+
+// deriveCreateMaterializedViewLogNextUnixSeconds computes the next purge Unix
+// seconds for CREATE MATERIALIZED VIEW LOG upsert.
+//
+// Rules:
+//  1. If both START WITH and NEXT are absent, the persisted schedule is updated to NULL.
+//  2. Otherwise expressions are evaluated in the prepared eval session
+//     (schedule timezone + job SQL mode).
+//  3. START WITH has higher priority unless it is "near now" (START WITH < now + 10s) and NEXT exists.
+//  4. If the chosen expression evaluates to NULL, the persisted schedule is updated to NULL.
+func deriveCreateMaterializedViewLogNextUnixSeconds(
+	ctx context.Context,
+	ddlSess *sess.Session,
+	mlogSchemaName string,
+	mlogTableName string,
+	mlogInfo *model.MaterializedViewLogInfo,
+) (*int64, bool, error) {
+	if mlogInfo == nil {
+		return nil, false, nil
+	}
+	scheduleTimeZone, err := mlogInfo.PurgeScheduleTimeZone.GetLocation()
+	if err != nil {
+		return nil, false, errors.Trace(err)
+	}
+	return deriveCreateMaterializedScheduleNextUnixSeconds(
+		ctx,
+		ddlSess,
+		mlogSchemaName,
+		mlogTableName,
+		mlogInfo.PurgeStartWith,
+		mlogInfo.PurgeNext,
+		scheduleTimeZone,
+		logCreateMaterializedViewLogNextUnixSecondsUpdateNull,
+	)
+}
+
+func deriveCreateMaterializedScheduleNextUnixSeconds(
+	ctx context.Context,
+	ddlSess *sess.Session,
+	schemaName string,
+	tableName string,
+	startExpr string,
+	nextExpr string,
+	scheduleTimeZone *time.Location,
+	logNullUpdate func(schemaName string, tableName string, nullExprClause string, startExpr string, nextExpr string),
+) (*int64, bool, error) {
+	startExpr = strings.TrimSpace(startExpr)
+	nextExpr = strings.TrimSpace(nextExpr)
+	if startExpr == "" && nextExpr == "" {
+		return nil, true, nil
+	}
+
+	nowTime, err := loadCreateMaterializedViewScheduleNow(ctx, ddlSess)
+	if err != nil {
+		return nil, false, errors.Trace(err)
+	}
+
+	evalExprToDatetime := func(exprSQL string) (*types.Time, error) {
+		t, err := evalCreateMaterializedViewScheduleExprToDatetime(ddlSess, exprSQL)
+		if err != nil {
+			return nil, err
+		}
+		if t == nil {
+			return nil, nil
+		}
+		return t, nil
+	}
+
+	// Rule-1 / Rule-2: START WITH has higher priority unless it's near-now and NEXT exists.
+	if startExpr != "" {
+		startAt, err := evalExprToDatetime(startExpr)
+		if err != nil {
+			return nil, true, err
+		}
+		if startAt == nil {
+			logNullUpdate(schemaName, tableName, "START WITH", startExpr, nextExpr)
+			return nil, true, nil
+		}
+		if nextExpr == "" {
+			nextUnixSeconds, err := expression.MaterializedScheduleTimeToUnixSeconds(startAt, scheduleTimeZone)
+			return nextUnixSeconds, true, errors.Trace(err)
+		}
+
+		// Compare the schedule and current time in the same schedule timezone.
+		goNow, err := nowTime.GoTime(scheduleTimeZone)
+		if err != nil {
+			return nil, true, errors.Trace(err)
+		}
+		nearNowThreshold := types.NewTime(types.FromGoTime(goNow.Add(10*time.Second)), nowTime.Type(), nowTime.Fsp())
+		if startAt.Compare(nearNowThreshold) < 0 {
+			nextAt, err := evalExprToDatetime(nextExpr)
+			if err != nil {
+				return nil, true, err
+			}
+			if nextAt == nil {
+				logNullUpdate(schemaName, tableName, "NEXT", startExpr, nextExpr)
+				return nil, true, nil
+			}
+			nextUnixSeconds, err := expression.MaterializedScheduleTimeToUnixSeconds(nextAt, scheduleTimeZone)
+			return nextUnixSeconds, true, errors.Trace(err)
+		}
+		nextUnixSeconds, err := expression.MaterializedScheduleTimeToUnixSeconds(startAt, scheduleTimeZone)
+		return nextUnixSeconds, true, errors.Trace(err)
+	}
+
+	// Rule-3: START WITH absent, fallback to NEXT when present.
+	if nextExpr != "" {
+		nextAt, err := evalExprToDatetime(nextExpr)
+		if err != nil {
+			return nil, true, err
+		}
+		if nextAt == nil {
+			logNullUpdate(schemaName, tableName, "NEXT", startExpr, nextExpr)
+			return nil, true, nil
+		}
+		nextUnixSeconds, err := expression.MaterializedScheduleTimeToUnixSeconds(nextAt, scheduleTimeZone)
+		return nextUnixSeconds, true, errors.Trace(err)
+	}
+	return nil, false, nil
+}
+
+func logCreateMaterializedViewNextUnixSecondsUpdateNull(
+	mviewSchemaName string,
+	mvTableName string,
+	nullExprClause string,
+	startExpr string,
+	nextExpr string,
+) {
+	if strings.TrimSpace(nextExpr) != "" {
+		logutil.DDLLogger().Error(
+			"create materialized view: automatic refresh schedule disabled because schedule expression evaluated to NULL, updating NEXT_REFRESH_UNIX_SECONDS to NULL",
+			zap.String("schemaName", mviewSchemaName),
+			zap.String("tableName", mvTableName),
+			zap.String("nullExprClause", nullExprClause),
+			zap.String("refreshStartWith", startExpr),
+			zap.String("refreshNext", nextExpr),
+		)
+		return
+	}
+	logutil.DDLLogger().Warn(
+		"create materialized view: schedule expression evaluated to NULL, updating NEXT_REFRESH_UNIX_SECONDS to NULL",
+		zap.String("schemaName", mviewSchemaName),
+		zap.String("tableName", mvTableName),
+		zap.String("nullExprClause", nullExprClause),
+		zap.String("refreshStartWith", startExpr),
+		zap.String("refreshNext", nextExpr),
+	)
+}
+
+func logCreateMaterializedViewLogNextUnixSecondsUpdateNull(
+	mlogSchemaName string,
+	mlogTableName string,
+	nullExprClause string,
+	startExpr string,
+	nextExpr string,
+) {
+	if strings.TrimSpace(nextExpr) != "" {
+		logutil.DDLLogger().Error(
+			"create materialized view log: automatic purge schedule disabled because schedule expression evaluated to NULL, updating NEXT_PURGE_UNIX_SECONDS to NULL",
+			zap.String("schemaName", mlogSchemaName),
+			zap.String("tableName", mlogTableName),
+			zap.String("nullExprClause", nullExprClause),
+			zap.String("purgeStartWith", startExpr),
+			zap.String("purgeNext", nextExpr),
+		)
+		return
+	}
+	logutil.DDLLogger().Warn(
+		"create materialized view log: purge schedule expression evaluated to NULL, updating NEXT_PURGE_UNIX_SECONDS to NULL",
+		zap.String("schemaName", mlogSchemaName),
+		zap.String("tableName", mlogTableName),
+		zap.String("nullExprClause", nullExprClause),
+		zap.String("purgeStartWith", startExpr),
+		zap.String("purgeNext", nextExpr),
+	)
+}
+
+func setCreateMaterializedViewScheduleEvalSession(
+	sctx sessionctx.Context,
+	sqlMode mysql.SQLMode,
+	scheduleTimeZone *time.Location,
+) func() {
+	sessVars := sctx.GetSessionVars()
+	originalSQLMode := sessVars.SQLMode
+	originalTypeFlags := sessVars.StmtCtx.TypeFlags()
+	originalErrLevels := sessVars.StmtCtx.ErrLevels()
+
+	var originalTZ *time.Location
+	if sessVars.TimeZone != nil {
+		tz := *sessVars.TimeZone
+		originalTZ = &tz
+	}
+	originalStmtTZ := sessVars.StmtCtx.TimeZone()
+
+	sessVars.SQLMode = sqlMode
+	sessVars.StmtCtx.SetTypeFlags(expression.MaterializedScheduleTypeFlagsWithSQLMode(sqlMode))
+	sessVars.StmtCtx.SetErrLevels(expression.MaterializedScheduleErrLevelsWithSQLMode(sqlMode))
+
+	sessVars.TimeZone = scheduleTimeZone
+	sessVars.StmtCtx.SetTimeZone(scheduleTimeZone)
+
+	return func() {
+		sessVars.SQLMode = originalSQLMode
+		sessVars.StmtCtx.SetErrLevels(originalErrLevels)
+		sessVars.StmtCtx.SetTypeFlags(originalTypeFlags)
+
+		sessVars.TimeZone = originalTZ
+		if originalStmtTZ != nil {
+			sessVars.StmtCtx.SetTimeZone(originalStmtTZ)
+			return
+		}
+		sessVars.StmtCtx.SetTimeZone(sessVars.Location())
+	}
+}
+
+func loadCreateMaterializedViewScheduleNow(
+	ctx context.Context,
+	ddlSess *sess.Session,
+) (types.Time, error) {
+	rows, err := ddlSess.Execute(ctx, "SELECT NOW(6)", "mview-refresh-info-next-time-now")
+	if err != nil {
+		return types.ZeroTime, errors.Trace(err)
+	}
+	if len(rows) != 1 || rows[0].IsNull(0) {
+		return types.ZeroTime, dbterror.ErrInvalidDDLJob.GenWithStackByArgs("create materialized view: failed to evaluate refresh schedule expression")
+	}
+	return rows[0].GetTime(0), nil
+}
+
+func evalCreateMaterializedViewScheduleExprToDatetime(ddlSess *sess.Session, exprSQL string) (*types.Time, error) {
+	exprNode, err := generatedexpr.ParseExpression(exprSQL)
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+	builtExpr, err := expression.BuildSimpleExpr(ddlSess.Session().GetExprCtx(), exprNode)
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+
+	evalCtx := ddlSess.Session().GetExprCtx().GetEvalCtx()
+	v, err := builtExpr.Eval(evalCtx, chunk.Row{})
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+	if v.IsNull() {
+		return nil, nil
+	}
+
+	targetTp := types.NewFieldType(mysql.TypeDatetime)
+	targetTp.SetDecimal(types.MaxFsp)
+	datetimeV, err := v.ConvertTo(evalCtx.TypeCtx(), targetTp)
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+
+	t := datetimeV.GetMysqlTime()
+	return &t, nil
+}
+
+func buildCreateMaterializedViewRefreshInfoUpsertSQL(mviewID int64, readTS uint64, lastSuccessRefreshEndUnixSeconds *int64, nextRefreshUnixSeconds *int64, shouldUpdateNextRefreshUnixSeconds bool) string {
+	var lastSuccessRefreshEndUnixSecondsArg any
+	if lastSuccessRefreshEndUnixSeconds != nil {
+		lastSuccessRefreshEndUnixSecondsArg = *lastSuccessRefreshEndUnixSeconds
+	}
+	if shouldUpdateNextRefreshUnixSeconds {
+		var nextRefreshUnixSecondsArg any
+		if nextRefreshUnixSeconds != nil {
+			nextRefreshUnixSecondsArg = *nextRefreshUnixSeconds
+		}
+		return sqlescape.MustEscapeSQL(`INSERT INTO mysql.tidb_mview_refresh_info (
+		MVIEW_ID,
+		LAST_SUCCESS_READ_TSO,
+		LAST_SUCCESS_REFRESH_END_UNIX_SECONDS,
+		NEXT_REFRESH_UNIX_SECONDS
+	) VALUES (%?, %?, %?, %?)
+	ON DUPLICATE KEY UPDATE
+		LAST_SUCCESS_READ_TSO = VALUES(LAST_SUCCESS_READ_TSO),
+		LAST_SUCCESS_REFRESH_END_UNIX_SECONDS = VALUES(LAST_SUCCESS_REFRESH_END_UNIX_SECONDS),
+		NEXT_REFRESH_UNIX_SECONDS = VALUES(NEXT_REFRESH_UNIX_SECONDS)`,
+			mviewID,
+			readTS,
+			lastSuccessRefreshEndUnixSecondsArg,
+			nextRefreshUnixSecondsArg,
+		)
+	}
+	return sqlescape.MustEscapeSQL(`INSERT INTO mysql.tidb_mview_refresh_info (
+		MVIEW_ID,
+		LAST_SUCCESS_READ_TSO,
+		LAST_SUCCESS_REFRESH_END_UNIX_SECONDS
+	) VALUES (%?, %?, %?)
+	ON DUPLICATE KEY UPDATE
+		LAST_SUCCESS_READ_TSO = VALUES(LAST_SUCCESS_READ_TSO),
+		LAST_SUCCESS_REFRESH_END_UNIX_SECONDS = VALUES(LAST_SUCCESS_REFRESH_END_UNIX_SECONDS)`,
+		mviewID,
+		readTS,
+		lastSuccessRefreshEndUnixSecondsArg,
+	)
+}
+
+func buildCreateMaterializedViewLogPurgeInfoUpsertSQL(mlogID int64, nextPurgeUnixSeconds *int64, shouldUpdateNextPurgeUnixSeconds bool) string {
+	if shouldUpdateNextPurgeUnixSeconds {
+		var nextPurgeUnixSecondsArg any
+		if nextPurgeUnixSeconds != nil {
+			nextPurgeUnixSecondsArg = *nextPurgeUnixSeconds
+		}
+		return sqlescape.MustEscapeSQL(`INSERT INTO mysql.tidb_mlog_purge_info (
+			MLOG_ID,
+			NEXT_PURGE_UNIX_SECONDS
+		) VALUES (%?, %?)
+		ON DUPLICATE KEY UPDATE
+			NEXT_PURGE_UNIX_SECONDS = VALUES(NEXT_PURGE_UNIX_SECONDS)`,
+			mlogID,
+			nextPurgeUnixSecondsArg,
+		)
+	}
+	return sqlescape.MustEscapeSQL("INSERT IGNORE INTO mysql.tidb_mlog_purge_info (MLOG_ID) VALUES (%?)", mlogID)
+}
+
+func execCreateMaterializedViewLogPurgeInfoUpsert(
+	ctx context.Context,
+	ddlSess *sess.Session,
+	mlogID int64,
+	nextPurgeUnixSeconds *int64,
+	shouldUpdateNextPurgeUnixSeconds bool,
+) error {
+	upsertSQL := buildCreateMaterializedViewLogPurgeInfoUpsertSQL(mlogID, nextPurgeUnixSeconds, shouldUpdateNextPurgeUnixSeconds)
+	_, err := ddlSess.Execute(ctx, upsertSQL, "mlog-purge-info-upsert")
+	failpoint.Inject("mockInsertMLogPurgeTableNotExists", func(val failpoint.Value) {
+		if val.(bool) {
+			err = infoschema.ErrTableNotExists.GenWithStackByArgs("mysql", "tidb_mlog_purge_info")
+		}
+	})
+	return errors.Trace(convertCreateMaterializedViewLogPurgeInfoTableNotExistsErr(err))
+}
+
+func convertCreateMaterializedViewLogPurgeInfoTableNotExistsErr(err error) error {
+	if infoschema.ErrTableNotExists.Equal(err) {
+		return dbterror.ErrInvalidDDLJob.GenWithStackByArgs("create materialized view log: required system table mysql.tidb_mlog_purge_info does not exist")
+	}
+	return errors.Trace(err)
+}
+
+func (w *worker) deleteMaterializedViewLogPurgeInfo(jobCtx *jobContext, mlogID int64) error {
+	ctx := jobCtx.stepCtx
+	if ctx == nil {
+		ctx = w.workCtx
+	}
+	deleteSQL := sqlescape.MustEscapeSQL("DELETE FROM mysql.tidb_mlog_purge_info WHERE MLOG_ID = %?", mlogID)
+	_, err := w.sess.Execute(ctx, deleteSQL, "mlog-purge-info-delete")
+	failpoint.Inject("mockDeleteMaterializedViewLogPurgeInfoTableNotExists", func(val failpoint.Value) {
+		if val.(bool) {
+			err = infoschema.ErrTableNotExists.GenWithStackByArgs("mysql", "tidb_mlog_purge_info")
+		}
+	})
+	if infoschema.ErrTableNotExists.Equal(err) {
+		return nil
+	}
+	return errors.Trace(err)
+}
+
+// updateMaterializedViewBaseInfoOnCreate keeps base-table reverse metadata in sync
+// with MV/MLOG creation in the same DDL transaction.
+func updateMaterializedViewBaseInfoOnCreate(jobCtx *jobContext, job *model.Job, createdTable *model.TableInfo) ([]schemaIDAndTableInfo, error) {
+	var baseTableIDs []int64
+	var apply func(base *model.TableInfo) error
+
+	switch {
+	case createdTable.MaterializedView != nil:
+		if len(createdTable.MaterializedView.BaseTableIDs) == 0 {
+			job.State = model.JobStateCancelled
+			return nil, errors.New("materialized view must reference at least one base table")
+		}
+		baseTableIDs = createdTable.MaterializedView.BaseTableIDs
+		apply = func(base *model.TableInfo) error {
+			if base.MaterializedViewBase == nil {
+				base.MaterializedViewBase = &model.MaterializedViewBaseInfo{}
+			}
+			for _, id := range base.MaterializedViewBase.MViewIDs {
+				if id == createdTable.ID {
+					return nil
+				}
+			}
+			base.MaterializedViewBase.MViewIDs = append(base.MaterializedViewBase.MViewIDs, createdTable.ID)
+			return nil
+		}
+	case createdTable.MaterializedViewLog != nil:
+		baseTableIDs = []int64{createdTable.MaterializedViewLog.BaseTableID}
+		apply = func(base *model.TableInfo) error {
+			if base.MaterializedViewBase == nil {
+				base.MaterializedViewBase = &model.MaterializedViewBaseInfo{}
+			}
+			if base.MaterializedViewBase.MLogID != 0 && base.MaterializedViewBase.MLogID != createdTable.ID {
+				return errors.Errorf("base table %s already has a materialized view log", base.Name.O)
+			}
+			base.MaterializedViewBase.MLogID = createdTable.ID
+			return nil
+		}
+	default:
+		return nil, nil
+	}
+
+	extraInfos := make([]schemaIDAndTableInfo, 0, len(baseTableIDs))
+	processedBaseTables := make(map[int64]struct{}, len(baseTableIDs))
+	for _, baseTableID := range baseTableIDs {
+		if baseTableID == 0 {
+			job.State = model.JobStateCancelled
+			return nil, errors.New("materialized view base table id is invalid")
+		}
+		if _, ok := processedBaseTables[baseTableID]; ok {
+			continue
+		}
+		processedBaseTables[baseTableID] = struct{}{}
+
+		baseTblInfo, err := jobCtx.metaMut.GetTable(job.SchemaID, baseTableID)
+		if err != nil {
+			job.State = model.JobStateCancelled
+			return nil, errors.Trace(err)
+		}
+		if err := apply(baseTblInfo); err != nil {
+			job.State = model.JobStateCancelled
+			return nil, errors.Trace(err)
+		}
+		if err := updateTable(jobCtx.metaMut, job.SchemaID, baseTblInfo); err != nil {
+			job.State = model.JobStateCancelled
+			return nil, errors.Trace(err)
+		}
+		extraInfos = append(extraInfos, schemaIDAndTableInfo{schemaID: job.SchemaID, tblInfo: baseTblInfo})
+	}
+	return extraInfos, nil
 }
 
 func (w *worker) createTableWithForeignKeys(jobCtx *jobContext, job *model.Job, args *model.CreateTableArgs) (ver int64, err error) {
@@ -1194,6 +2526,12 @@ func BuildTableInfoWithLike(ident ast.Ident, referTblInfo *model.TableInfo, s *a
 	if referTblInfo.TTLInfo != nil {
 		tblInfo.TTLInfo = referTblInfo.TTLInfo.Clone()
 	}
+	// CREATE TABLE ... LIKE must always produce a normal table definition.
+	// Do not carry MV/MV LOG/base reverse metadata from the source table.
+	tblInfo.MaterializedViewBase = nil
+	tblInfo.MaterializedView = nil
+	tblInfo.MaterializedViewShadow = nil
+	tblInfo.MaterializedViewLog = nil
 	renameCheckConstraint(&tblInfo)
 	return &tblInfo, nil
 }

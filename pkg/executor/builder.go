@@ -82,6 +82,7 @@ import (
 	"github.com/pingcap/tidb/pkg/util/dbterror/exeerrors"
 	"github.com/pingcap/tidb/pkg/util/dbterror/plannererrors"
 	"github.com/pingcap/tidb/pkg/util/execdetails"
+	"github.com/pingcap/tidb/pkg/util/intest"
 	"github.com/pingcap/tidb/pkg/util/memory"
 	"github.com/pingcap/tidb/pkg/util/ranger"
 	rangerctx "github.com/pingcap/tidb/pkg/util/ranger/context"
@@ -104,13 +105,15 @@ type executorBuilder struct {
 	hasLock bool
 	Ti      *TelemetryInfo
 	// isStaleness means whether this statement use stale read.
-	isStaleness      bool
-	txnScope         string
-	readReplicaScope string
-	inUpdateStmt     bool
-	inDeleteStmt     bool
-	inInsertStmt     bool
-	inSelectLockStmt bool
+	isStaleness                   bool
+	txnScope                      string
+	readReplicaScope              string
+	inUpdateStmt                  bool
+	inDeleteStmt                  bool
+	inInsertStmt                  bool
+	inSelectLockStmt              bool
+	inMViewDeltaMergeStmt         bool
+	inMViewCompleteDeltaApplyStmt bool
 
 	// forDataReaderBuilder indicates whether the builder is used by a dataReaderBuilder.
 	// When forDataReader is true, the builder should use the dataReaderTS as the executor read ts. This is because
@@ -184,6 +187,20 @@ func (b *executorBuilder) build(p base.Plan) exec.Executor {
 		return b.buildAdminPlugins(v)
 	case *plannercore.DDL:
 		return b.buildDDL(v)
+	case *plannercore.RefreshMaterializedView:
+		return b.buildRefreshMaterializedView(v)
+	case *plannercore.DryRunRefreshMaterializedView:
+		return b.buildDryRunRefreshMaterializedView(v)
+	case *plannercore.ProfileRefreshMaterializedView:
+		return b.buildProfileRefreshMaterializedView(v)
+	case *plannercore.CompareMaterializedView:
+		return b.buildCompareMaterializedView(v)
+	case *plannercore.PurgeMaterializedViewLog:
+		return b.buildPurgeMaterializedViewLog(v)
+	case *plannercore.MViewDeltaMerge:
+		return b.buildMViewDeltaMerge(v)
+	case *plannercore.MViewCompleteDeltaApply:
+		return b.buildMViewCompleteDeltaApply(v)
 	case *plannercore.Deallocate:
 		return b.buildDeallocate(v)
 	case *plannercore.Delete:
@@ -961,6 +978,11 @@ func (b *executorBuilder) buildSimple(v *plannercore.Simple) exec.Executor {
 			BaseExecutor: exec.NewBaseExecutor(b.ctx, nil, 0),
 			jobID:        uint64(s.JobID),
 		}
+	case *ast.CancelMaterializedViewJobStmt:
+		return &CancelMaterializedViewJobExec{
+			BaseExecutor: exec.NewBaseExecutor(b.ctx, nil, 0),
+			stmt:         s,
+		}
 	}
 	base := exec.NewBaseExecutor(b.ctx, v.Schema(), v.ID())
 	base.SetInitCap(chunk.ZeroCapacity)
@@ -1009,9 +1031,25 @@ func (b *executorBuilder) buildInsert(v *plannercore.Insert) exec.Executor {
 	baseExec := exec.NewBaseExecutor(b.ctx, nil, v.ID(), children...)
 	baseExec.SetInitCap(chunk.ZeroCapacity)
 
+	op, sourceStmt := "INSERT", tables.MLogSourceInsert
+	if v.IsReplace {
+		op, sourceStmt = "REPLACE", tables.MLogSourceReplace
+	}
+	tblInfo := v.Table.Meta()
+	// Planner already rejects DML on MV/mlog tables; this catches bypass bugs.
+	intest.AssertFunc(func() bool {
+		sv := b.ctx.GetSessionVars()
+		intest.AssertNoError(plannercore.CheckMViewUpdatable(sv, tblInfo, "", op))
+		return true
+	})
+	insertTable := b.wrapTableWithMLogIfExists(v.Table, sourceStmt)
+	if b.err != nil {
+		return nil
+	}
+
 	ivs := &InsertValues{
 		BaseExecutor:              baseExec,
-		Table:                     v.Table,
+		Table:                     insertTable,
 		Columns:                   v.Columns,
 		Lists:                     v.Lists,
 		GenExprs:                  v.GenCols.Exprs,
@@ -1053,8 +1091,21 @@ func (b *executorBuilder) buildImportInto(v *plannercore.ImportInto) exec.Execut
 		b.err = errors.Errorf("Can not get table %d", v.Table.TableInfo.ID)
 		return nil
 	}
+	// Planner already rejects DML on MV/mlog tables; this catches bypass bugs.
+	intest.AssertFunc(func() bool {
+		sv := b.ctx.GetSessionVars()
+		intest.AssertNoError(plannercore.CheckMViewUpdatable(sv, tbl.Meta(), "", "IMPORT"))
+		return true
+	})
 	if !tbl.Meta().IsBaseTable() {
 		b.err = plannererrors.ErrNonUpdatableTable.GenWithStackByArgs(tbl.Meta().Name.O, "IMPORT")
+		return nil
+	}
+	if meta := tbl.Meta(); meta.MaterializedViewBase != nil &&
+		meta.MaterializedViewBase.MLogID != 0 {
+		b.err = plannererrors.ErrNotSupportedYet.GenWithStackByArgs(
+			"IMPORT INTO on tables with materialized view log",
+		)
 		return nil
 	}
 
@@ -1085,8 +1136,18 @@ func (b *executorBuilder) buildLoadData(v *plannercore.LoadData) exec.Executor {
 		b.err = errors.Errorf("Can not get table %d", v.Table.TableInfo.ID)
 		return nil
 	}
+	// Planner already rejects DML on MV/mlog tables; this catches bypass bugs.
+	intest.AssertFunc(func() bool {
+		sv := b.ctx.GetSessionVars()
+		intest.AssertNoError(plannercore.CheckMViewUpdatable(sv, tbl.Meta(), "", "LOAD"))
+		return true
+	})
 	if !tbl.Meta().IsBaseTable() {
 		b.err = plannererrors.ErrNonUpdatableTable.GenWithStackByArgs(tbl.Meta().Name.O, "LOAD")
+		return nil
+	}
+	tbl = b.wrapTableWithMLogIfExists(tbl, tables.MLogSourceLoadData)
+	if b.err != nil {
 		return nil
 	}
 
@@ -1301,6 +1362,283 @@ func (b *executorBuilder) buildDDL(v *plannercore.DDL) exec.Executor {
 		tempTableDDL: temptable.GetTemporaryTableDDL(b.ctx),
 	}
 	return e
+}
+
+func (b *executorBuilder) buildRefreshMaterializedView(v *plannercore.RefreshMaterializedView) exec.Executor {
+	e := &RefreshMaterializedViewExec{
+		BaseExecutor: exec.NewBaseExecutor(b.ctx, v.Schema(), v.ID()),
+		stmt:         v.Statement,
+	}
+	return e
+}
+
+func (b *executorBuilder) buildDryRunRefreshMaterializedView(v *plannercore.DryRunRefreshMaterializedView) exec.Executor {
+	return &RefreshMaterializedViewDryRunExec{
+		BaseExecutor: exec.NewBaseExecutor(b.ctx, v.Schema(), v.ID()),
+		stmt:         v.Statement,
+		is:           b.is,
+	}
+}
+
+func (b *executorBuilder) buildProfileRefreshMaterializedView(v *plannercore.ProfileRefreshMaterializedView) exec.Executor {
+	return &RefreshMaterializedViewProfileExec{
+		BaseExecutor: exec.NewBaseExecutor(b.ctx, v.Schema(), v.ID()),
+		stmt:         v.Statement,
+		is:           b.is,
+	}
+}
+
+func (b *executorBuilder) buildCompareMaterializedView(v *plannercore.CompareMaterializedView) exec.Executor {
+	return &CompareMaterializedViewExec{
+		BaseExecutor: exec.NewBaseExecutor(b.ctx, v.Schema(), v.ID()),
+		stmt:         v.Statement,
+	}
+}
+
+func (b *executorBuilder) buildPurgeMaterializedViewLog(v *plannercore.PurgeMaterializedViewLog) exec.Executor {
+	e := &PurgeMaterializedViewLogExec{
+		BaseExecutor: exec.NewBaseExecutor(b.ctx, v.Schema(), v.ID()),
+		stmt:         v.Statement,
+	}
+	return e
+}
+
+func (b *executorBuilder) buildMViewCompleteDeltaApply(v *plannercore.MViewCompleteDeltaApply) exec.Executor {
+	if v.Source == nil {
+		b.err = errors.New("MViewCompleteDeltaApply source plan is nil")
+		return nil
+	}
+
+	originInMViewCompleteDeltaApply := b.inMViewCompleteDeltaApplyStmt
+	b.inMViewCompleteDeltaApplyStmt = true
+	defer func() {
+		b.inMViewCompleteDeltaApplyStmt = originInMViewCompleteDeltaApply
+	}()
+
+	if b.err = b.updateForUpdateTS(); b.err != nil {
+		return nil
+	}
+
+	sourceExec := b.build(v.Source)
+	if b.err != nil {
+		return nil
+	}
+	sourceFieldTypes := sourceExec.RetFieldTypes()
+	if v.OpColID < 0 || v.OpColID >= len(sourceFieldTypes) {
+		b.err = errors.Errorf("MViewCompleteDeltaApply op column id %d out of source range [0,%d)", v.OpColID, len(sourceFieldTypes))
+		return nil
+	}
+	if sourceFieldTypes[v.OpColID] == nil || sourceFieldTypes[v.OpColID].EvalType() != types.ETInt {
+		b.err = errors.Errorf("MViewCompleteDeltaApply op column id %d must be integer typed", v.OpColID)
+		return nil
+	}
+	mviewTable, ok := b.is.TableByID(context.Background(), v.MVTableID)
+	if !ok {
+		b.err = errors.Errorf("MViewCompleteDeltaApply target table id %d not found in infoschema", v.MVTableID)
+		return nil
+	}
+	if v.CurrentHandleCols == nil {
+		b.err = errors.New("MViewCompleteDeltaApply target handle cols is nil")
+		return nil
+	}
+	publicCols := mviewTable.Cols()
+	if len(publicCols) != v.MVColumnCount {
+		b.err = errors.Errorf("MViewCompleteDeltaApply target public column count %d != plan MV column count %d", len(publicCols), v.MVColumnCount)
+		return nil
+	}
+	for i := 0; i < v.CurrentHandleCols.NumCols(); i++ {
+		handleInputIdx := v.CurrentHandleCols.GetCol(i).Index
+		if handleInputIdx < 0 || handleInputIdx >= len(sourceFieldTypes) {
+			b.err = errors.Errorf("MViewCompleteDeltaApply handle col index %d out of source range [0,%d)", handleInputIdx, len(sourceFieldTypes))
+			return nil
+		}
+	}
+
+	currentWritableInputColIDs, err := buildMViewCompleteDeltaWritableInputColIDs(mviewTable, v.CurrentRowInputColIDs)
+	if err != nil {
+		b.err = err
+		return nil
+	}
+	recomputedWritableInputColIDs, err := buildMViewCompleteDeltaWritableInputColIDs(mviewTable, v.RecomputedRowInputColIDs)
+	if err != nil {
+		b.err = err
+		return nil
+	}
+	if err := validateMViewCompleteDeltaWritableInputColTypes(mviewTable, sourceFieldTypes, currentWritableInputColIDs); err != nil {
+		b.err = err
+		return nil
+	}
+	if err := validateMViewCompleteDeltaWritableInputColTypes(mviewTable, sourceFieldTypes, recomputedWritableInputColIDs); err != nil {
+		b.err = err
+		return nil
+	}
+	compareWritableIdxes, currentCompareInputColIDs, recomputedCompareInputColIDs, err := buildMViewCompleteDeltaCompareMappings(
+		mviewTable,
+		v.GroupKeyMVOffsets,
+		currentWritableInputColIDs,
+		recomputedWritableInputColIDs,
+	)
+	if err != nil {
+		b.err = err
+		return nil
+	}
+
+	return &MViewCompleteDeltaApplyExec{
+		BaseExecutor:                  exec.NewBaseExecutor(b.ctx, v.Schema(), v.ID(), sourceExec),
+		TargetTable:                   mviewTable,
+		TargetHandleCols:              v.CurrentHandleCols,
+		OpColID:                       v.OpColID,
+		CurrentWritableInputColIDs:    append([]int(nil), currentWritableInputColIDs...),
+		RecomputedWritableInputColIDs: append([]int(nil), recomputedWritableInputColIDs...),
+		CompareWritableIdxes:          append([]int(nil), compareWritableIdxes...),
+		CurrentCompareInputColIDs:     append([]int(nil), currentCompareInputColIDs...),
+		RecomputedCompareInputColIDs:  append([]int(nil), recomputedCompareInputColIDs...),
+	}
+}
+
+func buildMViewCompleteDeltaWritableInputColIDs(target table.Table, rowInputColIDs []int) ([]int, error) {
+	if target == nil {
+		return nil, errors.New("MViewCompleteDeltaApply target table is nil")
+	}
+
+	writableCols := target.WritableCols()
+	if len(writableCols) == 0 {
+		return nil, errors.New("MViewCompleteDeltaApply target table has no writable columns")
+	}
+	publicCols := target.Cols()
+	if len(publicCols) != len(writableCols) {
+		return nil, errors.New("MViewCompleteDeltaApply does not support target table with non-public writable columns")
+	}
+	if len(rowInputColIDs) != len(publicCols) {
+		return nil, errors.Errorf(
+			"MViewCompleteDeltaApply row input column mapping length %d != target public column count %d",
+			len(rowInputColIDs),
+			len(publicCols),
+		)
+	}
+
+	writable := make([]int, 0, len(writableCols))
+	for i, col := range writableCols {
+		if col == nil {
+			return nil, errors.Errorf("MViewCompleteDeltaApply target writable column at offset %d is nil", i)
+		}
+		if col.Offset < 0 || col.Offset >= len(rowInputColIDs) {
+			return nil, errors.Errorf(
+				"MViewCompleteDeltaApply target writable column `%s` offset %d out of range [0,%d)",
+				col.Name.O,
+				col.Offset,
+				len(rowInputColIDs),
+			)
+		}
+		writable = append(writable, rowInputColIDs[col.Offset])
+	}
+	return writable, nil
+}
+
+func validateMViewCompleteDeltaWritableInputColTypes(
+	target table.Table,
+	childTypes []*types.FieldType,
+	writableInputColIDs []int,
+) error {
+	if target == nil {
+		return errors.New("MViewCompleteDeltaApply target table is nil")
+	}
+	writableCols := target.WritableCols()
+	if len(writableInputColIDs) != len(writableCols) {
+		return errors.Errorf(
+			"MViewCompleteDeltaApply writable input column count %d != target writable column count %d",
+			len(writableInputColIDs),
+			len(writableCols),
+		)
+	}
+	for writableIdx, inputColID := range writableInputColIDs {
+		if inputColID < 0 || inputColID >= len(childTypes) {
+			return errors.Errorf(
+				"MViewCompleteDeltaApply writable input col id %d at writable offset %d out of source range [0,%d)",
+				inputColID,
+				writableIdx,
+				len(childTypes),
+			)
+		}
+		inputTp := childTypes[inputColID]
+		if inputTp == nil {
+			return errors.Errorf("MViewCompleteDeltaApply writable input col id %d type is unavailable", inputColID)
+		}
+		targetTp := &writableCols[writableIdx].FieldType
+		if !targetTp.Equal(inputTp) {
+			return errors.Errorf(
+				"MViewCompleteDeltaApply writable input col id %d type mismatch, target col `%s` expects %s but input is %s",
+				inputColID,
+				writableCols[writableIdx].Name.O,
+				targetTp.String(),
+				inputTp.String(),
+			)
+		}
+	}
+	return nil
+}
+
+func buildMViewCompleteDeltaCompareMappings(
+	target table.Table,
+	groupKeyMVOffsets []int,
+	currentWritableInputColIDs []int,
+	recomputedWritableInputColIDs []int,
+) ([]int, []int, []int, error) {
+	if target == nil {
+		return nil, nil, nil, errors.New("MViewCompleteDeltaApply target table is nil")
+	}
+	if len(currentWritableInputColIDs) != len(recomputedWritableInputColIDs) {
+		return nil, nil, nil, errors.Errorf(
+			"MViewCompleteDeltaApply writable input mapping length mismatch: current=%d recomputed=%d",
+			len(currentWritableInputColIDs),
+			len(recomputedWritableInputColIDs),
+		)
+	}
+	publicCols := target.Cols()
+	writableCols := target.WritableCols()
+	if len(publicCols) != len(writableCols) {
+		return nil, nil, nil, errors.New("MViewCompleteDeltaApply does not support target table with non-public writable columns")
+	}
+	if len(groupKeyMVOffsets) == 0 {
+		return nil, nil, nil, errors.New("MViewCompleteDeltaApply group key offsets are empty")
+	}
+
+	isGroupKey := make([]bool, len(publicCols))
+	for i, off := range groupKeyMVOffsets {
+		if off < 0 || off >= len(publicCols) {
+			return nil, nil, nil, errors.Errorf(
+				"MViewCompleteDeltaApply group key offset %d at index %d out of range [0,%d)",
+				off,
+				i,
+				len(publicCols),
+			)
+		}
+		isGroupKey[off] = true
+	}
+
+	compareWritableIdxes := make([]int, 0, len(writableCols))
+	currentCompareInputColIDs := make([]int, 0, len(writableCols))
+	recomputedCompareInputColIDs := make([]int, 0, len(writableCols))
+	for writableIdx, col := range writableCols {
+		if col == nil {
+			return nil, nil, nil, errors.Errorf("MViewCompleteDeltaApply target writable column at offset %d is nil", writableIdx)
+		}
+		if col.Offset < 0 || col.Offset >= len(publicCols) {
+			return nil, nil, nil, errors.Errorf(
+				"MViewCompleteDeltaApply target writable column `%s` offset %d out of range [0,%d)",
+				col.Name.O,
+				col.Offset,
+				len(publicCols),
+			)
+		}
+		if isGroupKey[col.Offset] {
+			continue
+		}
+		compareWritableIdxes = append(compareWritableIdxes, writableIdx)
+		currentCompareInputColIDs = append(currentCompareInputColIDs, currentWritableInputColIDs[writableIdx])
+		recomputedCompareInputColIDs = append(recomputedCompareInputColIDs, recomputedWritableInputColIDs[writableIdx])
+	}
+	return compareWritableIdxes, currentCompareInputColIDs, recomputedCompareInputColIDs, nil
 }
 
 // buildTrace builds a TraceExec for future executing. This method will be called
@@ -1830,17 +2168,23 @@ func (b *executorBuilder) buildHashJoin(v *plannercore.PhysicalHashJoin) exec.Ex
 	e.HashJoinCtxV1.JoinType = v.JoinType
 	e.HashJoinCtxV1.Concurrency = v.Concurrency
 	e.HashJoinCtxV1.ChunkAllocPool = e.AllocPool
+	if v.JoinType == logicalop.FullOuterJoin && v.UseOuterToBuild {
+		b.err = errors.Annotate(exeerrors.ErrBuildExecutor, "full outer join only supports UseOuterToBuild=false")
+		return nil
+	}
 	defaultValues := v.DefaultValues
 	lhsTypes, rhsTypes := exec.RetTypes(leftExec), exec.RetTypes(rightExec)
-	if v.InnerChildIdx == 1 {
-		if len(v.RightConditions) > 0 {
-			b.err = errors.Annotate(exeerrors.ErrBuildExecutor, "join's inner condition should be empty")
-			return nil
-		}
-	} else {
-		if len(v.LeftConditions) > 0 {
-			b.err = errors.Annotate(exeerrors.ErrBuildExecutor, "join's inner condition should be empty")
-			return nil
+	if v.JoinType != logicalop.FullOuterJoin {
+		if v.InnerChildIdx == 1 {
+			if len(v.RightConditions) > 0 {
+				b.err = errors.Annotate(exeerrors.ErrBuildExecutor, "join's inner condition should be empty")
+				return nil
+			}
+		} else {
+			if len(v.LeftConditions) > 0 {
+				b.err = errors.Annotate(exeerrors.ErrBuildExecutor, "join's inner condition should be empty")
+				return nil
+			}
 		}
 	}
 
@@ -1879,6 +2223,18 @@ func (b *executorBuilder) buildHashJoin(v *plannercore.PhysicalHashJoin) exec.Ex
 			defaultValues = make([]types.Datum, buildSideExec.Schema().Len())
 		}
 	}
+	if v.JoinType == logicalop.FullOuterJoin {
+		// full outer join keeps side filters inside hash join:
+		// build filter decides whether a build row enters hash table;
+		// probe filter decides whether a probe row enters probe matching.
+		if leftIsBuildSide {
+			e.FullOuterJoinBuildFilter = v.LeftConditions
+			e.FullOuterJoinProbeFilter = v.RightConditions
+		} else {
+			e.FullOuterJoinBuildFilter = v.RightConditions
+			e.FullOuterJoinProbeFilter = v.LeftConditions
+		}
+	}
 	probeKeyColIdx := make([]int, len(probeKeys))
 	probeNAKeColIdx := make([]int, len(probeNAKeys))
 	buildKeyColIdx := make([]int, len(buildKeys))
@@ -1901,14 +2257,55 @@ func (b *executorBuilder) buildHashJoin(v *plannercore.PhysicalHashJoin) exec.Ex
 		colsFromChildren = colsFromChildren[:len(colsFromChildren)-1]
 	}
 	childrenUsedSchema := markChildrenUsedCols(colsFromChildren, v.Children()[0].Schema(), v.Children()[1].Schema())
+	var fullJoinBuildJoinerJoinType, fullJoinProbeJoinerJoinType logicalop.JoinType
+	var fullJoinBuildJoinerOuterIsRight, fullJoinProbeJoinerOuterIsRight bool
+	var fullJoinBuildJoinerDefaultValues, fullJoinProbeJoinerDefaultValues []types.Datum
+	if v.JoinType == logicalop.FullOuterJoin {
+		// Full outer join uses two outer-joiners:
+		// 1) build joiner: handles matched rows + tail unmatched build rows.
+		// 2) probe joiner: handles unmatched probe rows.
+		// `outerIsRight` here is joiner row-layout metadata (whether joiner's
+		// outer row is from original right child), not UseOuterToBuild.
+		if leftIsBuildSide {
+			// build=left, probe=right
+			// build unmatched output: (left, NULL-right)
+			fullJoinBuildJoinerJoinType = logicalop.LeftOuterJoin
+			fullJoinBuildJoinerOuterIsRight = false
+			fullJoinBuildJoinerDefaultValues = make([]types.Datum, len(rhsTypes))
+
+			// probe unmatched output: (NULL-left, right)
+			fullJoinProbeJoinerJoinType = logicalop.RightOuterJoin
+			fullJoinProbeJoinerOuterIsRight = true
+			fullJoinProbeJoinerDefaultValues = make([]types.Datum, len(lhsTypes))
+		} else {
+			// build=right, probe=left
+			// build unmatched output: (NULL-left, right)
+			fullJoinBuildJoinerJoinType = logicalop.RightOuterJoin
+			fullJoinBuildJoinerOuterIsRight = true
+			fullJoinBuildJoinerDefaultValues = make([]types.Datum, len(lhsTypes))
+
+			// probe unmatched output: (left, NULL-right)
+			fullJoinProbeJoinerJoinType = logicalop.LeftOuterJoin
+			fullJoinProbeJoinerOuterIsRight = false
+			fullJoinProbeJoinerDefaultValues = make([]types.Datum, len(rhsTypes))
+		}
+	}
 	for i := uint(0); i < e.Concurrency; i++ {
-		e.ProbeWorkers[i] = &join.ProbeWorkerV1{
+		worker := &join.ProbeWorkerV1{
 			HashJoinCtx:      e.HashJoinCtxV1,
-			Joiner:           join.NewJoiner(b.ctx, v.JoinType, v.InnerChildIdx == 0, defaultValues, v.OtherConditions, lhsTypes, rhsTypes, childrenUsedSchema, isNAJoin),
 			ProbeKeyColIdx:   probeKeyColIdx,
 			ProbeNAKeyColIdx: probeNAKeColIdx,
 		}
-		e.ProbeWorkers[i].WorkerID = i
+		if v.JoinType == logicalop.FullOuterJoin {
+			worker.FullJoinBuildJoiner = join.NewJoiner(b.ctx, fullJoinBuildJoinerJoinType, fullJoinBuildJoinerOuterIsRight, fullJoinBuildJoinerDefaultValues, v.OtherConditions, lhsTypes, rhsTypes, childrenUsedSchema, false)
+			worker.FullJoinProbeJoiner = join.NewJoiner(b.ctx, fullJoinProbeJoinerJoinType, fullJoinProbeJoinerOuterIsRight, fullJoinProbeJoinerDefaultValues, nil, lhsTypes, rhsTypes, childrenUsedSchema, false)
+			// Keep Joiner as probe-mismatch joiner for shared non-full code paths.
+			worker.Joiner = worker.FullJoinProbeJoiner
+		} else {
+			worker.Joiner = join.NewJoiner(b.ctx, v.JoinType, v.InnerChildIdx == 0, defaultValues, v.OtherConditions, lhsTypes, rhsTypes, childrenUsedSchema, isNAJoin)
+		}
+		worker.WorkerID = i
+		e.ProbeWorkers[i] = worker
 	}
 	e.BuildWorker.BuildKeyColIdx, e.BuildWorker.BuildNAKeyColIdx, e.BuildWorker.BuildSideExec, e.BuildWorker.HashJoinCtx = buildKeyColIdx, buildNAKeyColIdx, buildSideExec, e.HashJoinCtxV1
 	e.HashJoinCtxV1.IsNullAware = isNAJoin
@@ -2130,7 +2527,7 @@ func (b *executorBuilder) buildExpand(v *plannercore.PhysicalExpand) exec.Execut
 
 	// Use un-parallel projection for query that write on memdb to avoid data race.
 	// See also https://github.com/pingcap/tidb/issues/26832
-	if b.inUpdateStmt || b.inDeleteStmt || b.inInsertStmt || b.hasLock {
+	if b.inUpdateStmt || b.inDeleteStmt || b.inInsertStmt || b.inMViewDeltaMergeStmt || b.inMViewCompleteDeltaApplyStmt || b.hasLock {
 		e.numWorkers = 0
 	}
 	return e
@@ -2158,10 +2555,14 @@ func (b *executorBuilder) buildProjection(v *plannercore.PhysicalProjection) exe
 
 	// Use un-parallel projection for query that write on memdb to avoid data race.
 	// See also https://github.com/pingcap/tidb/issues/26832
-	if b.inUpdateStmt || b.inDeleteStmt || b.inInsertStmt || b.hasLock {
+	if b.inUpdateStmt || b.inDeleteStmt || b.inInsertStmt || b.inMViewDeltaMergeStmt || b.inMViewCompleteDeltaApplyStmt || b.hasLock {
 		e.numWorkers = 0
 	}
 	return e
+}
+
+func (b *executorBuilder) shouldReadByForUpdateTS() bool {
+	return b.inInsertStmt || b.inUpdateStmt || b.inDeleteStmt || b.inSelectLockStmt || b.inMViewDeltaMergeStmt || b.inMViewCompleteDeltaApplyStmt
 }
 
 func (b *executorBuilder) buildTableDual(v *plannercore.PhysicalTableDual) exec.Executor {
@@ -2178,7 +2579,7 @@ func (b *executorBuilder) buildTableDual(v *plannercore.PhysicalTableDual) exec.
 	return e
 }
 
-// `getSnapshotTS` returns for-update-ts if in insert/update/delete/lock statement otherwise the isolation read ts
+// `getSnapshotTS` returns for-update-ts for write/lock style statements otherwise the isolation read ts.
 // Please notice that in RC isolation, the above two ts are the same
 func (b *executorBuilder) getSnapshotTS() (ts uint64, err error) {
 	if b.forDataReaderBuilder {
@@ -2186,7 +2587,7 @@ func (b *executorBuilder) getSnapshotTS() (ts uint64, err error) {
 	}
 
 	txnManager := sessiontxn.GetTxnManager(b.ctx)
-	if b.inInsertStmt || b.inUpdateStmt || b.inDeleteStmt || b.inSelectLockStmt {
+	if b.shouldReadByForUpdateTS() {
 		return txnManager.GetStmtForUpdateTS()
 	}
 	return txnManager.GetStmtReadTS()
@@ -2199,7 +2600,7 @@ func (b *executorBuilder) getSnapshot() (kv.Snapshot, error) {
 	var err error
 
 	txnManager := sessiontxn.GetTxnManager(b.ctx)
-	if b.inInsertStmt || b.inUpdateStmt || b.inDeleteStmt || b.inSelectLockStmt {
+	if b.shouldReadByForUpdateTS() {
 		snapshot, err = txnManager.GetSnapshotWithStmtForUpdateTS()
 	} else {
 		snapshot, err = txnManager.GetSnapshotWithStmtReadTS()
@@ -2393,6 +2794,9 @@ func (b *executorBuilder) buildMemTable(v *plannercore.PhysicalMemTable) exec.Ex
 			strings.ToLower(infoschema.TableTiDBCheckConstraints),
 			strings.ToLower(infoschema.TableKeywords),
 			strings.ToLower(infoschema.TableTiDBIndexUsage),
+			strings.ToLower(infoschema.TableTiDBMViews),
+			strings.ToLower(infoschema.TableTiDBMLogs),
+			strings.ToLower(infoschema.TableTiDBTableMViewDependencies),
 			strings.ToLower(infoschema.ClusterTableTiDBIndexUsage):
 			memTracker := memory.NewTracker(v.ID(), -1)
 			memTracker.AttachTo(b.ctx.GetSessionVars().StmtCtx.MemTracker)
@@ -2746,11 +3150,11 @@ func (b *executorBuilder) buildUpdate(v *plannercore.Update) exec.Executor {
 	tblID2table := make(map[int64]table.Table, len(v.TblColPosInfos))
 	multiUpdateOnSameTable := make(map[int64]bool)
 	for _, info := range v.TblColPosInfos {
-		tbl, _ := b.is.TableByID(context.Background(), info.TblID)
 		if _, ok := tblID2table[info.TblID]; ok {
 			multiUpdateOnSameTable[info.TblID] = true
+			continue
 		}
-		tblID2table[info.TblID] = tbl
+		tbl, _ := b.is.TableByID(context.Background(), info.TblID)
 		if len(v.PartitionedTable) > 0 {
 			// The v.PartitionedTable collects the partitioned table.
 			// Replace the original table with the partitioned table to support partition selection.
@@ -2758,10 +3162,21 @@ func (b *executorBuilder) buildUpdate(v *plannercore.Update) exec.Executor {
 			// Using the table in v.PartitionedTable returns a proper error, while using the original table can't.
 			for _, p := range v.PartitionedTable {
 				if info.TblID == p.Meta().ID {
-					tblID2table[info.TblID] = p
+					tbl = p
 				}
 			}
 		}
+		// Planner already rejects DML on MV/mlog tables; this catches bypass bugs.
+		intest.AssertFunc(func() bool {
+			sv := b.ctx.GetSessionVars()
+			intest.AssertNoError(plannercore.CheckMViewUpdatable(sv, tbl.Meta(), "", "UPDATE"))
+			return true
+		})
+		tbl = b.wrapTableWithMLogIfExists(tbl, tables.MLogSourceUpdate)
+		if b.err != nil {
+			return nil
+		}
+		tblID2table[info.TblID] = tbl
 	}
 	if b.err = b.updateForUpdateTS(); b.err != nil {
 		return nil
@@ -2827,7 +3242,19 @@ func (b *executorBuilder) buildDelete(v *plannercore.Delete) exec.Executor {
 	b.inDeleteStmt = true
 	tblID2table := make(map[int64]table.Table, len(v.TblColPosInfos))
 	for _, info := range v.TblColPosInfos {
-		tblID2table[info.TblID], _ = b.is.TableByID(context.Background(), info.TblID)
+		tbl, _ := b.is.TableByID(context.Background(), info.TblID)
+		// Planner already rejects DML on MV/mlog tables; this catches bypass bugs.
+		intest.AssertFunc(func() bool {
+			sv := b.ctx.GetSessionVars()
+			err := plannercore.CheckMViewUpdatable(sv, tbl.Meta(), "", "DELETE")
+			intest.AssertNoError(err)
+			return true
+		})
+		tbl = b.wrapTableWithMLogIfExists(tbl, tables.MLogSourceDelete)
+		if b.err != nil {
+			return nil
+		}
+		tblID2table[info.TblID] = tbl
 	}
 
 	if b.err = b.updateForUpdateTS(); b.err != nil {
@@ -2856,6 +3283,45 @@ func (b *executorBuilder) buildDelete(v *plannercore.Delete) exec.Executor {
 		return nil
 	}
 	return deleteExec
+}
+
+// wrapTableWithMLogIfExists wraps tbl with its materialized view log table if one exists.
+// It returns the original table unchanged when there is no associated MLog.
+func (b *executorBuilder) wrapTableWithMLogIfExists(tbl table.Table, sourceStmt tables.MLogSourceStmt) table.Table {
+	if tbl == nil {
+		return nil
+	}
+	meta := tbl.Meta()
+	if meta == nil || meta.MaterializedViewBase == nil || meta.MaterializedViewBase.MLogID == 0 {
+		return tbl
+	}
+	// MV log DML write path doesn't support partitioned tables for now. This guard prevents
+	// accidentally writing inconsistent logs for partitions.
+	if meta.GetPartitionInfo() != nil {
+		b.err = plannererrors.ErrNotSupportedYet.GenWithStackByArgs(
+			"materialized view log on partitioned tables",
+		)
+		return nil
+	}
+
+	mlogID := meta.MaterializedViewBase.MLogID
+	mlogTable, ok := b.is.TableByID(context.Background(), mlogID)
+	if !ok {
+		b.err = errors.Errorf(
+			"cannot get materialized view log table id=%d (base=%s id=%d)",
+			mlogID,
+			meta.Name.O,
+			meta.ID,
+		)
+		return nil
+	}
+
+	wrapped, err := tables.WrapTableWithMaterializedViewLog(tbl, mlogTable, sourceStmt)
+	if err != nil {
+		b.err = err
+		return nil
+	}
+	return wrapped
 }
 
 func (b *executorBuilder) updateForUpdateTS() error {
@@ -3346,6 +3812,32 @@ func (b *executorBuilder) newDataReaderBuilder(p base.PhysicalPlan) (*dataReader
 	}, nil
 }
 
+func (b *executorBuilder) newDataReaderBuilderWithSnapshot(
+	p base.PhysicalPlan,
+	snapshot *plannercore.DataReaderSnapshot,
+) (*dataReaderBuilder, error) {
+	if snapshot == nil {
+		return nil, errors.New("snapshot is nil")
+	}
+	if snapshot.TS == 0 {
+		return nil, errors.New("snapshot ts is zero")
+	}
+	if snapshot.InfoSchema == nil {
+		return nil, errors.New("snapshot infoschema is nil")
+	}
+
+	builderForDataReader := *b
+	builderForDataReader.forDataReaderBuilder = true
+	builderForDataReader.dataReaderTS = snapshot.TS
+	builderForDataReader.is = snapshot.InfoSchema
+	builderForDataReader.isStaleness = true
+
+	return &dataReaderBuilder{
+		plan:            p,
+		executorBuilder: &builderForDataReader,
+	}, nil
+}
+
 func (b *executorBuilder) buildIndexLookUpJoin(v *plannercore.PhysicalIndexJoin) exec.Executor {
 	outerExec := b.build(v.Children()[1-v.InnerChildIdx])
 	if b.err != nil {
@@ -3385,6 +3877,8 @@ func (b *executorBuilder) buildIndexLookUpJoin(v *plannercore.PhysicalIndexJoin)
 		outerHashTypes[i] = outerTypes[col.Index].Clone()
 		outerHashTypes[i].SetFlag(col.RetType.GetFlag())
 	}
+	hashIsNullEQ := make([]bool, len(v.InnerHashKeys))
+	copy(hashIsNullEQ, v.IsNullEQ)
 
 	var (
 		outerFilter           []expression.Expression
@@ -3435,6 +3929,7 @@ func (b *executorBuilder) buildIndexLookUpJoin(v *plannercore.PhysicalIndexJoin)
 			ReaderBuilder: readerBuilder,
 			RowTypes:      innerTypes,
 			HashTypes:     innerHashTypes,
+			HashIsNullEQ:  hashIsNullEQ,
 			ColLens:       v.IdxColLens,
 			HasPrefixCol:  hasPrefixCol,
 		},
@@ -3893,7 +4388,8 @@ func getPartitionKeyColOffsets(keyColIDs []int64, pt table.PartitionedTable) []i
 }
 
 func (builder *dataReaderBuilder) prunePartitionForInnerExecutor(tbl table.Table, physPlanPartInfo *plannercore.PhysPlanPartInfo,
-	lookUpContent []*join.IndexJoinLookUpContent) (usedPartition []table.PhysicalTable, canPrune bool, contentPos []int64, err error) {
+	lookUpContent []*join.IndexJoinLookUpContent,
+) (usedPartition []table.PhysicalTable, canPrune bool, contentPos []int64, err error) {
 	partitionTbl := tbl.(table.PartitionedTable)
 
 	// In index join, this is called by multiple goroutines simultaneously, but partitionPruning is not thread-safe.
@@ -5024,7 +5520,8 @@ func buildRangesForIndexJoin(rctx *rangerctx.RangerContext, lookUpContents []*jo
 
 // buildKvRangesForIndexJoin builds kv ranges for index join when the inner plan is index scan plan.
 func buildKvRangesForIndexJoin(dctx *distsqlctx.DistSQLContext, pctx *rangerctx.RangerContext, tableID, indexID int64, lookUpContents []*join.IndexJoinLookUpContent,
-	ranges []*ranger.Range, keyOff2IdxOff []int, cwc *plannercore.ColWithCmpFuncManager, memTracker *memory.Tracker, interruptSignal *atomic.Value) (_ []kv.KeyRange, err error) {
+	ranges []*ranger.Range, keyOff2IdxOff []int, cwc *plannercore.ColWithCmpFuncManager, memTracker *memory.Tracker, interruptSignal *atomic.Value,
+) (_ []kv.KeyRange, err error) {
 	kvRanges := make([]kv.KeyRange, 0, len(ranges)*len(lookUpContents))
 	if len(ranges) == 0 {
 		return []kv.KeyRange{}, nil
