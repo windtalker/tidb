@@ -299,6 +299,19 @@ master 已有的通用 prerequisite 与 MV 专属接入分开记录；只有生�
 | 109 | **部分覆盖，重构后**。master bootstrap/schema、已合入 DDL 引用和错误/SQL helper 已采用 `REFRESH_START_TIME`/`REFRESH_END_TIME`、`PURGE_START_TIME`/`PURGE_END_TIME`、`LAST_HEARTBEAT_TIME`、`LAST_SUCCESS_SNAPSHOT_TIME`、`UPDATE_TIME` 等最终名称；但 source 对 purge/refresh history executor、alert/service SQL 和 runtime 的全量改名没有 master owner。 | **部分覆盖**。master bootstrap schema test 已断言最终列名和索引名；source 对 `mview_log_ddl`、refresh runtime、alert、heartbeat、history cleanup 的改名测试因缺失 purge/refresh/service runtime 未迁移，不能记为测试 100%。 |
 | 110 | **部分覆盖，重构后**。master 已在 metadata、CREATE/DROP/ALTER/DML 和 DDL worker 中采用 `MView`/`MLog` 的最终命名（包括 `MViewInitBuildState`、`mviewTableInfo` 等）；但 source 同时改名的 refresh/purge executor、MV service、SHOW、COMPARE、complete-delta planner/executor 仍不存在，通用变量重命名不能替代这些缺失 owner。 | **部分覆盖**。master 的 bootstrap、DDL、DML 测试已使用最终 MV/MLog 命名；source 对 refresh/service/show/complete-delta 测试的大量重命名没有 master 对照。该 commit 没有新增独立测试函数，测试缺口来自相关 runtime 测试树尚未 port。 |
 
+## 第 111 到第 120 个 Commit 的测试复核
+
+当前 `xufei/cp_mv_for_master` 相对 `xufei/cp_mv_for_master_base` 实际只有 **113 个
+commit**，因此本节可以核对的 source commit 到 #113 为止。#114–#120 在当前 source
+分支中不存在，没有 commit hash、代码或测试可以审计，不能推断其 master 覆盖状态。
+
+| # | Source 代码核对 | Source 测试核对 |
+| ---: | --- | --- |
+| 111 | **不适用（运维脚本）**。source 只新增 `docs/note/materialized_view/mv_system_tables_rebuild.sql`，用于删除并按最终 schema 重建五张 MV 系统表；它不是 Go/runtime 协议。master 没有同名脚本或等价运维 artifact，因此该文件本身未进入 master，但也不构成运行时代码缺口。 | **不适用**。该 commit 没有测试文件或测试函数；master 的 bootstrap schema/upgrade 测试验证的是运行时建表，不是 source 的手工重建脚本。 |
+| 112 | **部分覆盖，生成代码需重生成**。master parser 的 `CreateMaterializedViewStmt` 已采用 source 的最终 option 顺序（COMMENT/表选项、REFRESH、ATTRIBUTES），`Accept`/Restore 和 `MViewTableOptionList` grammar 也一致；parser generated output 不应直接 cherry-pick。source 同时修改 `pkg/executor/show.go`，要求 `SHOW CREATE MATERIALIZED VIEW` 按新顺序输出，但 master 没有 MV SHOW CREATE owner，因而这部分未覆盖。 | **部分覆盖**。master `pkg/parser/parser_test.go` 已保留 `TestMaterializedViewCreateOptionOrder` 及对应非法顺序断言；source `TestShowCreateMaterializedView` 的输出顺序断言在 master 没有等价测试/运行时。source 删除的 duplicate REFRESH/ATTRIBUTES parser cases与当前 grammar一致，不作为缺失测试。 |
+| 113 | **代码覆盖 100%（最终状态一致）**。source 删除 `MViewRefreshMethodNever`、`NEVER REFRESH` 的 AST Restore 分支和 DDL metadata builder 分支；master parser 只保留 `REFRESH FAST`，DDL 也没有 NEVER 分支。 | **不适用**。该 commit 只修改 parser/DDL 生产代码，没有新增或修改测试；当前 master 的 parser/DDL 测试已基于不含 NEVER 的最终语法。 |
+| 114–120 | **当前 source 分支不存在**。`git rev-list --count xufei/cp_mv_for_master_base..xufei/cp_mv_for_master` 为 113，无法解析这些编号对应的 commit。 | **当前 source 分支不存在**，没有可比较的测试内容。待 source 分支出现新 commit 后再按 hash 审计。 |
+
 ## 全部 Commit 审计
 
 | # | Source commit | 日期 | Subject | 主要最终语义 | Port 归属 | Master 对照和结论 |
@@ -413,9 +426,9 @@ master 已有的通用 prerequisite 与 MV 专属接入分开记录；只有生�
 | 108 | `c226d733626f` | 2026-08-22 | `executor, ddl, session: store MV refresh end time as Unix seconds (#75)` | 将 refresh end time 从 datetime 改为 Unix seconds，并调整 schema、DDL、refresh 写入和测试。 | PR1；PR2b-create/alter；PR5 | **部分覆盖**。最终 schema/CREATE SQL builder 已覆盖；refresh executor 读写、snapshot 和 cutover runtime 未覆盖。 |
 | 109 | `24eaea3deee7` | 2026-08-23 | `mview: unify maintenance timestamp names (#76)` | 统一 refresh/purge info/history 的时间字段命名，例如 snapshot/start/end/heartbeat/update。 | PR1；PR4/PR5/PR7 | **部分覆盖，重构后**。bootstrap/DDL 使用最终命名；purge/refresh/history/service runtime 及测试未覆盖。 |
 | 110 | `bf681b1b662a` | 2026-08-25 | `mview: unify materialized view naming (#77)` | 统一 `MV`/`MView`/`MLog` 在系统表字段、Go 类型、task/service 和 planner 中的命名。 | PR1；PR2b；PR4/PR5/PR6/PR7 | **部分覆盖，重构后**。master 的 bootstrap/DDL/DML 已采用最终命名；refresh/purge/service/show/COMPARE/complete-delta 相关代码和测试未覆盖。 |
-| 111 | `d05b5da91b50` | 2026-08-26 | `add mv system table rebuild sql` | 提供旧 MV 系统表清理并按最终 schema 重建的 SQL 运维脚本。 | PR1 文档/运维辅助 | **尚未 port 为 master 功能**。它是 system-table maintenance artifact，不是运行时 DDL；是否随 PR1 文档/发布材料提供，应单独决定。 |
-| 112 | `9439fdfa65e0` | 2026-08-29 | `parser: align materialized view options with spec (#78)` | 按 spec 重排 CREATE MV options、REFRESH、ATTRIBUTES 以及 AST Restore/parser 测试。 | PR2a；PR2b-create/alter 对 metadata 的适配 | **重构后覆盖**。master #70744 的最终 parser 实现应作为 source of truth；后续 DDL 只适配最终 AST，不直接搬 generated parser diff。 |
-| 113 | `8d2633e8e55a` | 2026-08-29 | `mview: remove unused never refresh method (#79)` | 删除未使用的 `NEVER REFRESH` refresh method、AST 分支和 DDL metadata builder 分支。 | PR2a；PR2b-create/alter | **已覆盖**。master parser/DDL 的最终状态已经不保留该未使用 method。 |
+| 111 | `d05b5da91b50` | 2026-08-26 | `add mv system table rebuild sql` | 提供旧 MV 系统表清理并按最终 schema 重建的 SQL 运维脚本。 | PR1 文档/运维辅助 | **不适用（运维脚本）**。master 没有同名 artifact；运行时 bootstrap schema 另有等价测试，但不等同于该脚本已 port。 |
+| 112 | `9439fdfa65e0` | 2026-08-29 | `parser: align materialized view options with spec (#78)` | 按 spec 重排 CREATE MV options、REFRESH、ATTRIBUTES 以及 AST Restore/parser 测试。 | PR2a；PR2b-create/alter 对 metadata 的适配 | **部分覆盖**。parser grammar/AST/Restore 和 option-order 测试已覆盖；`SHOW CREATE MATERIALIZED VIEW` 的 executor 输出顺序因 master 没有 SHOW MV owner 未覆盖。 |
+| 113 | `8d2633e8e55a` | 2026-08-29 | `mview: remove unused never refresh method (#79)` | 删除未使用的 `NEVER REFRESH` refresh method、AST 分支和 DDL metadata builder 分支。 | PR2a；PR2b-create/alter | **代码覆盖 100%；无新增测试**。master parser/DDL 最终状态已不保留 NEVER method。 |
 
 ## 汇总结论
 
