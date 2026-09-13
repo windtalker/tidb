@@ -123,6 +123,9 @@ func (e *GrantExec) Next(ctx context.Context, _ *chunk.Chunk) error {
 		if tbl != nil && tbl.Meta().Name.L != strings.ToLower(e.Level.TableName) {
 			return infoschema.ErrTableNotExists.GenWithStackByArgs(dbName, e.Level.TableName)
 		}
+		if tbl != nil && tbl.Meta().MaterializedViewShadow != nil {
+			return errors.Errorf("cannot grant privileges on materialized view shadow table %s", tbl.Meta().Name.O)
+		}
 		if tbl != nil {
 			// Use the real table name from schema metadata.
 			// This makes `t` and `T` write to the same privilege row.

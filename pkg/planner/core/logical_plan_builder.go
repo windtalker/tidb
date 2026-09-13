@@ -5014,6 +5014,9 @@ func (b *PlanBuilder) buildDataSource(ctx context.Context, tn *ast.TableName, as
 	if err := CheckMViewReadable(sessionVars, tableInfo, tblName.O); err != nil {
 		return nil, err
 	}
+	if err := CheckMViewShadowReadable(sessionVars, tableInfo, tblName.O); err != nil {
+		return nil, err
+	}
 
 	var samplePartitions []table.PartitionedTable
 	if tableInfo.GetPartitionInfo() != nil {

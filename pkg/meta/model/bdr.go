@@ -110,6 +110,8 @@ var BDRActionMap = map[DDLBDRType][]ActionType{
 		ActionAlterTablePartitioning,
 		ActionRemovePartitioning,
 		ActionAddColumnarIndex,
+		ActionMViewRefreshOutOfPlaceCutover,
+		ActionCreateMaterializedViewShadow,
 		ActionModifyEngineAttribute,
 		ActionAlterTableMode,
 		ActionRefreshMeta,

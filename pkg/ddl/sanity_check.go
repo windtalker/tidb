@@ -100,6 +100,8 @@ func expectedDeleteRangeCnt(ctx delRangeCntCtx, job *model.Job) (int, error) {
 			return 1, nil
 		}
 		return 0, nil
+	case model.ActionMViewRefreshOutOfPlaceCutover:
+		return 1, nil
 	case model.ActionTruncateTable, model.ActionTruncateTablePartition:
 		args, err := model.GetFinishedTruncateTableArgs(job)
 		if err != nil {
@@ -251,6 +253,10 @@ func (e *executor) checkHistoryJobInTest(ctx sessionctx.Context, historyJob *mod
 			}
 		case model.ActionCreateMaterializedViewLog:
 			if _, ok := st.(*ast.CreateMaterializedViewLogStmt); !ok {
+				panic(fmt.Sprintf("job ID %d, parse ddl job failed, query %s", historyJob.ID, historyJob.Query))
+			}
+		case model.ActionCreateMaterializedViewShadow, model.ActionMViewRefreshOutOfPlaceCutover:
+			if _, ok := st.(*ast.RefreshMaterializedViewStmt); !ok {
 				panic(fmt.Sprintf("job ID %d, parse ddl job failed, query %s", historyJob.ID, historyJob.Query))
 			}
 		case model.ActionDropMaterializedView:

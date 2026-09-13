@@ -113,13 +113,15 @@ type executorBuilder struct {
 	hasLock bool
 	Ti      *TelemetryInfo
 	// isStaleness means whether this statement use stale read.
-	isStaleness      bool
-	txnScope         string
-	readReplicaScope string
-	inUpdateStmt     bool
-	inDeleteStmt     bool
-	inInsertStmt     bool
-	inSelectLockStmt bool
+	isStaleness                   bool
+	txnScope                      string
+	readReplicaScope              string
+	inUpdateStmt                  bool
+	inDeleteStmt                  bool
+	inInsertStmt                  bool
+	inSelectLockStmt              bool
+	inMViewDeltaMergeStmt         bool
+	inMViewCompleteDeltaApplyStmt bool
 
 	// forDataReaderBuilder indicates whether the builder is used by a dataReaderBuilder.
 	// When forDataReader is true, the builder should use the dataReaderTS as the executor read ts. This is because
@@ -216,8 +218,18 @@ func (b *executorBuilder) build(p base.Plan) exec.Executor {
 		return b.buildAdminPlugins(v)
 	case *plannercore.DDL:
 		return b.buildDDL(v)
+	case *plannercore.RefreshMaterializedView:
+		return b.buildRefreshMaterializedView(v)
+	case *plannercore.DryRunRefreshMaterializedView:
+		return b.buildDryRunRefreshMaterializedView(v)
+	case *plannercore.ProfileRefreshMaterializedView:
+		return b.buildProfileRefreshMaterializedView(v)
 	case *plannercore.PurgeMaterializedViewLog:
 		return b.buildPurgeMaterializedViewLog(v)
+	case *plannercore.MViewDeltaMerge:
+		return b.buildMViewDeltaMerge(v)
+	case *plannercore.MViewCompleteDeltaApply:
+		return b.buildMViewCompleteDeltaApply(v)
 	case *plannercore.Deallocate:
 		return b.buildDeallocate(v)
 	case *physicalop.Delete:
@@ -3815,6 +3827,21 @@ func (b *executorBuilder) newDataReaderBuilder(p base.PhysicalPlan) (*dataReader
 	}, nil
 }
 
+func (b *executorBuilder) newDataReaderBuilderWithSnapshot(p base.PhysicalPlan, snapshot *plannercore.DataReaderSnapshot) (*dataReaderBuilder, error) {
+	if snapshot == nil || snapshot.TS == 0 || snapshot.InfoSchema == nil {
+		return nil, errors.New("snapshot is nil or invalid")
+	}
+	builderForDataReader := *b
+	builderForDataReader.forDataReaderBuilder = true
+	builderForDataReader.dataReaderTS = snapshot.TS
+	builderForDataReader.is = snapshot.InfoSchema
+	builderForDataReader.isStaleness = true
+	if builderForDataReader.stmtCtxLock == nil {
+		builderForDataReader.stmtCtxLock = &sync.Mutex{}
+	}
+	return &dataReaderBuilder{plan: p, executorBuilder: &builderForDataReader, once: &dataReaderBuilderOnce{}}, nil
+}
+
 func (b *executorBuilder) buildIndexLookUpJoin(v *physicalop.PhysicalIndexJoin) exec.Executor {
 	outerExec := b.build(v.Children()[1-v.InnerChildIdx])
 	if b.err != nil {
@@ -6605,4 +6632,26 @@ func (b *executorBuilder) buildRecommendIndex(v *plannercore.RecommendIndexPlan)
 func (b *executorBuilder) buildWorkloadRepoCreate(_ *plannercore.WorkloadRepoCreate) exec.Executor {
 	base := exec.NewBaseExecutor(b.sctx, nil, 0)
 	return &WorkloadRepoCreateExec{base}
+}
+
+func validateMViewCompleteDeltaWritableInputColTypes(target table.Table, childTypes []*types.FieldType, writableInputColIDs []int) error {
+	if target == nil {
+		return errors.New("MViewCompleteDeltaApply target table is nil")
+	}
+	writableCols := target.WritableCols()
+	if len(writableInputColIDs) != len(writableCols) {
+		return errors.Errorf("MViewCompleteDeltaApply writable input column count %d != target writable column count %d", len(writableInputColIDs), len(writableCols))
+	}
+	for i, inputColID := range writableInputColIDs {
+		if inputColID < 0 || inputColID >= len(childTypes) {
+			return errors.Errorf("MViewCompleteDeltaApply writable input col id %d at writable offset %d out of source range [0,%d)", inputColID, i, len(childTypes))
+		}
+		if childTypes[inputColID] == nil {
+			return errors.Errorf("MViewCompleteDeltaApply writable input col id %d type is unavailable", inputColID)
+		}
+		if !(&writableCols[i].FieldType).Equal(childTypes[inputColID]) {
+			return errors.Errorf("MViewCompleteDeltaApply writable input col id %d type mismatch for target column %s", inputColID, writableCols[i].Name.O)
+		}
+	}
+	return nil
 }

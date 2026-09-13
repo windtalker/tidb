@@ -648,6 +648,10 @@ func (b *PlanBuilder) Build(ctx context.Context, node *resolve.NodeW) (base.Plan
 		return b.buildSetConfig(ctx, x)
 	case *ast.AnalyzeTableStmt:
 		return b.buildAnalyze(x)
+	case *ast.RefreshMaterializedViewStmt:
+		return b.buildRefreshMaterializedView(ctx, x)
+	case *ast.RefreshMaterializedViewImplementStmt:
+		return b.buildRefreshMaterializedViewImplement(ctx, x)
 	case *ast.PurgeMaterializedViewLogStmt:
 		return b.buildPurgeMaterializedViewLog(ctx, x)
 	case *ast.CancelMaterializedViewJobStmt:
