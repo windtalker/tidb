@@ -25,6 +25,7 @@ import (
 	"github.com/pingcap/tidb/pkg/meta/model"
 	"github.com/pingcap/tidb/pkg/parser"
 	"github.com/pingcap/tidb/pkg/parser/ast"
+	"github.com/pingcap/tidb/pkg/parser/auth"
 	"github.com/pingcap/tidb/pkg/parser/format"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
 	"github.com/pingcap/tidb/pkg/parser/terror"
@@ -52,6 +53,32 @@ func runSQL(t *testing.T, ctx sessionctx.Context, is infoschema.InfoSchema, sql 
 	nodeW := resolve.NewNodeW(stmt)
 	err = core.Preprocess(context.Background(), ctx, nodeW, append(opts, core.WithPreprocessorReturn(&core.PreprocessorReturn{InfoSchema: is}))...)
 	require.Truef(t, terror.ErrorEqual(err, terr), "sql: %s, err:%v, terr:%v", sql, err, terr)
+}
+
+func TestPreprocessMViewShadowReadable(t *testing.T) {
+	store := testkit.CreateMockStore(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.Session().GetSessionVars().User = &auth.UserIdentity{AuthUsername: "u", AuthHostname: "%"}
+
+	shadow := &model.TableInfo{
+		ID:                     1,
+		Name:                   ast.NewCIStr("mv_shadow"),
+		State:                  model.StatePublic,
+		MaterializedViewShadow: &model.MaterializedViewShadowInfo{SourceMViewID: 2},
+	}
+	is := infoschema.MockInfoSchema([]*model.TableInfo{shadow})
+	stmts, err := session.Parse(tk.Session(), "select * from mv_shadow")
+	require.NoError(t, err)
+	require.Len(t, stmts, 1)
+
+	err = core.Preprocess(
+		context.Background(),
+		tk.Session(),
+		resolve.NewNodeW(stmts[0]),
+		core.WithPreprocessorReturn(&core.PreprocessorReturn{InfoSchema: is}),
+	)
+	require.ErrorContains(t, err, "SELECT command denied")
 }
 
 func TestValidator(t *testing.T) {
