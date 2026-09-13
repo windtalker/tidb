@@ -20,7 +20,8 @@ The port is limited to PR5 from `cp_mv_for_master_base`'s tracking document. SHO
 - [x] (2026-09-12) Added focused refresh regression coverage without importing PR6/PR7 behavior.
 - [x] (2026-09-12) Added the out-of-place refresh methods to `ddl.Executor`, `Checker`, and `SchemaTracker` so tracker-backed execution remains interface-complete.
 - [x] (2026-09-12) Regenerated Bazel metadata and completed scoped compilation/tests, vet, lint, and diff review.
-- [ ] (2026-09-13) Close the post-port shadow-table audit gaps recorded below before claiming final-diff parity.
+- [x] (2026-09-13) Added the out-of-place cutover statistics-subscriber branch and a regression test covering old/new stats metadata.
+- [x] (2026-09-13) Restored the direct preprocessor shadow-table readability check and a regression test that stops at preprocessing.
 
 ## Surprises & Discoveries
 
@@ -53,15 +54,16 @@ The port is limited to PR5 from `cp_mv_for_master_base`'s tracking document. SHO
 The comparison source is `remotes/xufei/cp_mv_for_master`, compared against the current
 `mv_pr5_refresh_for_master` worktree (including its uncommitted PR5 changes).
 
-### Production gaps
+### Resolved production gaps
 
-- **Blocking:** Add `ActionMViewRefreshOutOfPlaceCutover` handling in
-  `pkg/statistics/handle/ddl/subscriber.go`. It should process the new and dropped
-  table infos like truncate and update both stats-meta records. Add the missing
-  `TestMViewRefreshOutOfPlaceCutoverStats` regression test.
-- **Defensive parity:** Restore the direct `CheckMViewShadowReadable` call in
-  `pkg/planner/core/preprocess.go`. The current logical-plan and point-get paths
-  already check it, but the preprocessor should match the final diff.
+- **Resolved (2026-09-13):** `ActionMViewRefreshOutOfPlaceCutover` now follows the
+  same new-physical-ID initialization and old-physical-ID delayed-deletion flow as
+  truncate in `pkg/statistics/handle/ddl/subscriber.go`. The regression test verifies
+  both stats-meta records and the old table's historical schema-change record.
+- **Resolved (2026-09-13):** `pkg/planner/core/preprocess.go` directly applies
+  `CheckMViewShadowReadable` for `SELECT` table resolution. The regression test calls
+  `Preprocess` without invoking later plan builders and verifies that user reads are
+  rejected.
 
 ### Missing focused tests
 
@@ -110,9 +112,10 @@ The background `pkg/mvservice` framework, SHOW/COMPARE features, and their tests
 outside this branch as planned for PR6/PR7. Focused planner, delta-merge, executor
 regression, multi-package compile, `go vet`, and Bazel preparation checks passed. Full
 integration/failpoint suites were not run; the targeted failpoint-wrapped tests passed.
-The subsequent final-diff shadow audit found one blocking statistics-subscriber gap,
-one defensive planner-preprocessor gap, and the focused-test gaps listed above, so the
-branch should not yet be described as fully equivalent to the final diff.
+The subsequent final-diff shadow audit found and resolved one blocking
+statistics-subscriber gap and one defensive planner-preprocessor gap. The focused-test
+gaps listed above remain, so the branch should not yet be described as fully equivalent
+to the final diff.
 
 ## Context and Orientation
 
