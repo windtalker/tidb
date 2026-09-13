@@ -70,6 +70,8 @@ const (
 	DropMaterializedViewLogCommand = "DROP MATERIALIZED VIEW LOG"
 	// PurgeMaterializedViewLogCommand represents PURGE MATERIALIZED VIEW LOG statement
 	PurgeMaterializedViewLogCommand = "PURGE MATERIALIZED VIEW LOG"
+	// RefreshMaterializedViewCommand represents REFRESH MATERIALIZED VIEW statement
+	RefreshMaterializedViewCommand = "REFRESH MATERIALIZED VIEW"
 	// DropPlacementPolicyCommand represents DROP PLACEMENT POLICY statement
 	DropPlacementPolicyCommand = "DROP PLACEMENT POLICY"
 	// DropResourceGroupCommand represents DROP RESOURCE GROUP statement
@@ -647,8 +649,20 @@ func (n *PurgeMaterializedViewLogStmt) SEMCommand() string {
 }
 
 // SEMCommand returns the command string for the statement.
+func (n *RefreshMaterializedViewStmt) SEMCommand() string {
+	return RefreshMaterializedViewCommand
+}
+
+// SEMCommand returns the command string for the statement.
 func (n *CancelMaterializedViewJobStmt) SEMCommand() string {
-	return "CANCEL MATERIALIZED VIEW LOG PURGE JOB"
+	switch n.Tp {
+	case CancelMaterializedViewJobTypeRefresh:
+		return "CANCEL MATERIALIZED VIEW REFRESH JOB"
+	case CancelMaterializedViewJobTypeLogPurge:
+		return "CANCEL MATERIALIZED VIEW LOG PURGE JOB"
+	default:
+		return UnknownCommand
+	}
 }
 
 // SEMCommand returns the command string for the statement.

@@ -149,6 +149,23 @@ func TestCreateTableArgs(t *testing.T) {
 			require.EqualValues(t, inArgs.FKCheck, args.FKCheck)
 		}
 	})
+	t.Run("create materialized view shadow", func(t *testing.T) {
+		inArgs := &CreateTableArgs{
+			TableInfo: &TableInfo{
+				ID:                     101,
+				MaterializedViewShadow: &MaterializedViewShadowInfo{SourceMViewID: 88},
+			},
+			FKCheck: true,
+		}
+		for _, v := range []JobVersion{JobVersion1, JobVersion2} {
+			j2 := &Job{}
+			require.NoError(t, j2.Decode(getJobBytes(t, inArgs, v, ActionCreateMaterializedViewShadow)))
+			args, err := GetCreateTableArgs(j2)
+			require.NoError(t, err)
+			require.EqualValues(t, inArgs.TableInfo, args.TableInfo)
+			require.EqualValues(t, inArgs.FKCheck, args.FKCheck)
+		}
+	})
 	t.Run("create materialized view", func(t *testing.T) {
 		inArgs := &CreateMaterializedViewArgs{
 			TableInfo:    &TableInfo{ID: 102, MaterializedView: &MaterializedViewInfo{BaseTableIDs: []int64{88}}},

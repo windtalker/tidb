@@ -24,6 +24,7 @@ import (
 	"github.com/pingcap/errors"
 	"github.com/pingcap/tidb/pkg/domain"
 	"github.com/pingcap/tidb/pkg/expression"
+	"github.com/pingcap/tidb/pkg/infoschema"
 	"github.com/pingcap/tidb/pkg/kv"
 	"github.com/pingcap/tidb/pkg/meta/model"
 	"github.com/pingcap/tidb/pkg/parser/ast"
@@ -31,6 +32,7 @@ import (
 	"github.com/pingcap/tidb/pkg/planner/core/base"
 	"github.com/pingcap/tidb/pkg/planner/core/operator/physicalop"
 	"github.com/pingcap/tidb/pkg/planner/core/resolve"
+	"github.com/pingcap/tidb/pkg/planner/mview"
 	"github.com/pingcap/tidb/pkg/planner/property"
 	"github.com/pingcap/tidb/pkg/planner/util"
 	"github.com/pingcap/tidb/pkg/planner/util/costusage"
@@ -45,6 +47,7 @@ import (
 	"github.com/pingcap/tidb/pkg/util/hint"
 	"github.com/pingcap/tidb/pkg/util/memory"
 	"github.com/pingcap/tidb/pkg/util/plancodec"
+	"github.com/pingcap/tidb/pkg/util/ranger"
 	"github.com/pingcap/tidb/pkg/util/texttree"
 	"github.com/pingcap/tipb/go-tipb"
 )
@@ -55,6 +58,94 @@ var LoadPlanReplayerForExplainExplore func(sessionctx.Context, string) (string, 
 // ShowDDL is for showing DDL information.
 type ShowDDL struct {
 	physicalop.SimpleSchemaProducer
+}
+
+// DataReaderSnapshot binds a read timestamp to the infoschema used for planning.
+type DataReaderSnapshot struct {
+	TS         uint64
+	InfoSchema infoschema.InfoSchema
+}
+
+// MViewDeltaMerge represents the physical fast-refresh merge operator.
+type MViewDeltaMerge struct {
+	physicalop.SimpleSchemaProducer
+	Source                      base.PhysicalPlan
+	FullUpdateInnerSource       base.PhysicalPlan
+	FullUpdateInnerColumnCount  int
+	FullUpdateIndexRanges       ranger.MutableRanges
+	FullUpdateKeyOff2IdxOff     []int
+	FullUpdateKeyResultColIdxes []int
+	FullUpdateOutputMVOffsets   []int
+	FullUpdateSnapshot          *DataReaderSnapshot
+	MVTableID                   int64
+	BaseTableID                 int64
+	MLogTableID                 int64
+	MVColumnCount               int
+	DeltaColumnCount            int
+	MVTablePKCols               util.HandleCols
+	GroupKeyMVOffsets           []int
+	CountStarMVOffset           int
+	AggInfos                    []mview.AggInfo
+}
+
+// ExplainInfo returns the aggregate dependencies and lookup strategy of the merge operator.
+func (p *MViewDeltaMerge) ExplainInfo() string {
+	if len(p.AggInfos) == 0 {
+		return "agg_deps:[]"
+	}
+	var b strings.Builder
+	b.WriteString("agg_deps:[")
+	for i, info := range p.AggInfos {
+		if i > 0 {
+			b.WriteString(", ")
+		}
+		name := formatMViewDeltaMergeAggKind(info.Kind)
+		if info.Kind == mview.AggCountStar {
+			name = "count(*)"
+		} else if info.ArgColName != "" {
+			name += "(" + info.ArgColName + ")"
+		}
+		fmt.Fprintf(&b, "%s@%d->%v", name, info.MVOffset, info.Dependencies)
+	}
+	b.WriteByte(']')
+	if p.FullUpdateInnerSource != nil {
+		b.WriteString(", full_update:index_lookup")
+	}
+	return b.String()
+}
+
+func formatMViewDeltaMergeAggKind(kind mview.AggKind) string {
+	switch kind {
+	case mview.AggCount:
+		return "count"
+	case mview.AggSum:
+		return "sum"
+	case mview.AggMin:
+		return "min"
+	case mview.AggMax:
+		return "max"
+	default:
+		return fmt.Sprintf("agg(%d)", kind)
+	}
+}
+
+// MViewCompleteDeltaApply represents the COMPLETE DELTA APPLY sink.
+type MViewCompleteDeltaApply struct {
+	physicalop.SimpleSchemaProducer
+	Source                   base.PhysicalPlan
+	MVTableID                int64
+	MVColumnCount            int
+	OpColID                  int
+	MarkerMVOffset           int
+	GroupKeyMVOffsets        []int
+	CurrentHandleCols        util.HandleCols
+	CurrentRowInputColIDs    []int
+	RecomputedRowInputColIDs []int
+}
+
+// ExplainInfo returns the row-diff layout used by the complete delta-apply operator.
+func (p *MViewCompleteDeltaApply) ExplainInfo() string {
+	return fmt.Sprintf("op_offset:%d, current_marker_offset:%d, recomputed_marker_offset:%d", p.OpColID, p.MarkerMVOffset, p.MarkerMVOffset)
 }
 
 // ShowSlow is for showing slow queries.
@@ -559,6 +650,24 @@ type DDL struct {
 	physicalop.SimpleSchemaProducer
 
 	Statement ast.DDLNode
+}
+
+// RefreshMaterializedView represents a REFRESH MATERIALIZED VIEW statement.
+type RefreshMaterializedView struct {
+	physicalop.SimpleSchemaProducer
+	Statement *ast.RefreshMaterializedViewStmt
+}
+
+// DryRunRefreshMaterializedView represents a refresh dry-run statement.
+type DryRunRefreshMaterializedView struct {
+	physicalop.SimpleSchemaProducer
+	Statement *ast.RefreshMaterializedViewStmt
+}
+
+// ProfileRefreshMaterializedView represents a refresh profile statement.
+type ProfileRefreshMaterializedView struct {
+	physicalop.SimpleSchemaProducer
+	Statement *ast.RefreshMaterializedViewStmt
 }
 
 // SelectInto represents a select-into plan.

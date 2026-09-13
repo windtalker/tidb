@@ -264,7 +264,9 @@ func (h *Handle) getStatsByPhysicalID(physicalTableID int64, tblInfo *model.Tabl
 
 		// In some test environments, the session pool may be nil.
 		// In such cases, we cannot determine if it's a system table, so we skip the check.
-		if se, ok := h.SPool().(*syssession.AdvancedSessionPool); ok && se == nil {
+		if h.SPool() == nil {
+			skipSystemTableCheck = true
+		} else if se, ok := h.SPool().(*syssession.AdvancedSessionPool); ok && se == nil {
 			skipSystemTableCheck = true
 		}
 		if skipSystemTableCheck {

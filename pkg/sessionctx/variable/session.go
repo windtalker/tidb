@@ -1705,6 +1705,9 @@ type SessionVars struct {
 
 	// EnableTiFlashReadForWriteStmt indicates whether to enable TiFlash to read for write statements.
 	EnableTiFlashReadForWriteStmt bool
+
+	// InMaterializedViewMaintenance indicates that the session is executing internal MV maintenance SQL.
+	InMaterializedViewMaintenance bool
 	// InMViewMaintenance indicates the session is executing internal MV build/refresh statements.
 	InMViewMaintenance bool
 
