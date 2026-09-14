@@ -93,7 +93,7 @@ Run commands from `/Users/feixu/dev/pingcap/tidb`.
     gofmt -w <changed Go files>
     make bazel_prepare
     go test ./pkg/executor -run '^$' -count=1
-    ./tools/check/failpoint-go-test.sh pkg/executor/test/mview -run '^TestPurgeMaterializedViewLog' -count=1
+    ./tools/check/failpoint-go-test.sh pkg/executor/test/materializedviewlog -run '^TestPurgeMaterializedViewLog' -count=1
     make lint
     git diff --stat
     git diff --check
@@ -115,8 +115,8 @@ Acceptance requires all of the following:
 Evidence collected on 2026-09-09:
 
 - `go test ./pkg/executor -run '^$' -count=1` passed after adding the local `allocJobID` helper.
-- `./tools/check/failpoint-go-test.sh pkg/executor/test/mview -run '^TestPurgeMaterializedViewLog' -count=1` passed the full purge suite. The mock TiKV run logged the expected best-effort TiFlash probe fallback.
-- `./tools/check/failpoint-go-test.sh pkg/executor/test/mview -run '^TestMViewEnableControlsMLogCommitTSAccessAndPurge$' -count=1` passed the `_tidb_commit_ts` gate and pooled-session regression.
+- `./tools/check/failpoint-go-test.sh pkg/executor/test/materializedviewlog -run '^TestPurgeMaterializedViewLog' -count=1` passed the full purge suite. The mock TiKV run logged the expected best-effort TiFlash probe fallback.
+- `./tools/check/failpoint-go-test.sh pkg/executor/test/materializedviewlog -run '^TestMViewEnableControlsMLogCommitTSAccessAndPurge$' -count=1` passed the `_tidb_commit_ts` gate and pooled-session regression.
 - `make bazel_prepare` completed before the final helper-only change and generated the required executor/expression BUILD metadata. A later source-only helper edit did not change imports or test targets.
 
 ## Idempotence and Recovery

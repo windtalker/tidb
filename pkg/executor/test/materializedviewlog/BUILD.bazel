@@ -1,7 +1,7 @@
 load("@io_bazel_rules_go//go:def.bzl", "go_test")
 
 go_test(
-    name = "mview_test",
+    name = "materializedviewlog_test",
     timeout = "moderate",
     srcs = [
         "main_test.go",
