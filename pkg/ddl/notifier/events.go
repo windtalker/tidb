@@ -104,6 +104,97 @@ func (s *SchemaChangeEvent) GetCreateTableInfo() *model.TableInfo {
 	return s.inner.TableInfo
 }
 
+// NewAlterMaterializedViewRefreshEvent creates a SchemaChangeEvent whose type is
+// ActionAlterMaterializedViewRefresh.
+func NewAlterMaterializedViewRefreshEvent(
+	tableInfo *model.TableInfo,
+	oldTableInfo *model.TableInfo,
+) *SchemaChangeEvent {
+	return &SchemaChangeEvent{
+		inner: &jsonSchemaChangeEvent{
+			Tp:           model.ActionAlterMaterializedViewRefresh,
+			TableInfo:    tableInfo,
+			OldTableInfo: oldTableInfo,
+		},
+	}
+}
+
+// GetAlterMaterializedViewRefreshInfo returns the table info of the SchemaChangeEvent whose type is
+// ActionAlterMaterializedViewRefresh.
+func (s *SchemaChangeEvent) GetAlterMaterializedViewRefreshInfo() *model.TableInfo {
+	intest.Assert(s.inner.Tp == model.ActionAlterMaterializedViewRefresh)
+	return s.inner.TableInfo
+}
+
+// NewAlterMaterializedViewAttributesEvent creates a SchemaChangeEvent whose type is
+// ActionAlterMaterializedViewAttributes.
+func NewAlterMaterializedViewAttributesEvent(
+	tableInfo *model.TableInfo,
+	oldTableInfo *model.TableInfo,
+) *SchemaChangeEvent {
+	return &SchemaChangeEvent{
+		inner: &jsonSchemaChangeEvent{
+			Tp:           model.ActionAlterMaterializedViewAttributes,
+			TableInfo:    tableInfo,
+			OldTableInfo: oldTableInfo,
+		},
+	}
+}
+
+// GetAlterMaterializedViewAttributesInfo returns the table info of the SchemaChangeEvent whose type is
+// ActionAlterMaterializedViewAttributes.
+func (s *SchemaChangeEvent) GetAlterMaterializedViewAttributesInfo() *model.TableInfo {
+	intest.Assert(s.inner.Tp == model.ActionAlterMaterializedViewAttributes)
+	return s.inner.TableInfo
+}
+
+// NewAlterMaterializedViewLogPurgeEvent creates a SchemaChangeEvent whose type is
+// ActionAlterMaterializedViewLogPurge.
+func NewAlterMaterializedViewLogPurgeEvent(
+	tableInfo *model.TableInfo,
+	oldTableInfo *model.TableInfo,
+) *SchemaChangeEvent {
+	return &SchemaChangeEvent{
+		inner: &jsonSchemaChangeEvent{
+			Tp:           model.ActionAlterMaterializedViewLogPurge,
+			TableInfo:    tableInfo,
+			OldTableInfo: oldTableInfo,
+		},
+	}
+}
+
+// GetAlterMaterializedViewLogPurgeInfo returns the table info of the SchemaChangeEvent whose type is
+// ActionAlterMaterializedViewLogPurge.
+func (s *SchemaChangeEvent) GetAlterMaterializedViewLogPurgeInfo() *model.TableInfo {
+	intest.Assert(s.inner.Tp == model.ActionAlterMaterializedViewLogPurge)
+	return s.inner.TableInfo
+}
+
+// NewMViewRefreshOutOfPlaceCutoverEvent creates a SchemaChangeEvent whose type is
+// ActionMViewRefreshOutOfPlaceCutover.
+func NewMViewRefreshOutOfPlaceCutoverEvent(
+	tableInfo *model.TableInfo,
+	oldTableInfo *model.TableInfo,
+) *SchemaChangeEvent {
+	return &SchemaChangeEvent{
+		inner: &jsonSchemaChangeEvent{
+			Tp:           model.ActionMViewRefreshOutOfPlaceCutover,
+			TableInfo:    tableInfo,
+			OldTableInfo: oldTableInfo,
+		},
+	}
+}
+
+// GetMViewRefreshOutOfPlaceCutoverInfo returns the new and old table info of the
+// SchemaChangeEvent whose type is ActionMViewRefreshOutOfPlaceCutover.
+func (s *SchemaChangeEvent) GetMViewRefreshOutOfPlaceCutoverInfo() (
+	newTableInfo *model.TableInfo,
+	oldTableInfo *model.TableInfo,
+) {
+	intest.Assert(s.inner.Tp == model.ActionMViewRefreshOutOfPlaceCutover)
+	return s.inner.TableInfo, s.inner.OldTableInfo
+}
+
 // NewTruncateTableEvent creates a SchemaChangeEvent whose type is
 // ActionTruncateTable.
 func NewTruncateTableEvent(

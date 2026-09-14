@@ -141,6 +141,10 @@ func checkJoinKeyCollation(leftKeys, rightKeys []*expression.Column) bool {
 
 // GetMergeJoin convert the logical join to physical merge join based on the physical property.
 func GetMergeJoin(p *logicalop.LogicalJoin, prop *property.PhysicalProperty, schema *expression.Schema, statsInfo *property.StatsInfo, leftStatsInfo *property.StatsInfo, rightStatsInfo *property.StatsInfo) []base.PhysicalPlan {
+	if p.JoinType == logicalop.FullOuterJoin {
+		return nil
+	}
+
 	joins := make([]base.PhysicalPlan, 0, len(p.LeftProperties)+1)
 	// The LeftProperties caches all the possible properties that are provided by its children.
 	leftJoinKeys, rightJoinKeys, isNullEQ, hasNullEQ := p.GetJoinKeys()
@@ -419,6 +423,17 @@ func getHashJoins(p *logicalop.LogicalJoin, prop *property.PhysicalProperty) (jo
 			joins = append(joins, getHashJoin(p, prop, 1, false))
 			joins = append(joins, getHashJoin(p, prop, 0, false))
 		}
+	case logicalop.FullOuterJoin:
+		// For full outer join in phase-1, always use the regular hash join probe path.
+		// Build side is still chosen by cost / hints.
+		if forceLeftToBuild {
+			joins = append(joins, getHashJoin(p, prop, 0, false))
+		} else if forceRightToBuild {
+			joins = append(joins, getHashJoin(p, prop, 1, false))
+		} else {
+			joins = append(joins, getHashJoin(p, prop, 1, false))
+			joins = append(joins, getHashJoin(p, prop, 0, false))
+		}
 	}
 
 	forced = (p.PreferJoinType&h.PreferHashJoin > 0) || forceLeftToBuild || forceRightToBuild
@@ -471,16 +486,11 @@ func constructIndexJoin(
 		innerJoinKeys []*expression.Column
 		outerJoinKeys []*expression.Column
 		isNullEQ      []bool
-		hasNullEQ     bool
 	)
 	if outerIdx == 0 {
-		outerJoinKeys, innerJoinKeys, isNullEQ, hasNullEQ = p.GetJoinKeys()
+		outerJoinKeys, innerJoinKeys, isNullEQ, _ = p.GetJoinKeys()
 	} else {
-		innerJoinKeys, outerJoinKeys, isNullEQ, hasNullEQ = p.GetJoinKeys()
-	}
-	// TODO: support null equal join keys for index join
-	if hasNullEQ {
-		return nil
+		innerJoinKeys, outerJoinKeys, isNullEQ, _ = p.GetJoinKeys()
 	}
 	chReqProps := make([]*property.PhysicalProperty, 2)
 	chReqProps[outerIdx] = &property.PhysicalProperty{TaskTp: property.RootTaskType, ExpectedCnt: math.MaxFloat64, SortItems: prop.SortItems, CTEProducerStatus: prop.CTEProducerStatus}
@@ -588,6 +598,10 @@ func constructIndexMergeJoin(
 	hintExists := false
 	if (outerIdx == 1 && (p.PreferJoinType&h.PreferLeftAsINLMJInner) > 0) || (outerIdx == 0 && (p.PreferJoinType&h.PreferRightAsINLMJInner) > 0) {
 		hintExists = true
+	}
+	_, _, _, hasNullEQ := p.GetJoinKeys()
+	if hasNullEQ {
+		return nil
 	}
 	indexJoins := constructIndexJoin(p, prop, outerIdx, innerTask, ranges, keyOff2IdxOff, path, compareFilters, !hintExists)
 	indexMergeJoins := make([]base.PhysicalPlan, 0, len(indexJoins))
@@ -1747,6 +1761,10 @@ func isJoinChildFitMPPBCJ(p *logicalop.LogicalJoin, childIndexToBC int, mppStore
 
 // If we can use mpp broadcast join, that's our first choice.
 func preferMppBCJ(p *logicalop.LogicalJoin) bool {
+	// Full outer join only supports shuffle join in MPP, so it must not prefer BCJ.
+	if p.JoinType == logicalop.FullOuterJoin {
+		return false
+	}
 	if len(p.EqualConditions) == 0 && p.SCtx().GetSessionVars().AllowCartesianBCJ == 2 {
 		return true
 	}
@@ -1787,9 +1805,6 @@ func preferMppBCJ(p *logicalop.LogicalJoin) bool {
 func canExprsInJoinPushdown(p *logicalop.LogicalJoin, storeType kv.StoreType) bool {
 	equalExprs := make([]expression.Expression, 0, len(p.EqualConditions))
 	for _, eqCondition := range p.EqualConditions {
-		if eqCondition.FuncName.L == ast.NullEQ {
-			return false
-		}
 		equalExprs = append(equalExprs, eqCondition)
 	}
 	pushDownCtx := util.GetPushDownCtx(p.SCtx())
@@ -1821,8 +1836,12 @@ func tryToGetMppHashJoin(p *logicalop.LogicalJoin, prop *property.PhysicalProper
 		return nil
 	}
 
-	if p.JoinType != logicalop.InnerJoin && p.JoinType != logicalop.LeftOuterJoin && p.JoinType != logicalop.RightOuterJoin && p.JoinType != logicalop.SemiJoin && p.JoinType != logicalop.AntiSemiJoin && p.JoinType != logicalop.LeftOuterSemiJoin && p.JoinType != logicalop.AntiLeftOuterSemiJoin {
+	if p.JoinType != logicalop.InnerJoin && p.JoinType != logicalop.LeftOuterJoin && p.JoinType != logicalop.RightOuterJoin && p.JoinType != logicalop.FullOuterJoin && p.JoinType != logicalop.SemiJoin && p.JoinType != logicalop.AntiSemiJoin && p.JoinType != logicalop.LeftOuterSemiJoin && p.JoinType != logicalop.AntiLeftOuterSemiJoin {
 		p.SCtx().GetSessionVars().RaiseWarningWhenMPPEnforced("MPP mode may be blocked because join type `" + p.JoinType.String() + "` is not supported now.")
+		return nil
+	}
+	if p.JoinType == logicalop.FullOuterJoin && useBCJ {
+		p.SCtx().GetSessionVars().RaiseWarningWhenMPPEnforced("MPP mode may be blocked because `full outer join` is only supported by shuffle join now.")
 		return nil
 	}
 
@@ -1836,11 +1855,11 @@ func tryToGetMppHashJoin(p *logicalop.LogicalJoin, prop *property.PhysicalProper
 			return nil
 		}
 	}
-	if len(p.LeftConditions) != 0 && p.JoinType != logicalop.LeftOuterJoin {
+	if len(p.LeftConditions) != 0 && p.JoinType != logicalop.LeftOuterJoin && p.JoinType != logicalop.FullOuterJoin {
 		p.SCtx().GetSessionVars().RaiseWarningWhenMPPEnforced("MPP mode may be blocked because there is a join that is not `left join` but has left conditions, which is not supported by mpp now, see github.com/pingcap/tidb/issues/26090 for more information.")
 		return nil
 	}
-	if len(p.RightConditions) != 0 && p.JoinType != logicalop.RightOuterJoin {
+	if len(p.RightConditions) != 0 && p.JoinType != logicalop.RightOuterJoin && p.JoinType != logicalop.FullOuterJoin {
 		p.SCtx().GetSessionVars().RaiseWarningWhenMPPEnforced("MPP mode may be blocked because there is a join that is not `right join` but has right conditions, which is not supported by mpp now.")
 		return nil
 	}
@@ -1851,7 +1870,7 @@ func tryToGetMppHashJoin(p *logicalop.LogicalJoin, prop *property.PhysicalProper
 	if !canExprsInJoinPushdown(p, kv.TiFlash) {
 		return nil
 	}
-	lkeys, rkeys, _, _ := p.GetJoinKeys()
+	lkeys, rkeys, isNullEQ, _ := p.GetJoinKeys()
 	lNAkeys, rNAKeys := p.GetNAJoinKeys()
 	// check match property
 	baseJoin := basePhysicalJoin{
@@ -1862,6 +1881,7 @@ func tryToGetMppHashJoin(p *logicalop.LogicalJoin, prop *property.PhysicalProper
 		DefaultValues:   p.DefaultValues,
 		LeftJoinKeys:    lkeys,
 		RightJoinKeys:   rkeys,
+		IsNullEQ:        isNullEQ,
 		LeftNAJoinKeys:  lNAkeys,
 		RightNAJoinKeys: rNAKeys,
 	}
@@ -1894,7 +1914,7 @@ func tryToGetMppHashJoin(p *logicalop.LogicalJoin, prop *property.PhysicalProper
 			fixedBuildSide = true
 		}
 	}
-	if p.JoinType == logicalop.LeftOuterJoin || p.JoinType == logicalop.RightOuterJoin {
+	if p.JoinType == logicalop.LeftOuterJoin || p.JoinType == logicalop.RightOuterJoin || p.JoinType == logicalop.FullOuterJoin {
 		// TiFlash does not require that the build side must be the inner table for outer join.
 		// so we can choose the build side based on the row count, except that:
 		// 1. it is a broadcast join(for broadcast join, it makes sense to use the broadcast side as the build side)
@@ -1960,6 +1980,9 @@ func tryToGetMppHashJoin(p *logicalop.LogicalJoin, prop *property.PhysicalProper
 	} else {
 		lPartitionKeys, rPartitionKeys := p.GetPotentialPartitionKeys()
 		if prop.MPPPartitionTp == property.HashType {
+			if p.JoinType == logicalop.FullOuterJoin {
+				return nil
+			}
 			var matches []int
 			if p.JoinType == logicalop.InnerJoin {
 				if matches = prop.IsSubsetOf(lPartitionKeys); len(matches) == 0 {
@@ -2037,6 +2060,7 @@ func exhaustPhysicalPlans4LogicalJoin(lp base.LogicalPlan, prop *property.Physic
 	if prop.MPPPartitionTp == property.BroadcastType {
 		return nil, false, nil
 	}
+
 	joins := make([]base.PhysicalPlan, 0, 8)
 	canPushToTiFlash := p.CanPushToCop(kv.TiFlash)
 	if p.SCtx().GetSessionVars().IsMPPAllowed() && canPushToTiFlash {
@@ -2699,6 +2723,7 @@ func tryToGetMppHashAggs(la *logicalop.LogicalAggregation, prop *property.Physic
 	// Is this aggregate a final stage aggregate?
 	// Final agg can't be split into multi-stage aggregate
 	hasFinalAgg := len(la.AggFuncs) > 0 && la.AggFuncs[0].Mode == aggregation.FinalMode
+	containsMaxMinCount := containsMaxMinCountAgg(la.AggFuncs)
 	// count final agg should become sum for MPP execution path.
 	// In the traditional case, TiDB take up the final agg role and push partial agg to TiKV,
 	// while TiDB can tell the partialMode and do the sum computation rather than counting but MPP doesn't
@@ -2765,8 +2790,8 @@ func tryToGetMppHashAggs(la *logicalop.LogicalAggregation, prop *property.Physic
 			}
 		}
 
-		// Final agg can't be split into multi-stage aggregate, so exit early
-		if hasFinalAgg {
+		// Final agg and max/min_count agg can't be split into multi-stage aggregate.
+		if hasFinalAgg || containsMaxMinCount {
 			return
 		}
 
@@ -2794,7 +2819,7 @@ func tryToGetMppHashAggs(la *logicalop.LogicalAggregation, prop *property.Physic
 		childProp := &property.PhysicalProperty{TaskTp: property.MppTaskType, ExpectedCnt: math.MaxFloat64, RejectSort: true, CTEProducerStatus: prop.CTEProducerStatus}
 		agg := NewPhysicalHashAgg(la, la.StatsInfo().ScaleByExpectCnt(prop.ExpectedCnt), childProp)
 		agg.SetSchema(la.Schema().Clone())
-		if la.HasDistinct() || la.HasOrderBy() {
+		if la.HasDistinct() || la.HasOrderBy() || containsMaxMinCount {
 			// mpp scalar mode means the data will be pass through to only one tiFlash node at last.
 			agg.MppRunMode = MppScalar
 		} else {

@@ -90,6 +90,8 @@ const (
 
 	// TiDBAutoAnalyzeRatio will run if (table modify count)/(table row count) is greater than this value.
 	TiDBAutoAnalyzeRatio = "tidb_auto_analyze_ratio"
+	// TiDBMLogAutoAnalyzeRatio is the auto analyze ratio for materialized view log tables.
+	TiDBMLogAutoAnalyzeRatio = "tidb_mlog_auto_analyze_ratio"
 
 	// TiDBAutoAnalyzeStartTime will run if current time is within start time and end time.
 	TiDBAutoAnalyzeStartTime = "tidb_auto_analyze_start_time"
@@ -137,10 +139,42 @@ const (
 	// User could change it to a smaller one to avoid breaking the transaction size limitation.
 	TiDBDMLBatchSize = "tidb_dml_batch_size"
 
+	// TiDBMLogPurgeBatchSize is used to split PURGE MATERIALIZED VIEW LOG into multiple delete batches.
+	TiDBMLogPurgeBatchSize = "tidb_mlog_purge_batch_size"
+	// TiDBMLogPurgeMinRate controls the minimum target delete rate for adaptive MV log purge throttling.
+	TiDBMLogPurgeMinRate = "tidb_mlog_purge_min_rate"
+	// TiDBMLogPurgeRateBudgetRatio controls the fraction of the current scheduling window that purge may spend deleting.
+	TiDBMLogPurgeRateBudgetRatio = "tidb_mlog_purge_rate_budget_ratio"
+	// TiDBMLogPurgeDeleteTiFlashThreads controls tidb_max_tiflash_threads for MV log purge DELETE SQLs.
+	// The default value 0 means inherit the current tidb_max_tiflash_threads value.
+	TiDBMLogPurgeDeleteTiFlashThreads = "tidb_mlog_purge_delete_tiflash_threads"
+
 	// The following session variables controls the memory quota during query execution.
 
 	// TiDBMemQuotaQuery controls the memory quota of a query.
 	TiDBMemQuotaQuery = "tidb_mem_quota_query" // Bytes.
+	// TiDBMVMaintainMemQuota controls the memory quota used by MV refresh / MV log purge internal maintenance sessions.
+	TiDBMVMaintainMemQuota = "tidb_mv_maintain_mem_quota" // Bytes.
+	// TiDBMVMaintainIsolationReadEngines controls the isolation read engines used by MV refresh / MV log purge internal maintenance sessions.
+	TiDBMVMaintainIsolationReadEngines = "tidb_mv_maintain_isolation_read_engines"
+	// TiDBMViewMaintainImportThreads controls the thread count for MV initial build IMPORT INTO.
+	TiDBMViewMaintainImportThreads = "tidb_mview_maintain_import_threads"
+	// TiDBMViewMaintainImportDiskQuota controls the disk quota for MV initial build IMPORT INTO.
+	TiDBMViewMaintainImportDiskQuota = "tidb_mview_maintain_import_disk_quota"
+	// TiDBMViewTaskMax controls the max concurrency of MV background tasks. 0 means using GOMAXPROCS.
+	TiDBMViewTaskMax = "tidb_mview_task_max"
+	// TiDBMViewTaskRefreshRatio controls the refresh-task share of MV background task concurrency.
+	TiDBMViewTaskRefreshRatio = "tidb_mview_task_refresh_ratio"
+	// TiDBMViewTaskThresholdCPU controls MV task backpressure CPU threshold.
+	TiDBMViewTaskThresholdCPU = "tidb_mview_task_threshold_cpu"
+	// TiDBMViewTaskThresholdMemory controls MV task backpressure memory threshold.
+	TiDBMViewTaskThresholdMemory = "tidb_mview_task_threshold_memory"
+	// TiDBMViewRefreshHistTime controls the retention time of mysql.tidb_mview_refresh_hist in hours.
+	TiDBMViewRefreshHistTime = "tidb_mview_refresh_hist_time"
+	// TiDBMLogPurgeHistTime controls the retention time of mysql.tidb_mlog_purge_hist in hours.
+	TiDBMLogPurgeHistTime = "tidb_mlog_purge_hist_time"
+	// TiDBMLogLogSlowPurge controls whether MLog purge statements are recorded in the slow query log.
+	TiDBMLogLogSlowPurge = "tidb_mlog_log_slow_purge"
 	// TiDBMemQuotaApplyCache controls the memory quota of a query.
 	TiDBMemQuotaApplyCache = "tidb_mem_quota_apply_cache"
 
@@ -996,6 +1030,9 @@ const (
 	// TiDBHashJoinVersion indicates whether to use hash join implementation v2.
 	TiDBHashJoinVersion = "tidb_hash_join_version"
 
+	// TiDBEnableFullOuterJoin indicates whether to enable FULL OUTER JOIN.
+	TiDBEnableFullOuterJoin = "tidb_enable_full_outer_join"
+
 	// TiDBOptObjective indicates whether the optimizer should be more stable, predictable or more aggressive.
 	// Please see comments of SessionVars.OptObjective for details.
 	TiDBOptObjective = "tidb_opt_objective"
@@ -1262,6 +1299,9 @@ const (
 
 	// MaxPreSplitRegions is the maximum number of regions that can be pre-split.
 	MaxPreSplitRegions = 15
+
+	// TiDBEnableCachePrepareStmt indicates whether to support cache prepare stmt in plan cache.
+	TiDBEnableCachePrepareStmt = "tidb_enable_cache_prepare_stmt"
 )
 
 // Default TiDB system variable values.
@@ -1277,6 +1317,7 @@ const (
 	DefBuildStatsConcurrency                = 2
 	DefBuildSamplingStatsConcurrency        = 2
 	DefAutoAnalyzeRatio                     = 0.5
+	DefMLogAutoAnalyzeRatio                 = 10.0
 	DefAutoAnalyzeStartTime                 = "00:00 +0000"
 	DefAutoAnalyzeEndTime                   = "23:59 +0000"
 	DefAutoIncrementIncrement               = 1
@@ -1334,6 +1375,11 @@ const (
 	DefMaxPagingSize                        = int(paging.MaxPagingSize)
 	DefMaxChunkSize                         = 1024
 	DefDMLBatchSize                         = 0
+	DefTiDBMLogPurgeBatchSize               = 10000
+	DefTiDBMLogPurgeMinRate                 = 2000
+	DefTiDBMLogPurgeRateBudgetRatio         = 0.5
+	DefTiDBMLogPurgeDeleteTiFlashThreads    = 0
+	DefTiDBMLogLogSlowPurge                 = false
 	DefMaxPreparedStmtCount                 = -1
 	DefWaitTimeout                          = 28800
 	DefTiDBMemQuotaApplyCache               = 32 << 20 // 32MB.
@@ -1474,6 +1520,15 @@ const (
 	DefMaxAllowedPacket                        uint64 = 67108864
 	DefTiDBEnableBatchDML                             = false
 	DefTiDBMemQuotaQuery                              = memory.DefMemQuotaQuery // 1GB
+	DefTiDBMVMaintainMemQuota                         = int64(2 * size.GB)
+	DefTiDBMViewMaintainImportThreads                 = 0
+	DefTiDBMViewMaintainImportDiskQuota               = ""
+	DefTiDBMViewTaskMax                               = 0
+	DefTiDBMViewTaskRefreshRatio                      = 0.6
+	DefTiDBMViewTaskThresholdCPU                      = 0.8
+	DefTiDBMViewTaskThresholdMemory                   = 0.8
+	DefTiDBMViewRefreshHistTime                       = 168
+	DefTiDBMLogPurgeHistTime                          = 168
 	DefTiDBStatsCacheMemQuota                         = 0
 	MaxTiDBStatsCacheMemQuota                         = 1024 * 1024 * 1024 * 1024 // 1TB
 	DefTiDBQueryLogMaxLen                             = 4096
@@ -1555,6 +1610,8 @@ const (
 	DefTiDBTTLDeleteBatchSize                         = 100
 	DefTiDBTTLDeleteBatchMaxSize                      = 10240
 	DefTiDBTTLDeleteBatchMinSize                      = 1
+	DefTiDBMLogPurgeBatchMaxSize                      = 1000000
+	DefTiDBMLogPurgeBatchMinSize                      = 1
 	DefTiDBTTLDeleteRateLimit                         = 0
 	DefTiDBTTLRunningTasks                            = -1
 	DefPasswordReuseHistory                           = 0
@@ -1602,6 +1659,7 @@ const (
 	DefTiDBSkipMissingPartitionStats                  = true
 	DefTiDBOptEnableHashJoin                          = true
 	DefTiDBHashJoinVersion                            = joinversion.HashJoinVersionLegacy
+	DefTiDBEnableFullOuterJoin                        = false
 	DefTiDBOptObjective                               = OptObjectiveModerate
 	DefTiDBSchemaVersionCacheLimit                    = 16
 	DefTiDBIdleTransactionTimeout                     = 0
@@ -1618,6 +1676,7 @@ const (
 	DefTiDBEnableSharedLockPromotion                  = false
 	DefTiDBTSOClientRPCMode                           = TSOClientRPCModeDefault
 	DefTiDBLoadBindingTimeout                         = 200
+	DefEnableCachePrepareStmt                         = true
 )
 
 // Process global variables.
@@ -1732,6 +1791,7 @@ var (
 	EnableCheckConstraint           = atomic.NewBool(DefTiDBEnableCheckConstraint)
 	SkipMissingPartitionStats       = atomic.NewBool(DefTiDBSkipMissingPartitionStats)
 	TiFlashEnablePipelineMode       = atomic.NewBool(DefTiDBEnableTiFlashPipelineMode)
+	MLogLogSlowPurge                = atomic.NewBool(DefTiDBMLogLogSlowPurge)
 	ServiceScope                    = atomic.NewString("")
 	SchemaVersionCacheLimit         = atomic.NewInt64(DefTiDBSchemaVersionCacheLimit)
 	CloudStorageURI                 = atomic.NewString("")
@@ -1765,6 +1825,18 @@ var (
 	GetExternalTimestamp func(ctx context.Context) (uint64, error)
 	// SetGlobalResourceControl is the func registered by domain to set cluster resource control.
 	SetGlobalResourceControl atomic.Pointer[func(bool)]
+	// SetMVServiceTaskMaxConcurrency applies global tidb_mview_task_max to the local MV service.
+	SetMVServiceTaskMaxConcurrency atomic.Pointer[func(int)]
+	// SetMVServiceRefreshTaskConcurrencyRatio applies global tidb_mview_task_refresh_ratio to the local MV service.
+	SetMVServiceRefreshTaskConcurrencyRatio atomic.Pointer[func(float64)]
+	// SetMVServiceTaskThresholdCPU applies global tidb_mview_task_threshold_cpu to the local MV service.
+	SetMVServiceTaskThresholdCPU atomic.Pointer[func(float64)]
+	// SetMVServiceTaskThresholdMemory applies global tidb_mview_task_threshold_memory to the local MV service.
+	SetMVServiceTaskThresholdMemory atomic.Pointer[func(float64)]
+	// SetMVServiceMViewRefreshHistRetention applies global tidb_mview_refresh_hist_time to the local MV service.
+	SetMVServiceMViewRefreshHistRetention atomic.Pointer[func(time.Duration)]
+	// SetMVServiceMLogPurgeHistRetention applies global tidb_mlog_purge_hist_time to the local MV service.
+	SetMVServiceMLogPurgeHistRetention atomic.Pointer[func(time.Duration)]
 	// ValidateCloudStorageURI validates the cloud storage URI.
 	ValidateCloudStorageURI func(ctx context.Context, uri string) error
 	// SetLowResolutionTSOUpdateInterval is the func registered by domain to set slow resolution tso update interval.

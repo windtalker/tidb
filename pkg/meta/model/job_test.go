@@ -328,7 +328,7 @@ func TestJobSize(t *testing.T) {
 - SubJob.ToProxyJob()
 `
 	require.Equal(t, 408, int(unsafe.Sizeof(Job{})), msg)
-	require.Equal(t, 160, int(unsafe.Sizeof(SubJob{})), msg)
+	require.Equal(t, 184, int(unsafe.Sizeof(SubJob{})), msg)
 }
 
 func TestBackfillMetaCodec(t *testing.T) {
@@ -358,6 +358,7 @@ func TestMayNeedReorg(t *testing.T) {
 		ActionAlterTablePartitioning,
 		ActionAddIndex,
 		ActionAddPrimaryKey,
+		ActionCreateMaterializedView,
 	}
 	generalJobTypes := []ActionType{
 		ActionCreateTable,
@@ -382,6 +383,18 @@ func TestMayNeedReorg(t *testing.T) {
 		job.Type = jobType
 		require.False(t, job.MayNeedReorg())
 	}
+}
+
+func TestCreateMaterializedViewRollbackable(t *testing.T) {
+	job := &Job{Type: ActionCreateMaterializedView}
+	job.SchemaState = StateNone
+	require.True(t, job.IsRollbackable())
+
+	job.SchemaState = StateWriteReorganization
+	require.True(t, job.IsRollbackable())
+
+	job.SchemaState = StatePublic
+	require.False(t, job.IsRollbackable())
 }
 
 func TestInFinalState(t *testing.T) {
@@ -427,6 +440,7 @@ func TestString(t *testing.T) {
 		{ActionCreateSchema, "create schema"},
 		{ActionDropSchema, "drop schema"},
 		{ActionCreateTable, "create table"},
+		{ActionCreateMaterializedViewShadow, "create materialized view shadow table"},
 		{ActionDropTable, "drop table"},
 		{ActionAddIndex, "add index"},
 		{ActionDropIndex, "drop index"},

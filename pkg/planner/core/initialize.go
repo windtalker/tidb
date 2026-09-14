@@ -133,6 +133,18 @@ func (p Delete) Init(ctx base.PlanContext) *Delete {
 	return &p
 }
 
+// Init initializes MViewDeltaMerge.
+func (p MViewDeltaMerge) Init(ctx base.PlanContext) *MViewDeltaMerge {
+	p.Plan = baseimpl.NewBasePlan(ctx, plancodec.TypeMViewDeltaMerge, 0)
+	return &p
+}
+
+// Init initializes MViewCompleteDeltaApply.
+func (p MViewCompleteDeltaApply) Init(ctx base.PlanContext) *MViewCompleteDeltaApply {
+	p.Plan = baseimpl.NewBasePlan(ctx, plancodec.TypeMViewCompleteDeltaApply, 0)
+	return &p
+}
+
 // Init initializes Insert.
 func (p Insert) Init(ctx base.PlanContext) *Insert {
 	p.Plan = baseimpl.NewBasePlan(ctx, plancodec.TypeInsert, 0)

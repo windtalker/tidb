@@ -1434,6 +1434,36 @@ func TestTiDBAutoAnalyzeRatio(t *testing.T) {
 	require.Equal(t, "0.00001", val)
 }
 
+func TestTiDBMLogAutoAnalyzeRatio(t *testing.T) {
+	ctx := context.Background()
+	vars := NewSessionVars(nil)
+	mock := NewMockGlobalAccessor4Tests()
+	mock.SessionVars = vars
+	vars.GlobalVarsAccessor = mock
+
+	val, err := mock.GetGlobalSysVar(TiDBMLogAutoAnalyzeRatio)
+	require.NoError(t, err)
+	require.Equal(t, "10", val)
+
+	err = mock.SetGlobalSysVar(ctx, TiDBMLogAutoAnalyzeRatio, "20")
+	require.NoError(t, err)
+	val, err = mock.GetGlobalSysVar(TiDBMLogAutoAnalyzeRatio)
+	require.NoError(t, err)
+	require.Equal(t, "20", val)
+
+	err = mock.SetGlobalSysVar(ctx, TiDBMLogAutoAnalyzeRatio, "0")
+	require.Error(t, err)
+	val, err = mock.GetGlobalSysVar(TiDBMLogAutoAnalyzeRatio)
+	require.NoError(t, err)
+	require.Equal(t, "20", val)
+
+	err = mock.SetGlobalSysVar(ctx, TiDBMLogAutoAnalyzeRatio, "0.000009999")
+	require.Error(t, err)
+	val, err = mock.GetGlobalSysVar(TiDBMLogAutoAnalyzeRatio)
+	require.NoError(t, err)
+	require.Equal(t, "20", val)
+}
+
 func TestTiDBTiFlashReplicaRead(t *testing.T) {
 	vars := NewSessionVars(nil)
 	mock := NewMockGlobalAccessor4Tests()
@@ -1774,6 +1804,17 @@ func TestTiDBHashJoinVersion(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func TestTiDBEnableFullOuterJoin(t *testing.T) {
+	vars := NewSessionVars(nil)
+	require.Equal(t, DefTiDBEnableFullOuterJoin, vars.EnableFullOuterJoin)
+	require.NoError(t, vars.SetSystemVar(TiDBEnableFullOuterJoin, "on"))
+	require.True(t, vars.EnableFullOuterJoin)
+	require.NoError(t, vars.SetSystemVar(TiDBEnableFullOuterJoin, "0"))
+	require.False(t, vars.EnableFullOuterJoin)
+	require.NoError(t, vars.SetSystemVar(TiDBEnableFullOuterJoin, "1"))
+	require.True(t, vars.EnableFullOuterJoin)
+}
+
 func TestTiDBAutoAnalyzeConcurrencyValidation(t *testing.T) {
 	vars := NewSessionVars(nil)
 
@@ -1830,4 +1871,62 @@ func TestTiDBAutoAnalyzeConcurrencyValidation(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestMVServiceGlobalSysVars(t *testing.T) {
+	mock := NewMockGlobalAccessor4Tests()
+
+	oldTaskMax := SetMVServiceTaskMaxConcurrency.Load()
+	oldRefreshRatio := SetMVServiceRefreshTaskConcurrencyRatio.Load()
+	oldCPU := SetMVServiceTaskThresholdCPU.Load()
+	oldMemory := SetMVServiceTaskThresholdMemory.Load()
+	oldRefreshHist := SetMVServiceMViewRefreshHistRetention.Load()
+	oldPurgeHist := SetMVServiceMLogPurgeHistRetention.Load()
+	defer func() {
+		SetMVServiceTaskMaxConcurrency.Store(oldTaskMax)
+		SetMVServiceRefreshTaskConcurrencyRatio.Store(oldRefreshRatio)
+		SetMVServiceTaskThresholdCPU.Store(oldCPU)
+		SetMVServiceTaskThresholdMemory.Store(oldMemory)
+		SetMVServiceMViewRefreshHistRetention.Store(oldRefreshHist)
+		SetMVServiceMLogPurgeHistRetention.Store(oldPurgeHist)
+	}()
+
+	gotTaskMax := -1
+	gotRefreshRatio := -1.0
+	gotCPU := -1.0
+	gotMemory := -1.0
+	var gotRefreshHist time.Duration
+	var gotPurgeHist time.Duration
+
+	taskMaxFn := func(v int) { gotTaskMax = v }
+	refreshRatioFn := func(v float64) { gotRefreshRatio = v }
+	cpuFn := func(v float64) { gotCPU = v }
+	memoryFn := func(v float64) { gotMemory = v }
+	refreshHistFn := func(v time.Duration) { gotRefreshHist = v }
+	purgeHistFn := func(v time.Duration) { gotPurgeHist = v }
+	SetMVServiceTaskMaxConcurrency.Store(&taskMaxFn)
+	SetMVServiceRefreshTaskConcurrencyRatio.Store(&refreshRatioFn)
+	SetMVServiceTaskThresholdCPU.Store(&cpuFn)
+	SetMVServiceTaskThresholdMemory.Store(&memoryFn)
+	SetMVServiceMViewRefreshHistRetention.Store(&refreshHistFn)
+	SetMVServiceMLogPurgeHistRetention.Store(&purgeHistFn)
+
+	require.NoError(t, mock.SetGlobalSysVar(context.Background(), TiDBMViewTaskMax, "0"))
+	require.Equal(t, 0, gotTaskMax)
+
+	require.NoError(t, mock.SetGlobalSysVar(context.Background(), TiDBMViewTaskRefreshRatio, "0.6"))
+	require.Equal(t, 0.6, gotRefreshRatio)
+	require.Error(t, mock.SetGlobalSysVar(context.Background(), TiDBMViewTaskRefreshRatio, "1"))
+
+	require.NoError(t, mock.SetGlobalSysVar(context.Background(), TiDBMViewTaskThresholdCPU, "0.7"))
+	require.Equal(t, 0.7, gotCPU)
+
+	require.NoError(t, mock.SetGlobalSysVar(context.Background(), TiDBMViewTaskThresholdMemory, "0.6"))
+	require.Equal(t, 0.6, gotMemory)
+
+	require.NoError(t, mock.SetGlobalSysVar(context.Background(), TiDBMViewRefreshHistTime, "24"))
+	require.Equal(t, 24*time.Hour, gotRefreshHist)
+
+	require.NoError(t, mock.SetGlobalSysVar(context.Background(), TiDBMLogPurgeHistTime, "48"))
+	require.Equal(t, 48*time.Hour, gotPurgeHist)
 }

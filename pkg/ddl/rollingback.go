@@ -23,6 +23,7 @@ import (
 	"github.com/pingcap/tidb/pkg/meta/model"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
 	"github.com/pingcap/tidb/pkg/parser/terror"
+	"github.com/pingcap/tidb/pkg/sessionctx"
 	"github.com/pingcap/tidb/pkg/sessionctx/variable"
 	"github.com/pingcap/tidb/pkg/util/dbterror"
 	"go.uber.org/zap"
@@ -253,8 +254,8 @@ func rollingbackDropColumn(jobCtx *jobContext, job *model.Job) (ver int64, err e
 	return ver, nil
 }
 
-func rollingbackDropIndex(jobCtx *jobContext, job *model.Job) (ver int64, err error) {
-	_, indexInfo, _, err := checkDropIndex(jobCtx.infoCache, jobCtx.metaMut, job)
+func rollingbackDropIndex(sctx sessionctx.Context, jobCtx *jobContext, job *model.Job) (ver int64, err error) {
+	_, indexInfo, _, err := checkDropIndex(sctx, jobCtx.infoCache, jobCtx.metaMut, job)
 	if err != nil {
 		return ver, errors.Trace(err)
 	}
@@ -288,6 +289,25 @@ func rollingbackAddVectorIndex(w *worker, jobCtx *jobContext, job *model.Job) (v
 func rollingbackAddIndex(jobCtx *jobContext, job *model.Job) (ver int64, err error) {
 	// add index's reorg workers are not running, remove the indexInfo in tableInfo.
 	return convertNotReorgAddIdxJob2RollbackJob(jobCtx, job, dbterror.ErrCancelledDDLJob)
+}
+
+func rollingbackCreateMaterializedView(_ *jobContext, job *model.Job) (ver int64, err error) {
+	if _, err = model.GetCreateMaterializedViewArgs(job); err != nil {
+		job.State = model.JobStateCancelled
+		return ver, errors.Trace(err)
+	}
+
+	switch job.SchemaState {
+	case model.StateNone:
+		job.State = model.JobStateCancelled
+		return ver, dbterror.ErrCancelledDDLJob
+	case model.StateWriteReorganization:
+		job.State = model.JobStateRollingback
+		return ver, dbterror.ErrCancelledDDLJob
+	default:
+		job.State = model.JobStateCancelled
+		return ver, dbterror.ErrCannotCancelDDLJob.GenWithStackByArgs(job.ID)
+	}
 }
 
 // rollbackExchangeTablePartition will clear the non-partitioned
@@ -627,6 +647,8 @@ func convertJob2RollbackJob(w *worker, jobCtx *jobContext, job *model.Job) (ver 
 		ver, err = rollingbackAddIndex(jobCtx, job)
 	case model.ActionAddVectorIndex:
 		ver, err = rollingbackAddVectorIndex(w, jobCtx, job)
+	case model.ActionCreateMaterializedView:
+		ver, err = rollingbackCreateMaterializedView(jobCtx, job)
 	case model.ActionAddTablePartition:
 		ver, err = rollingbackAddTablePartition(jobCtx, job)
 	case model.ActionReorganizePartition, model.ActionRemovePartitioning,
@@ -635,7 +657,7 @@ func convertJob2RollbackJob(w *worker, jobCtx *jobContext, job *model.Job) (ver 
 	case model.ActionDropColumn:
 		ver, err = rollingbackDropColumn(jobCtx, job)
 	case model.ActionDropIndex, model.ActionDropPrimaryKey:
-		ver, err = rollingbackDropIndex(jobCtx, job)
+		ver, err = rollingbackDropIndex(w.sess.Session(), jobCtx, job)
 	case model.ActionDropTable, model.ActionDropView, model.ActionDropSequence:
 		err = rollingbackDropTableOrView(jobCtx, job)
 	case model.ActionDropTablePartition:
@@ -654,9 +676,14 @@ func convertJob2RollbackJob(w *worker, jobCtx *jobContext, job *model.Job) (ver 
 		ver, err = cancelOnlyNotHandledJob(job, model.StatePublic)
 	case model.ActionTruncateTablePartition:
 		ver, err = rollingbackTruncateTablePartition(jobCtx, job)
+	case model.ActionCreateMaterializedViewShadow:
+		ver, err = cancelOnlyNotHandledJob(job, model.StateNone)
 	case model.ActionRebaseAutoID, model.ActionShardRowID, model.ActionAddForeignKey,
 		model.ActionRenameTable, model.ActionRenameTables,
-		model.ActionModifyTableCharsetAndCollate,
+		model.ActionModifyTableCharsetAndCollate, model.ActionAlterMaterializedViewRefresh,
+		model.ActionAlterMaterializedViewAttributes,
+		model.ActionAlterMaterializedViewLogPurge,
+		model.ActionMViewRefreshOutOfPlaceCutover,
 		model.ActionModifySchemaCharsetAndCollate, model.ActionRepairTable,
 		model.ActionModifyTableAutoIDCache, model.ActionAlterIndexVisibility,
 		model.ActionModifySchemaDefaultPlacement, model.ActionRecoverSchema:

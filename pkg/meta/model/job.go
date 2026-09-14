@@ -96,93 +96,107 @@ const (
 	ActionAlterTablePlacement           ActionType = 56
 	ActionAlterCacheTable               ActionType = 57
 	// not used
-	ActionAlterTableStatsOptions ActionType = 58
-	ActionAlterNoCacheTable      ActionType = 59
-	ActionCreateTables           ActionType = 60
-	ActionMultiSchemaChange      ActionType = 61
-	ActionFlashbackCluster       ActionType = 62
-	ActionRecoverSchema          ActionType = 63
-	ActionReorganizePartition    ActionType = 64
-	ActionAlterTTLInfo           ActionType = 65
-	ActionAlterTTLRemove         ActionType = 67
-	ActionCreateResourceGroup    ActionType = 68
-	ActionAlterResourceGroup     ActionType = 69
-	ActionDropResourceGroup      ActionType = 70
-	ActionAlterTablePartitioning ActionType = 71
-	ActionRemovePartitioning     ActionType = 72
-	ActionAddVectorIndex         ActionType = 73
+	ActionAlterTableStatsOptions          ActionType = 58
+	ActionAlterNoCacheTable               ActionType = 59
+	ActionCreateTables                    ActionType = 60
+	ActionMultiSchemaChange               ActionType = 61
+	ActionFlashbackCluster                ActionType = 62
+	ActionRecoverSchema                   ActionType = 63
+	ActionReorganizePartition             ActionType = 64
+	ActionAlterTTLInfo                    ActionType = 65
+	ActionAlterTTLRemove                  ActionType = 67
+	ActionCreateResourceGroup             ActionType = 68
+	ActionAlterResourceGroup              ActionType = 69
+	ActionDropResourceGroup               ActionType = 70
+	ActionAlterTablePartitioning          ActionType = 71
+	ActionRemovePartitioning              ActionType = 72
+	ActionAddVectorIndex                  ActionType = 73
+	ActionCreateMaterializedViewLog       ActionType = 74
+	ActionCreateMaterializedView          ActionType = 75
+	ActionAlterMaterializedViewRefresh    ActionType = 76
+	ActionAlterMaterializedViewLogPurge   ActionType = 77
+	ActionAlterMaterializedViewAttributes ActionType = 78
+	ActionMViewRefreshOutOfPlaceCutover   ActionType = 79
+	ActionCreateMaterializedViewShadow    ActionType = 80
 )
 
 // ActionMap is the map of DDL ActionType to string.
 var ActionMap = map[ActionType]string{
-	ActionCreateSchema:                  "create schema",
-	ActionDropSchema:                    "drop schema",
-	ActionCreateTable:                   "create table",
-	ActionCreateTables:                  "create tables",
-	ActionDropTable:                     "drop table",
-	ActionAddColumn:                     "add column",
-	ActionDropColumn:                    "drop column",
-	ActionAddIndex:                      "add index",
-	ActionDropIndex:                     "drop index",
-	ActionAddForeignKey:                 "add foreign key",
-	ActionDropForeignKey:                "drop foreign key",
-	ActionTruncateTable:                 "truncate table",
-	ActionModifyColumn:                  "modify column",
-	ActionRebaseAutoID:                  "rebase auto_increment ID",
-	ActionRenameTable:                   "rename table",
-	ActionRenameTables:                  "rename tables",
-	ActionSetDefaultValue:               "set default value",
-	ActionShardRowID:                    "shard row ID",
-	ActionModifyTableComment:            "modify table comment",
-	ActionRenameIndex:                   "rename index",
-	ActionAddTablePartition:             "add partition",
-	ActionDropTablePartition:            "drop partition",
-	ActionCreateView:                    "create view",
-	ActionModifyTableCharsetAndCollate:  "modify table charset and collate",
-	ActionTruncateTablePartition:        "truncate partition",
-	ActionDropView:                      "drop view",
-	ActionRecoverTable:                  "recover table",
-	ActionModifySchemaCharsetAndCollate: "modify schema charset and collate",
-	ActionLockTable:                     "lock table",
-	ActionUnlockTable:                   "unlock table",
-	ActionRepairTable:                   "repair table",
-	ActionSetTiFlashReplica:             "set tiflash replica",
-	ActionUpdateTiFlashReplicaStatus:    "update tiflash replica status",
-	ActionAddPrimaryKey:                 "add primary key",
-	ActionDropPrimaryKey:                "drop primary key",
-	ActionCreateSequence:                "create sequence",
-	ActionAlterSequence:                 "alter sequence",
-	ActionDropSequence:                  "drop sequence",
-	ActionModifyTableAutoIDCache:        "modify auto id cache",
-	ActionRebaseAutoRandomBase:          "rebase auto_random ID",
-	ActionAlterIndexVisibility:          "alter index visibility",
-	ActionExchangeTablePartition:        "exchange partition",
-	ActionAddCheckConstraint:            "add check constraint",
-	ActionDropCheckConstraint:           "drop check constraint",
-	ActionAlterCheckConstraint:          "alter check constraint",
-	ActionAlterTableAttributes:          "alter table attributes",
-	ActionAlterTablePartitionPlacement:  "alter table partition placement",
-	ActionAlterTablePartitionAttributes: "alter table partition attributes",
-	ActionCreatePlacementPolicy:         "create placement policy",
-	ActionAlterPlacementPolicy:          "alter placement policy",
-	ActionDropPlacementPolicy:           "drop placement policy",
-	ActionModifySchemaDefaultPlacement:  "modify schema default placement",
-	ActionAlterTablePlacement:           "alter table placement",
-	ActionAlterCacheTable:               "alter table cache",
-	ActionAlterNoCacheTable:             "alter table nocache",
-	ActionAlterTableStatsOptions:        "alter table statistics options",
-	ActionMultiSchemaChange:             "alter table multi-schema change",
-	ActionFlashbackCluster:              "flashback cluster",
-	ActionRecoverSchema:                 "flashback schema",
-	ActionReorganizePartition:           "alter table reorganize partition",
-	ActionAlterTTLInfo:                  "alter table ttl",
-	ActionAlterTTLRemove:                "alter table no_ttl",
-	ActionCreateResourceGroup:           "create resource group",
-	ActionAlterResourceGroup:            "alter resource group",
-	ActionDropResourceGroup:             "drop resource group",
-	ActionAlterTablePartitioning:        "alter table partition by",
-	ActionRemovePartitioning:            "alter table remove partitioning",
-	ActionAddVectorIndex:                "add vector index",
+	ActionCreateSchema:                    "create schema",
+	ActionDropSchema:                      "drop schema",
+	ActionCreateTable:                     "create table",
+	ActionCreateMaterializedViewLog:       "create materialized view log",
+	ActionCreateMaterializedView:          "create materialized view",
+	ActionAlterMaterializedViewRefresh:    "alter materialized view refresh",
+	ActionAlterMaterializedViewLogPurge:   "alter materialized view log purge",
+	ActionAlterMaterializedViewAttributes: "alter materialized view attributes",
+	ActionMViewRefreshOutOfPlaceCutover:   "refresh materialized view complete out-of-place cutover",
+	ActionCreateMaterializedViewShadow:    "create materialized view shadow table",
+	ActionCreateTables:                    "create tables",
+	ActionDropTable:                       "drop table",
+	ActionAddColumn:                       "add column",
+	ActionDropColumn:                      "drop column",
+	ActionAddIndex:                        "add index",
+	ActionDropIndex:                       "drop index",
+	ActionAddForeignKey:                   "add foreign key",
+	ActionDropForeignKey:                  "drop foreign key",
+	ActionTruncateTable:                   "truncate table",
+	ActionModifyColumn:                    "modify column",
+	ActionRebaseAutoID:                    "rebase auto_increment ID",
+	ActionRenameTable:                     "rename table",
+	ActionRenameTables:                    "rename tables",
+	ActionSetDefaultValue:                 "set default value",
+	ActionShardRowID:                      "shard row ID",
+	ActionModifyTableComment:              "modify table comment",
+	ActionRenameIndex:                     "rename index",
+	ActionAddTablePartition:               "add partition",
+	ActionDropTablePartition:              "drop partition",
+	ActionCreateView:                      "create view",
+	ActionModifyTableCharsetAndCollate:    "modify table charset and collate",
+	ActionTruncateTablePartition:          "truncate partition",
+	ActionDropView:                        "drop view",
+	ActionRecoverTable:                    "recover table",
+	ActionModifySchemaCharsetAndCollate:   "modify schema charset and collate",
+	ActionLockTable:                       "lock table",
+	ActionUnlockTable:                     "unlock table",
+	ActionRepairTable:                     "repair table",
+	ActionSetTiFlashReplica:               "set tiflash replica",
+	ActionUpdateTiFlashReplicaStatus:      "update tiflash replica status",
+	ActionAddPrimaryKey:                   "add primary key",
+	ActionDropPrimaryKey:                  "drop primary key",
+	ActionCreateSequence:                  "create sequence",
+	ActionAlterSequence:                   "alter sequence",
+	ActionDropSequence:                    "drop sequence",
+	ActionModifyTableAutoIDCache:          "modify auto id cache",
+	ActionRebaseAutoRandomBase:            "rebase auto_random ID",
+	ActionAlterIndexVisibility:            "alter index visibility",
+	ActionExchangeTablePartition:          "exchange partition",
+	ActionAddCheckConstraint:              "add check constraint",
+	ActionDropCheckConstraint:             "drop check constraint",
+	ActionAlterCheckConstraint:            "alter check constraint",
+	ActionAlterTableAttributes:            "alter table attributes",
+	ActionAlterTablePartitionPlacement:    "alter table partition placement",
+	ActionAlterTablePartitionAttributes:   "alter table partition attributes",
+	ActionCreatePlacementPolicy:           "create placement policy",
+	ActionAlterPlacementPolicy:            "alter placement policy",
+	ActionDropPlacementPolicy:             "drop placement policy",
+	ActionModifySchemaDefaultPlacement:    "modify schema default placement",
+	ActionAlterTablePlacement:             "alter table placement",
+	ActionAlterCacheTable:                 "alter table cache",
+	ActionAlterNoCacheTable:               "alter table nocache",
+	ActionAlterTableStatsOptions:          "alter table statistics options",
+	ActionMultiSchemaChange:               "alter table multi-schema change",
+	ActionFlashbackCluster:                "flashback cluster",
+	ActionRecoverSchema:                   "flashback schema",
+	ActionReorganizePartition:             "alter table reorganize partition",
+	ActionAlterTTLInfo:                    "alter table ttl",
+	ActionAlterTTLRemove:                  "alter table no_ttl",
+	ActionCreateResourceGroup:             "create resource group",
+	ActionAlterResourceGroup:              "alter resource group",
+	ActionDropResourceGroup:               "drop resource group",
+	ActionAlterTablePartitioning:          "alter table partition by",
+	ActionRemovePartitioning:              "alter table remove partitioning",
+	ActionAddVectorIndex:                  "add vector index",
 
 	// `ActionAlterTableAlterPartition` is removed and will never be used.
 	// Just left a tombstone here for compatibility.
@@ -812,7 +826,7 @@ func (job *Job) GetSessionVars(name string) (string, bool) {
 // MayNeedReorg indicates that this job may need to reorganize the data.
 func (job *Job) MayNeedReorg() bool {
 	switch job.Type {
-	case ActionAddIndex, ActionAddPrimaryKey, ActionReorganizePartition,
+	case ActionAddIndex, ActionAddPrimaryKey, ActionCreateMaterializedView, ActionReorganizePartition,
 		ActionRemovePartitioning, ActionAlterTablePartitioning:
 		return true
 	case ActionModifyColumn:
@@ -854,6 +868,8 @@ func (job *Job) IsRollbackable() bool {
 		if job.SchemaState == StatePublic {
 			return false
 		}
+	case ActionCreateMaterializedView:
+		return job.SchemaState == StateNone || job.SchemaState == StateWriteReorganization
 	case ActionAddTablePartition:
 		return job.SchemaState == StateNone || job.SchemaState == StateReplicaOnly
 	case ActionDropColumn, ActionDropSchema, ActionDropTable, ActionDropSequence,
@@ -863,7 +879,7 @@ func (job *Job) IsRollbackable() bool {
 		return job.SchemaState == StatePublic || job.SchemaState == StateWriteOnly
 	case ActionRebaseAutoID, ActionShardRowID,
 		ActionTruncateTable, ActionAddForeignKey, ActionRenameTable, ActionRenameTables,
-		ActionModifyTableCharsetAndCollate,
+		ActionModifyTableCharsetAndCollate, ActionMViewRefreshOutOfPlaceCutover,
 		ActionModifySchemaCharsetAndCollate, ActionRepairTable,
 		ActionModifyTableAutoIDCache, ActionModifySchemaDefaultPlacement, ActionDropCheckConstraint:
 		return job.SchemaState == StateNone
@@ -907,23 +923,24 @@ func (job *Job) ClearDecodedArgs() {
 // SubJob is a representation of one DDL schema change. A Job may contain zero
 // (when multi-schema change is not applicable) or more SubJobs.
 type SubJob struct {
-	Type         ActionType `json:"type"`
-	JobArgs      JobArgs    `json:"-"`
-	args         []any
-	RawArgs      json.RawMessage `json:"raw_args"`
-	SchemaState  SchemaState     `json:"schema_state"`
-	SnapshotVer  uint64          `json:"snapshot_ver"`
-	RealStartTS  uint64          `json:"real_start_ts"`
-	Revertible   bool            `json:"revertible"`
-	State        JobState        `json:"state"`
-	RowCount     int64           `json:"row_count"`
-	Warning      *terror.Error   `json:"warning"`
-	CtxVars      []any           `json:"-"`
-	SchemaVer    int64           `json:"schema_version"`
-	ReorgTp      ReorgType       `json:"reorg_tp"`
-	ReorgStage   ReorgStage      `json:"reorg_stage"`
-	NeedAnalyze  bool            `json:"need_analyze"`
-	AnalyzeState int8            `json:"analyze_state"`
+	Type                ActionType `json:"type"`
+	JobArgs             JobArgs    `json:"-"`
+	args                []any
+	RawArgs             json.RawMessage       `json:"raw_args"`
+	SchemaState         SchemaState           `json:"schema_state"`
+	SnapshotVer         uint64                `json:"snapshot_ver"`
+	RealStartTS         uint64                `json:"real_start_ts"`
+	Revertible          bool                  `json:"revertible"`
+	State               JobState              `json:"state"`
+	RowCount            int64                 `json:"row_count"`
+	Warning             *terror.Error         `json:"warning"`
+	CtxVars             []any                 `json:"-"`
+	SchemaVer           int64                 `json:"schema_version"`
+	ReorgTp             ReorgType             `json:"reorg_tp"`
+	ReorgStage          ReorgStage            `json:"reorg_stage"`
+	NeedAnalyze         bool                  `json:"need_analyze"`
+	AnalyzeState        int8                  `json:"analyze_state"`
+	InvolvingSchemaInfo []InvolvingSchemaInfo `json:"involving_schema_info,omitempty"`
 }
 
 // IsNormal returns true if the sub-job is normally running.
@@ -968,38 +985,39 @@ func (sub *SubJob) ToProxyJob(parentJob *Job, seq int) Job {
 		reorgMeta.AnalyzeState = sub.AnalyzeState
 	}
 	return Job{
-		Version:         parentJob.Version,
-		ID:              parentJob.ID,
-		Type:            sub.Type,
-		SchemaID:        parentJob.SchemaID,
-		TableID:         parentJob.TableID,
-		SchemaName:      parentJob.SchemaName,
-		State:           sub.State,
-		Warning:         sub.Warning,
-		Error:           nil,
-		ErrorCount:      0,
-		RowCount:        sub.RowCount,
-		Mu:              sync.Mutex{},
-		CtxVars:         sub.CtxVars,
-		args:            sub.args,
-		RawArgs:         sub.RawArgs,
-		SchemaState:     sub.SchemaState,
-		SnapshotVer:     sub.SnapshotVer,
-		RealStartTS:     sub.RealStartTS,
-		StartTS:         parentJob.StartTS,
-		DependencyID:    parentJob.DependencyID,
-		Query:           parentJob.Query,
-		BinlogInfo:      parentJob.BinlogInfo,
-		ReorgMeta:       reorgMeta,
-		MultiSchemaInfo: &MultiSchemaInfo{Revertible: sub.Revertible, Seq: int32(seq), NeedAnalyze: sub.NeedAnalyze},
-		Priority:        parentJob.Priority,
-		SeqNum:          parentJob.SeqNum,
-		Charset:         parentJob.Charset,
-		Collate:         parentJob.Collate,
-		AdminOperator:   parentJob.AdminOperator,
-		TraceInfo:       parentJob.TraceInfo,
-		SQLMode:         parentJob.SQLMode,
-		SessionVars:     parentJob.SessionVars,
+		Version:             parentJob.Version,
+		ID:                  parentJob.ID,
+		Type:                sub.Type,
+		SchemaID:            parentJob.SchemaID,
+		TableID:             parentJob.TableID,
+		SchemaName:          parentJob.SchemaName,
+		State:               sub.State,
+		Warning:             sub.Warning,
+		Error:               nil,
+		ErrorCount:          0,
+		RowCount:            sub.RowCount,
+		Mu:                  sync.Mutex{},
+		CtxVars:             sub.CtxVars,
+		args:                sub.args,
+		RawArgs:             sub.RawArgs,
+		SchemaState:         sub.SchemaState,
+		SnapshotVer:         sub.SnapshotVer,
+		RealStartTS:         sub.RealStartTS,
+		StartTS:             parentJob.StartTS,
+		DependencyID:        parentJob.DependencyID,
+		Query:               parentJob.Query,
+		BinlogInfo:          parentJob.BinlogInfo,
+		ReorgMeta:           reorgMeta,
+		MultiSchemaInfo:     &MultiSchemaInfo{Revertible: sub.Revertible, Seq: int32(seq), NeedAnalyze: sub.NeedAnalyze},
+		Priority:            parentJob.Priority,
+		SeqNum:              parentJob.SeqNum,
+		Charset:             parentJob.Charset,
+		Collate:             parentJob.Collate,
+		AdminOperator:       parentJob.AdminOperator,
+		TraceInfo:           parentJob.TraceInfo,
+		SQLMode:             parentJob.SQLMode,
+		SessionVars:         parentJob.SessionVars,
+		InvolvingSchemaInfo: sub.InvolvingSchemaInfo,
 	}
 }
 
@@ -1014,6 +1032,7 @@ func (sub *SubJob) FromProxyJob(proxyJob *Job, ver int64) {
 	sub.Warning = proxyJob.Warning
 	sub.RowCount = proxyJob.RowCount
 	sub.SchemaVer = ver
+	sub.InvolvingSchemaInfo = proxyJob.InvolvingSchemaInfo
 	if proxyJob.ReorgMeta != nil {
 		sub.ReorgTp = proxyJob.ReorgMeta.ReorgTp
 		sub.ReorgStage = proxyJob.ReorgMeta.Stage
@@ -1061,6 +1080,8 @@ type MultiSchemaInfo struct {
 
 	RelativeColumns []model.CIStr `json:"-"`
 	PositionColumns []model.CIStr `json:"-"`
+
+	InvolvingSchemaInfo []InvolvingSchemaInfo `json:"-"`
 }
 
 // AddForeignKeyInfo contains foreign key information.

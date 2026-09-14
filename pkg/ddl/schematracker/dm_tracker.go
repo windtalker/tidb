@@ -24,6 +24,7 @@ import (
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/tidb/pkg/ddl"
+	ddlutil "github.com/pingcap/tidb/pkg/ddl/util"
 	"github.com/pingcap/tidb/pkg/infoschema"
 	"github.com/pingcap/tidb/pkg/meta/metabuild"
 	"github.com/pingcap/tidb/pkg/meta/model"
@@ -38,6 +39,7 @@ import (
 	"github.com/pingcap/tidb/pkg/table/tables"
 	"github.com/pingcap/tidb/pkg/util/collate"
 	"github.com/pingcap/tidb/pkg/util/dbterror"
+	plannererrors "github.com/pingcap/tidb/pkg/util/dbterror/plannererrors"
 )
 
 // SchemaTracker is used to track schema changes by DM. It implements
@@ -229,6 +231,219 @@ func (d *SchemaTracker) CreateTable(ctx sessionctx.Context, s *ast.CreateTableSt
 	return d.CreateTableWithInfo(ctx, schema.Name, tbInfo, nil, ddl.WithOnExist(onExist))
 }
 
+// CreateMaterializedViewLog implements the DDL interface.
+func (d *SchemaTracker) CreateMaterializedViewLog(ctx sessionctx.Context, s *ast.CreateMaterializedViewLogStmt) error {
+	schemaName := s.Table.Schema
+	if schemaName.O == "" {
+		if ctx == nil || ctx.GetSessionVars().CurrentDB == "" {
+			return errors.Trace(plannererrors.ErrNoDB)
+		}
+		schemaName = pmodel.NewCIStr(ctx.GetSessionVars().CurrentDB)
+	}
+	schema := d.SchemaByName(schemaName)
+	if schema == nil {
+		return infoschema.ErrDatabaseNotExists.GenWithStackByArgs(schemaName)
+	}
+
+	baseTable, err := d.TableClonedByName(schemaName, s.Table.Name)
+	if err != nil {
+		return err
+	}
+	if baseTable.IsView() ||
+		baseTable.IsSequence() ||
+		baseTable.TempTableType != model.TempTableNone ||
+		baseTable.MaterializedView != nil ||
+		baseTable.MaterializedViewShadow != nil ||
+		baseTable.MaterializedViewLog != nil {
+		return dbterror.ErrWrongObject.GenWithStackByArgs(schemaName, s.Table.Name, "BASE TABLE")
+	}
+	if baseTable.GetPartitionInfo() != nil {
+		return dbterror.ErrGeneralUnsupportedDDL.GenWithStackByArgs("CREATE MATERIALIZED VIEW LOG on partition table")
+	}
+
+	mlogNameCIStr := model.MaterializedViewLogTableName(baseTable.Name)
+	if _, err := d.TableByName(context.Background(), schemaName, mlogNameCIStr); err == nil {
+		return infoschema.ErrTableExists.GenWithStackByArgs(ast.Ident{Schema: schemaName, Name: mlogNameCIStr})
+	} else if !infoschema.ErrTableNotExists.Equal(err) {
+		return err
+	}
+
+	colMap := make(map[string]*model.ColumnInfo, len(baseTable.Columns))
+	for _, col := range baseTable.Columns {
+		colMap[col.Name.L] = col
+	}
+
+	seenCols := make(map[string]struct{}, len(s.Cols))
+	colDefs := make([]*ast.ColumnDef, 0, len(s.Cols)+2)
+	for _, c := range s.Cols {
+		if _, exists := seenCols[c.L]; exists {
+			return infoschema.ErrColumnExists.GenWithStackByArgs(c.O)
+		}
+		seenCols[c.L] = struct{}{}
+		if c.L == strings.ToLower(model.MaterializedViewLogDMLTypeColumnName) ||
+			c.L == strings.ToLower(model.MaterializedViewLogOldNewColumnName) {
+			return infoschema.ErrColumnExists.GenWithStackByArgs(c.O)
+		}
+		baseCol := colMap[c.L]
+		if baseCol == nil {
+			return infoschema.ErrColumnNotExists.GenWithStackByArgs(c.O, s.Table.Name.O)
+		}
+		if err := ddl.CheckMaterializedViewLogColumnSupported(baseCol); err != nil {
+			return err
+		}
+		ft := ddl.FieldTypeForMaterializedViewLogColumn(baseCol)
+		colDefs = append(colDefs, &ast.ColumnDef{
+			Name: &ast.ColumnName{Name: c},
+			Tp:   &ft,
+		})
+	}
+
+	metaCols := []struct {
+		name string
+		ft   byte
+		flen int
+	}{
+		{name: model.MaterializedViewLogDMLTypeColumnName, ft: mysql.TypeVarchar, flen: 1},
+		// old_new is a signed tinyint: NEW=1, OLD=-1.
+		{name: model.MaterializedViewLogOldNewColumnName, ft: mysql.TypeTiny, flen: 4},
+	}
+	for _, metaCol := range metaCols {
+		ft := field_types.NewFieldType(metaCol.ft)
+		ft.SetFlen(metaCol.flen)
+		ft.SetFlag(mysql.NotNullFlag)
+		colDefs = append(colDefs, &ast.ColumnDef{
+			Name: &ast.ColumnName{Name: pmodel.NewCIStr(metaCol.name)},
+			Tp:   ft,
+		})
+	}
+
+	createTableStmt := &ast.CreateTableStmt{
+		Table:   &ast.TableName{Schema: schemaName, Name: mlogNameCIStr},
+		Cols:    colDefs,
+		Options: s.Options,
+	}
+	metaBuildCtx := ddl.NewMetaBuildContextWithSctx(
+		ctx,
+		// suppress ErrTooLongKey
+		metabuild.WithSuppressTooLongIndexErr(true),
+		// support drop PK
+		metabuild.WithClusteredIndexDefMode(variable.ClusteredIndexDefModeOff),
+	)
+	mlogTableInfo, err := ddl.BuildTableInfoWithStmt(metaBuildCtx, createTableStmt, schema.Charset, schema.Collate, nil)
+	if err != nil {
+		return err
+	}
+
+	var purgeMethod string
+	var purgeStartWith string
+	var purgeNext string
+	tzName, tzOffset := ddlutil.GetTimeZone(ctx)
+	logAccumulationAlertRows, err := ddl.BuildMLogAccumulationAlertRows(s.AccumulationAlert)
+	if err != nil {
+		return err
+	}
+	if s.Purge != nil {
+		if s.Purge.Immediate {
+			return dbterror.ErrGeneralUnsupportedDDL.GenWithStack("PURGE IMMEDIATE is not supported for CREATE MATERIALIZED VIEW LOG")
+		}
+		purgeMethod = "DEFERRED"
+		if s.Purge.StartWith != nil {
+			purgeStartWith, err = ddl.BuildAndValidateMViewScheduleExpr(ctx, s.Purge.StartWith, "PURGE START WITH")
+			if err != nil {
+				return err
+			}
+		}
+		if s.Purge.Next == nil {
+			return dbterror.ErrGeneralUnsupportedDDL.GenWithStack("PURGE NEXT is required for CREATE MATERIALIZED VIEW LOG")
+		}
+		purgeNext, err = ddl.BuildAndValidateMViewScheduleExpr(ctx, s.Purge.Next, "PURGE NEXT")
+		if err != nil {
+			return err
+		}
+	}
+
+	mlogTableInfo.MaterializedViewLog = &model.MaterializedViewLogInfo{
+		BaseTableID:              baseTable.ID,
+		Columns:                  s.Cols,
+		PurgeMethod:              purgeMethod,
+		PurgeStartWith:           purgeStartWith,
+		PurgeNext:                purgeNext,
+		LogAccumulationAlertRows: logAccumulationAlertRows,
+		DefinitionSQLMode:        ctx.GetSessionVars().SQLMode,
+		PurgeScheduleTimeZone: model.TimeZoneLocation{
+			Name:   tzName,
+			Offset: tzOffset,
+		},
+	}
+	if err := d.CreateTableWithInfo(ctx, schemaName, mlogTableInfo, nil); err != nil {
+		return err
+	}
+
+	if baseTable.MaterializedViewBase == nil {
+		baseTable.MaterializedViewBase = &model.MaterializedViewBaseInfo{}
+	}
+	if mlogTableInfo.ID != 0 {
+		baseTable.MaterializedViewBase.MLogID = mlogTableInfo.ID
+	} else {
+		// SchemaTracker doesn't allocate physical table IDs, use a non-zero sentinel.
+		baseTable.MaterializedViewBase.MLogID = 1
+	}
+	return d.PutTable(schemaName, baseTable)
+}
+
+// CreateMaterializedView implements the DDL interface.
+func (*SchemaTracker) CreateMaterializedView(sessionctx.Context, *ast.CreateMaterializedViewStmt) error {
+	return dbterror.ErrGeneralUnsupportedDDL.GenWithStack("CREATE MATERIALIZED VIEW is not supported in schema tracker")
+}
+
+// DropMaterializedView implements the DDL interface.
+func (*SchemaTracker) DropMaterializedView(sessionctx.Context, *ast.DropMaterializedViewStmt) error {
+	return dbterror.ErrGeneralUnsupportedDDL.GenWithStack("DROP MATERIALIZED VIEW is not supported in schema tracker")
+}
+
+// DropMaterializedViewLog implements the DDL interface.
+func (*SchemaTracker) DropMaterializedViewLog(sessionctx.Context, *ast.DropMaterializedViewLogStmt) error {
+	return dbterror.ErrGeneralUnsupportedDDL.GenWithStack("DROP MATERIALIZED VIEW LOG is not supported in schema tracker")
+}
+
+// AlterMaterializedView implements the DDL interface.
+func (*SchemaTracker) AlterMaterializedView(sessionctx.Context, *ast.AlterMaterializedViewStmt) error {
+	return dbterror.ErrGeneralUnsupportedDDL.GenWithStack("ALTER MATERIALIZED VIEW is not supported in schema tracker")
+}
+
+// AlterMaterializedViewLog implements the DDL interface.
+func (*SchemaTracker) AlterMaterializedViewLog(sessionctx.Context, *ast.AlterMaterializedViewLogStmt) error {
+	return dbterror.ErrGeneralUnsupportedDDL.GenWithStack("ALTER MATERIALIZED VIEW LOG is not supported in schema tracker")
+}
+
+// CreateMaterializedViewShadowTable implements the DDL interface.
+func (*SchemaTracker) CreateMaterializedViewShadowTable(
+	sessionctx.Context,
+	int64,
+	pmodel.CIStr,
+	*model.TableInfo,
+) error {
+	return dbterror.ErrGeneralUnsupportedDDL.GenWithStack("CREATE MATERIALIZED VIEW SHADOW TABLE is not supported in schema tracker")
+}
+
+// RefreshMaterializedViewCompleteOutOfPlaceCutover implements the DDL interface.
+func (*SchemaTracker) RefreshMaterializedViewCompleteOutOfPlaceCutover(
+	sessionctx.Context,
+	int64,
+	pmodel.CIStr,
+	pmodel.CIStr,
+	int64,
+	int64,
+	uint64,
+	*uint64,
+	uint64,
+	bool,
+	*int64,
+	bool,
+) error {
+	return dbterror.ErrGeneralUnsupportedDDL.GenWithStack("REFRESH MATERIALIZED VIEW COMPLETE OUT OF PLACE cutover is not supported in schema tracker")
+}
+
 // CreateTableWithInfo implements the DDL interface.
 func (d *SchemaTracker) CreateTableWithInfo(
 	_ sessionctx.Context,
@@ -366,7 +581,7 @@ func (d *SchemaTracker) DropView(_ sessionctx.Context, stmt *ast.DropTableStmt) 
 func (d *SchemaTracker) CreateIndex(ctx sessionctx.Context, stmt *ast.CreateIndexStmt) error {
 	ident := ast.Ident{Schema: stmt.Table.Schema, Name: stmt.Table.Name}
 	return d.createIndex(ctx, ident, stmt.KeyType, pmodel.NewCIStr(stmt.IndexName),
-		stmt.IndexPartSpecifications, stmt.IndexOption, stmt.IfNotExists)
+		stmt.IndexPartSpecifications, stmt.IndexOption, stmt.IfNotExists, "CREATE INDEX")
 }
 
 func (d *SchemaTracker) putTableIfNoError(err error, dbName pmodel.CIStr, tbInfo *model.TableInfo) {
@@ -385,10 +600,17 @@ func (d *SchemaTracker) createIndex(
 	indexPartSpecifications []*ast.IndexPartSpecification,
 	indexOption *ast.IndexOption,
 	ifNotExists bool,
+	op string,
 ) (err error) {
 	unique := keyType == ast.IndexKeyTypeUnique
 	tblInfo, err := d.TableClonedByName(ti.Schema, ti.Name)
 	if err != nil {
+		return err
+	}
+	if unique && op == "CREATE INDEX" {
+		op = "CREATE UNIQUE INDEX"
+	}
+	if err := ddl.CheckIndexOperationMaterializedViewConstraints(ctx.GetSessionVars(), tblInfo, op, unique); err != nil {
 		return err
 	}
 
@@ -835,6 +1057,9 @@ func (d *SchemaTracker) createPrimaryKey(
 	if err != nil {
 		return errors.Trace(err)
 	}
+	if err := ddl.CheckIndexOperationMaterializedViewConstraints(ctx.GetSessionVars(), tblInfo, "ALTER TABLE ADD PRIMARY KEY", true); err != nil {
+		return err
+	}
 
 	defer d.putTableIfNoError(err, ti.Schema, tblInfo)
 
@@ -927,10 +1152,10 @@ func (d *SchemaTracker) AlterTable(ctx context.Context, sctx sessionctx.Context,
 			switch spec.Constraint.Tp {
 			case ast.ConstraintKey, ast.ConstraintIndex:
 				err = d.createIndex(sctx, ident, ast.IndexKeyTypeNone, pmodel.NewCIStr(constr.Name),
-					spec.Constraint.Keys, constr.Option, constr.IfNotExists)
+					spec.Constraint.Keys, constr.Option, constr.IfNotExists, "ALTER TABLE ADD INDEX")
 			case ast.ConstraintUniq, ast.ConstraintUniqIndex, ast.ConstraintUniqKey:
 				err = d.createIndex(sctx, ident, ast.IndexKeyTypeUnique, pmodel.NewCIStr(constr.Name),
-					spec.Constraint.Keys, constr.Option, false) // IfNotExists should be not applied
+					spec.Constraint.Keys, constr.Option, false, "ALTER TABLE ADD UNIQUE INDEX") // IfNotExists should be not applied
 			case ast.ConstraintPrimaryKey:
 				err = d.createPrimaryKey(sctx, ident, pmodel.NewCIStr(constr.Name), spec.Constraint.Keys, constr.Option)
 			case ast.ConstraintForeignKey,
