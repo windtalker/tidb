@@ -321,6 +321,11 @@ that mix multiple layers, by hunk. The main mixed files are:
 - `pkg/executor/materialized_view.go`
 - `pkg/executor/mv_refresh_observability.go`
 
+Use `mv_pr5_refresh_for_master` as the implementation reference while reconstructing
+the stack. After the complete refresh port is ready, double-check the final port
+against `cp_mv_for_master` before submission, and resolve any unintended behavioral
+or diff differences.
+
 After a PR merges, rebase the next stacked branch onto the new master and check the
 result with `git range-diff`. Keep generated Bazel metadata with the code that
 requires it; do not create a standalone BUILD-only PR.
