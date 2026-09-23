@@ -238,6 +238,7 @@ func TestMViewRefreshOutOfPlaceCutoverStats(t *testing.T) {
 	testKit := testkit.NewTestKit(t, store)
 	h := do.StatsHandle()
 	testKit.MustExec("use test")
+	testKit.MustExec("set tidb_mview_enable = on")
 	originalHistoricalStats := testKit.MustQuery("select @@global.tidb_enable_historical_stats").Rows()[0][0]
 	testKit.MustExec("set global tidb_enable_historical_stats = 1")
 	defer testKit.MustExec(fmt.Sprintf("set global tidb_enable_historical_stats = %v", originalHistoricalStats))
