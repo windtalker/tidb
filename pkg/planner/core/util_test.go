@@ -366,7 +366,7 @@ func TestCheckMViewUpdatable(t *testing.T) {
 	vars.InMViewMaintenance = false
 	vars.InMaterializedViewMaintenance = true
 	vars.InRestrictedSQL = false
-	err := CheckMViewUpdatable(vars, shadow, "", "INSERT")
+	err = CheckMViewUpdatable(vars, shadow, "", "INSERT")
 	require.ErrorContains(t, err, "materialized view maintenance should only run in restricted SQL mode")
 
 	vars.InRestrictedSQL = true

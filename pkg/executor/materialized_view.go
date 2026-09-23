@@ -1438,7 +1438,6 @@ func (e *RefreshMaterializedViewExec) executeRefreshMaterializedView(kctx contex
 	nextRefreshUnixSeconds, shouldUpdateNextRefreshUnixSeconds, err := deriveRuntimeMaterializedScheduleNextUnixSeconds(
 		kctx,
 		scheduleEvalSctx,
-		tblInfo.MaterializedView.RefreshStartWith,
 		tblInfo.MaterializedView.RefreshNext,
 		isInternalSQL,
 		tblInfo.MaterializedView.DefinitionSQLMode,
@@ -1695,7 +1694,6 @@ func (e *RefreshMaterializedViewExec) executeRefreshMaterializedViewCompleteOutO
 			nextRefreshUnixSeconds, shouldUpdateNextRefreshUnixSeconds, scheduleErr = deriveRuntimeMaterializedScheduleNextUnixSeconds(
 				kctx,
 				scheduleEvalSctx,
-				tblInfo.MaterializedView.RefreshStartWith,
 				tblInfo.MaterializedView.RefreshNext,
 				isInternalSQL,
 				tblInfo.MaterializedView.DefinitionSQLMode,
@@ -2394,8 +2392,8 @@ WHERE MLOG_ID = %?
 ORDER BY PURGE_JOB_ID DESC
 LIMIT 1`,
 		mlogID,
-		purgeHistStatusRunning,
-		purgeHistStatusOrphaned,
+		mvTaskHistStatusRunning,
+		mvTaskHistStatusOrphaned,
 	)
 	if err != nil {
 		if infoschema.ErrTableNotExists.Equal(err) {
@@ -2786,7 +2784,6 @@ func collectMLogScanPlanIDs(plan plannercorebase.PhysicalPlan, mlogTableID int64
 func deriveRuntimeMaterializedScheduleNextUnixSeconds(
 	kctx context.Context,
 	evalSctx sessionctx.Context,
-	startExpr string,
 	nextExpr string,
 	isInternalSQL bool,
 	scheduleSQLMode mysql.SQLMode,
@@ -2799,7 +2796,6 @@ func deriveRuntimeMaterializedScheduleNextUnixSeconds(
 	nextAt, shouldUpdate, err := expression.DeriveMaterializedScheduleNextTime(
 		kctx,
 		evalSctx,
-		startExpr,
 		nextExpr,
 		scheduleSQLMode,
 		scheduleTimeZone,
