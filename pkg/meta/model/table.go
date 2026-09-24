@@ -809,6 +809,9 @@ type MaterializedViewInfo struct {
 	// DefinitionSQLMode is the SQL mode captured from CREATE MATERIALIZED VIEW session.
 	DefinitionSQLMode mysql.SQLMode `json:"definition_sql_mode"`
 
+	// DefinitionDivPrecisionIncrement is the division precision captured from CREATE MATERIALIZED VIEW session.
+	DefinitionDivPrecisionIncrement int `json:"definition_div_precision_increment"`
+
 	// DefinitionTimeZone is the timezone captured from CREATE MATERIALIZED VIEW session.
 	DefinitionTimeZone TimeZoneLocation `json:"definition_time_zone"`
 

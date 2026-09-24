@@ -273,6 +273,9 @@ func (w *worker) onCreateMaterializedViewLog(jobCtx *jobContext, job *model.Job)
 		job.State = model.JobStateCancelled
 		return ver, dbterror.ErrInvalidDDLJob.GenWithStackByArgs("create materialized view log: invalid job args")
 	}
+	if job.IsRollingback() {
+		return w.rollbackCreateMaterializedViewLog(jobCtx, job, mlogTableInfo)
+	}
 
 	baseTableID := mlogTableInfo.MaterializedViewLog.BaseTableID
 	if baseTableID == 0 {
@@ -324,7 +327,7 @@ func (w *worker) onCreateMaterializedViewLog(jobCtx *jobContext, job *model.Job)
 	// exclusion and deferred schedule bookkeeping.
 	if err = w.upsertCreateMaterializedViewLogPurgeInfo(jobCtx, job.SchemaName, mlogTableInfo); err != nil {
 		if dbterror.ErrInvalidDDLJob.Equal(err) {
-			job.State = model.JobStateCancelled
+			job.State = model.JobStateRollingback
 		}
 		return ver, errors.Trace(err)
 	}
@@ -340,6 +343,46 @@ func (w *worker) onCreateMaterializedViewLog(jobCtx *jobContext, job *model.Job)
 	}
 
 	job.FinishMultipleTableJob(model.JobStateDone, model.StatePublic, ver, []*model.TableInfo{baseTblInfo, mlogTableInfo})
+	return ver, nil
+}
+
+func (w *worker) rollbackCreateMaterializedViewLog(jobCtx *jobContext, job *model.Job, mlogTableInfo *model.TableInfo) (ver int64, _ error) {
+	actualTableInfo, err := getTableInfo(jobCtx.metaMut, job.TableID, job.SchemaID)
+	if err != nil && !infoschema.ErrDatabaseNotExists.Equal(err) && !infoschema.ErrTableNotExists.Equal(err) {
+		return ver, errors.Trace(err)
+	}
+
+	droppingTableInfo := mlogTableInfo
+	if actualTableInfo != nil {
+		droppingTableInfo = actualTableInfo
+	}
+	extraInfos, err := updateMaterializedViewBaseInfoOnDrop(jobCtx, job, droppingTableInfo)
+	if err != nil {
+		return ver, errors.Trace(err)
+	}
+	for _, extra := range extraInfos {
+		if err := updateTable(jobCtx.metaMut, extra.schemaID, extra.tblInfo); err != nil {
+			return ver, errors.Trace(err)
+		}
+	}
+	if actualTableInfo != nil {
+		if err := jobCtx.metaMut.DropTableOrView(job.SchemaID, job.TableID); err != nil {
+			return ver, errors.Trace(err)
+		}
+		if err := jobCtx.metaMut.GetAutoIDAccessors(job.SchemaID, job.TableID).Del(); err != nil {
+			return ver, errors.Trace(err)
+		}
+	}
+	if err := w.deleteMaterializedViewLogPurgeInfo(jobCtx, job.TableID); err != nil {
+		return ver, errors.Trace(err)
+	}
+
+	job.State = model.JobStateRollbackDone
+	job.SchemaState = model.StateNone
+	ver, err = updateSchemaVersion(jobCtx, job, extraInfos...)
+	if err != nil {
+		return ver, errors.Trace(err)
+	}
 	return ver, nil
 }
 
@@ -708,7 +751,7 @@ func (w *worker) hasCreateMaterializedViewBuildRows(ctx context.Context, schemaN
 	return len(rows) > 0, nil
 }
 
-func initCreateMaterializedViewBuildSession(sessCtx sessionctx.Context, job *model.Job, currentDB string) (func(), error) {
+func initCreateMaterializedViewBuildSession(sessCtx sessionctx.Context, job *model.Job, mviewTableInfo *model.TableInfo, currentDB string) (func(), error) {
 	if job == nil || job.ReorgMeta == nil {
 		return nil, dbterror.ErrInvalidDDLJob.GenWithStackByArgs("create materialized view: missing reorg metadata")
 	}
@@ -730,6 +773,9 @@ func initCreateMaterializedViewBuildSession(sessCtx sessionctx.Context, job *mod
 	if err != nil {
 		restore(sessCtx)
 		return nil, err
+	}
+	if mviewTableInfo != nil && mviewTableInfo.MaterializedView != nil {
+		sessCtx.GetSessionVars().DivPrecisionIncrement = mviewTableInfo.MaterializedView.DefinitionDivPrecisionIncrement
 	}
 	sessCtx.GetSessionVars().CurrentDB = currentDB
 	// MV init build should follow the same TiFlash strict-mode bypass path as MV refresh.
@@ -777,7 +823,7 @@ func (w *worker) buildCreateMaterializedViewDataByImport(ctx context.Context, jo
 	if err != nil {
 		return errors.Trace(err)
 	}
-	restoreSess, err := initCreateMaterializedViewBuildSession(sessCtx, job, job.SchemaName)
+	restoreSess, err := initCreateMaterializedViewBuildSession(sessCtx, job, mviewTableInfo, job.SchemaName)
 	if err != nil {
 		w.sessPool.Put(sessCtx)
 		return errors.Trace(err)
@@ -813,7 +859,7 @@ func (w *worker) buildCreateMaterializedViewDataByInsert(ctx context.Context, jo
 	if err != nil {
 		return errors.Trace(err)
 	}
-	restoreSess, err := initCreateMaterializedViewBuildSession(sessCtx, job, job.SchemaName)
+	restoreSess, err := initCreateMaterializedViewBuildSession(sessCtx, job, mviewTableInfo, job.SchemaName)
 	if err != nil {
 		w.sessPool.Put(sessCtx)
 		return errors.Trace(err)

@@ -153,6 +153,28 @@ func TestCreateMaterializedViewLogBasic(t *testing.T) {
 	tk.MustGetErrMsg("create materialized view log on t (a)", "[schema:1050]Table 'test.$mlog$t' already exists")
 }
 
+func TestCreateMaterializedViewLogPurgeInfoFailureRollback(t *testing.T) {
+	store, dom := testkit.CreateMockStoreAndDomain(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("create table t (a int not null, b int not null)")
+
+	const failpointName = "github.com/pingcap/tidb/pkg/ddl/mockInsertMLogPurgeTableNotExists"
+	require.NoError(t, failpoint.Enable(failpointName, "return(true)"))
+	defer func() {
+		require.NoError(t, failpoint.Disable(failpointName))
+	}()
+
+	err := tk.ExecToErr("create materialized view log on t (a, b) purge next date_add(now(), interval 1 hour)")
+	require.ErrorContains(t, err, "tidb_mlog_purge_info")
+	tk.MustQuery("show tables like '$mlog$t'").Check(testkit.Rows())
+	tk.MustQuery("select count(*) from mysql.tidb_mlog_purge_info").Check(testkit.Rows("0"))
+
+	baseTable, err := dom.InfoSchema().TableByName(context.Background(), pmodel.NewCIStr("test"), pmodel.NewCIStr("t"))
+	require.NoError(t, err)
+	require.Nil(t, baseTable.Meta().MaterializedViewBase)
+}
+
 func TestCreateMaterializedViewLogRejectUnsupportedColumns(t *testing.T) {
 	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)

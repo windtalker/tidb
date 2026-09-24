@@ -142,6 +142,80 @@ func TestIsCreateMaterializedViewBaseCheckCancelledErr(t *testing.T) {
 	require.False(t, isCreateMaterializedViewBaseCheckCancelledErr(fmt.Errorf("retry later")))
 }
 
+func TestRollingbackCreateMaterializedViewCannotCancelKeepsState(t *testing.T) {
+	job := &model.Job{
+		ID:          42,
+		Version:     model.JobVersion2,
+		Type:        model.ActionCreateMaterializedView,
+		State:       model.JobStateCancelling,
+		SchemaState: model.StatePublic,
+	}
+	job.FillArgs(&model.CreateMaterializedViewArgs{TableInfo: &model.TableInfo{ID: 1}})
+
+	_, err := rollingbackCreateMaterializedView(nil, job)
+	require.True(t, dbterror.ErrCannotCancelDDLJob.Equal(err))
+	require.Equal(t, model.JobStateCancelling, job.State)
+}
+
+type delRangeExecWrapperForTest struct {
+	rewrite  map[int64]int64
+	params   []any
+	sql      string
+	consumed int
+}
+
+func (*delRangeExecWrapperForTest) UpdateTSOForJob() error { return nil }
+
+func (w *delRangeExecWrapperForTest) PrepareParamsList(_ int) {
+	w.params = nil
+}
+
+func (w *delRangeExecWrapperForTest) RewriteTableID(tableID int64) (int64, bool) {
+	rewrittenID, ok := w.rewrite[tableID]
+	return rewrittenID, ok
+}
+
+func (w *delRangeExecWrapperForTest) AppendParamsList(jobID, elemID int64, startKey, endKey string) {
+	w.params = append(w.params, jobID, elemID, startKey, endKey)
+}
+
+func (w *delRangeExecWrapperForTest) ConsumeDeleteRange(_ context.Context, sql string) error {
+	w.sql = sql
+	w.consumed++
+	return nil
+}
+
+func TestDoBatchDeleteTablesRangeSkipsRewrittenIDs(t *testing.T) {
+	tests := []struct {
+		name          string
+		tableIDs      []int64
+		rewrite       map[int64]int64
+		expectedRows  int
+		expectedComma bool
+	}{
+		{name: "all IDs skipped", tableIDs: []int64{1, 2}, rewrite: map[int64]int64{}, expectedRows: 0},
+		{name: "first ID kept", tableIDs: []int64{1, 2}, rewrite: map[int64]int64{1: 11}, expectedRows: 1},
+		{name: "second ID kept", tableIDs: []int64{1, 2}, rewrite: map[int64]int64{2: 22}, expectedRows: 1},
+		{name: "both IDs kept", tableIDs: []int64{1, 2}, rewrite: map[int64]int64{1: 11, 2: 22}, expectedRows: 2, expectedComma: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			wrapper := &delRangeExecWrapperForTest{rewrite: tt.rewrite}
+			err := doBatchDeleteTablesRange(context.Background(), wrapper, 100, tt.tableIDs, &elementIDAlloc{}, "test")
+			require.NoError(t, err)
+			require.Equal(t, tt.expectedRows > 0, wrapper.consumed > 0)
+			if tt.expectedRows == 0 {
+				require.Empty(t, wrapper.params)
+				return
+			}
+			require.Len(t, wrapper.params, tt.expectedRows*4)
+			require.Equal(t, tt.expectedComma, strings.Contains(wrapper.sql, insertDeleteRangeSQLValue+","+insertDeleteRangeSQLValue))
+			require.False(t, strings.HasSuffix(wrapper.sql, ","))
+		})
+	}
+}
+
 func TestBuildCreateMaterializedViewRefreshInfoUpsertSQL(t *testing.T) {
 	compactSQL := func(sql string) string {
 		return strings.Join(strings.Fields(sql), " ")

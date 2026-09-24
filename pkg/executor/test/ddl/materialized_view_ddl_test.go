@@ -77,6 +77,66 @@ func TestCreateMaterializedViewLogRejectsDuplicateColumns(t *testing.T) {
 	require.ErrorContains(t, err, "Duplicate column name")
 }
 
+func TestCreateMaterializedViewCapturesDefinitionDivPrecisionIncrement(t *testing.T) {
+	store, dom := testkit.CreateMockStoreAndDomain(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("set div_precision_increment = 9")
+	tk.MustExec("create table t (a int not null, b int not null)")
+	tk.MustExec("create materialized view log on t (a, b)")
+	tk.MustExec("create materialized view mv (a, s, cnt) as select a, sum(b), count(1) from t group by a")
+
+	mviewTable, err := dom.InfoSchema().TableByName(context.Background(), pmodel.NewCIStr("test"), pmodel.NewCIStr("mv"))
+	require.NoError(t, err)
+	require.Equal(t, 9, mviewTable.Meta().MaterializedView.DefinitionDivPrecisionIncrement)
+}
+
+func TestCreateMaterializedViewRejectsUnsupportedSelectClauses(t *testing.T) {
+	store := testkit.CreateMockStore(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("create table t (a int not null, b int not null)")
+	tk.MustExec("create materialized view log on t (a, b)")
+
+	tests := []struct {
+		name    string
+		sql     string
+		errPart string
+	}{
+		{
+			name:    "cte",
+			sql:     "create materialized view mv_cte (a, s, cnt) as with cte as (select a from t) select a, sum(b), count(1) from t group by a",
+			errPart: "common table expressions",
+		},
+		{
+			name:    "locking clause",
+			sql:     "create materialized view mv_lock (a, s, cnt) as select a, sum(b), count(1) from t group by a for update",
+			errPart: "locking clauses",
+		},
+		{
+			name:    "select into",
+			sql:     "create materialized view mv_into (a, s, cnt) as select a, sum(b), count(1) from t group by a into outfile '/tmp/mv.out'",
+			errPart: "SELECT INTO",
+		},
+		{
+			name:    "as of",
+			sql:     "create materialized view mv_as_of (a, s, cnt) as select a, sum(b), count(1) from t as of timestamp now() group by a",
+			errPart: "AS OF",
+		},
+		{
+			name:    "table sample",
+			sql:     "create materialized view mv_sample (a, s, cnt) as select a, sum(b), count(1) from t tablesample system (50) group by a",
+			errPart: "TABLESAMPLE",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tk.ExecToErr(tt.sql)
+			require.ErrorContains(t, err, tt.errPart)
+		})
+	}
+}
+
 func TestDropMaterializedViewIfExists(t *testing.T) {
 	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)

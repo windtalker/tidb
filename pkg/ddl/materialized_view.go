@@ -44,6 +44,7 @@ import (
 	plannererrors "github.com/pingcap/tidb/pkg/util/dbterror/plannererrors"
 	"github.com/pingcap/tidb/pkg/util/mviewutil"
 	"github.com/pingcap/tidb/pkg/util/sqlescape"
+	"github.com/pingcap/tidb/pkg/util/sqlexec"
 	"go.uber.org/zap"
 )
 
@@ -281,8 +282,39 @@ func (e *executor) CreateMaterializedView(ctx sessionctx.Context, s *ast.CreateM
 	// Derive MV physical column types from the query output schema.
 	exec := ctx.GetRestrictedSQLExecutor()
 	kctx := kv.WithInternalSourceType(e.ctx, kv.InternalTxnDDL)
+	definitionSQLMode := sessionVars.SQLMode
+	definitionDivPrecisionIncrement := sessionVars.DivPrecisionIncrement
+	definitionTimeZone := sessionVars.TimeZone
+	setupDefinitionSession := sqlexec.ExecOptionWithSessionVarsSetup(func(vars *variable.SessionVars) func() {
+		originalSQLMode := vars.SQLMode
+		originalDivPrecisionIncrement := vars.DivPrecisionIncrement
+		originalTimeZone := vars.TimeZone
+		originalTypeFlags := vars.StmtCtx.TypeFlags()
+		originalErrLevels := vars.StmtCtx.ErrLevels()
+		originalStmtTimeZone := vars.StmtCtx.TimeZone()
+
+		vars.SQLMode = definitionSQLMode
+		vars.DivPrecisionIncrement = definitionDivPrecisionIncrement
+		vars.TimeZone = definitionTimeZone
+		vars.StmtCtx.SetTypeFlags(reorgTypeFlagsWithSQLMode(definitionSQLMode))
+		vars.StmtCtx.SetErrLevels(reorgErrLevelsWithSQLMode(definitionSQLMode))
+		vars.StmtCtx.SetTimeZone(definitionTimeZone)
+
+		return func() {
+			vars.SQLMode = originalSQLMode
+			vars.DivPrecisionIncrement = originalDivPrecisionIncrement
+			vars.TimeZone = originalTimeZone
+			vars.StmtCtx.SetTypeFlags(originalTypeFlags)
+			vars.StmtCtx.SetErrLevels(originalErrLevels)
+			if originalStmtTimeZone != nil {
+				vars.StmtCtx.SetTimeZone(originalStmtTimeZone)
+			} else {
+				vars.StmtCtx.SetTimeZone(vars.Location())
+			}
+		}
+	})
 	/* #nosec G202: selectSQL is restored from AST (single statement, no user-provided placeholders). */
-	_, resultFields, err := exec.ExecRestrictedSQL(kctx, nil, "SELECT * FROM ("+selectSQL+") AS `tidb_mv_query` LIMIT 0")
+	_, resultFields, err := exec.ExecRestrictedSQL(kctx, []sqlexec.OptionFuncAlias{setupDefinitionSession}, "SELECT * FROM ("+selectSQL+") AS `tidb_mv_query` LIMIT 0")
 	if err != nil {
 		return err
 	}
@@ -347,16 +379,17 @@ func (e *executor) CreateMaterializedView(ctx sessionctx.Context, s *ast.CreateM
 	}
 	tzName, tzOffset := ddlutil.GetTimeZone(ctx)
 	mvTableInfo.MaterializedView = &model.MaterializedViewInfo{
-		BaseTableIDs:       []int64{baseTableID},
-		InitBuildState:     model.MViewInitBuildBuilding,
-		SQLContent:         selectSQL,
-		RefreshMethod:      refreshMethod,
-		RefreshStartWith:   refreshStartWith,
-		RefreshNext:        refreshNext,
-		AlertWarningSec:    alertWarningSec,
-		AlertOverdueSec:    alertOverdueSec,
-		AlertRefreshFailed: alertRefreshFailed,
-		DefinitionSQLMode:  ctx.GetSessionVars().SQLMode,
+		BaseTableIDs:                    []int64{baseTableID},
+		InitBuildState:                  model.MViewInitBuildBuilding,
+		SQLContent:                      selectSQL,
+		RefreshMethod:                   refreshMethod,
+		RefreshStartWith:                refreshStartWith,
+		RefreshNext:                     refreshNext,
+		AlertWarningSec:                 alertWarningSec,
+		AlertOverdueSec:                 alertOverdueSec,
+		AlertRefreshFailed:              alertRefreshFailed,
+		DefinitionSQLMode:               ctx.GetSessionVars().SQLMode,
+		DefinitionDivPrecisionIncrement: ctx.GetSessionVars().DivPrecisionIncrement,
 		DefinitionTimeZone: model.TimeZoneLocation{
 			Name:   tzName,
 			Offset: tzOffset,
@@ -1546,6 +1579,9 @@ func validateCreateMaterializedViewQuery(
 	mlogColumns []pmodel.CIStr,
 	selectNode ast.ResultSetNode,
 ) (*mviewQueryAnalysis, error) {
+	if err := mviewutil.CheckMaterializedViewSelect(selectNode); err != nil {
+		return nil, err
+	}
 	sel, ok := selectNode.(*ast.SelectStmt)
 	if !ok {
 		return nil, dbterror.ErrGeneralUnsupportedDDL.GenWithStack("CREATE MATERIALIZED VIEW only supports SELECT statement")
