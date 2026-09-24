@@ -468,7 +468,7 @@ func (e *executor) DropMaterializedView(ctx sessionctx.Context, s *ast.DropMater
 	}
 
 	dropStmt := &ast.DropTableStmt{IfExists: s.IfExists, Tables: []*ast.TableName{{Schema: schemaName, Name: s.ViewName.Name}}}
-	return e.dropTableObject(ctx, dropStmt.Tables, dropStmt.IfExists, tableObject, true)
+	return e.dropTableObject(ctx, dropStmt.Tables, dropStmt.IfExists, materializedViewObject, true)
 }
 
 func (e *executor) DropMaterializedViewLog(ctx sessionctx.Context, s *ast.DropMaterializedViewLogStmt) error {
@@ -506,8 +506,8 @@ func (e *executor) DropMaterializedViewLog(ctx sessionctx.Context, s *ast.DropMa
 		return dbterror.ErrWrongObject.GenWithStackByArgs(schemaName.O, mlogName, "MATERIALIZED VIEW LOG")
 	}
 
-	// MV LOG cannot be dropped while any MV still depends on the base table.
-	if hasMaterializedViewDependsOnBaseTable(baseTable.Meta()) {
+	// MV LOG cannot be dropped while any MV still depends on it.
+	if hasMaterializedViewDependsOnMaterializedViewLog(mlogTable.Meta()) {
 		return errDropMaterializedViewLogDependent(schemaName.O, s.Table.Name.O)
 	}
 
@@ -516,7 +516,7 @@ func (e *executor) DropMaterializedViewLog(ctx sessionctx.Context, s *ast.DropMa
 	failpoint.Inject("pauseDropMaterializedViewLogAfterCheck", func() {})
 
 	dropStmt := &ast.DropTableStmt{IfExists: s.IfExists, Tables: []*ast.TableName{{Schema: schemaName, Name: mlogName}}}
-	return e.dropTableObject(ctx, dropStmt.Tables, dropStmt.IfExists, tableObject, true)
+	return e.dropTableObject(ctx, dropStmt.Tables, dropStmt.IfExists, materializedViewLogObject, true)
 }
 
 func appendDropMaterializedViewNotExistsNote(ctx sessionctx.Context, schemaName, tableName pmodel.CIStr) {
@@ -1913,6 +1913,32 @@ func analyzeStoredMaterializedViewQuery(
 
 func hasMaterializedViewDependsOnBaseTable(baseTableInfo *model.TableInfo) bool {
 	return baseTableInfo.MaterializedViewBase != nil && len(baseTableInfo.MaterializedViewBase.MViewIDs) > 0
+}
+
+func hasMaterializedViewDependsOnMaterializedViewLog(mlogTableInfo *model.TableInfo) bool {
+	return mlogTableInfo != nil && mlogTableInfo.MaterializedViewLog != nil && len(mlogTableInfo.MaterializedViewLog.DependentMViewIDs) > 0
+}
+
+func hasMaterializedViewID(ids []int64, mviewID int64) bool {
+	for _, id := range ids {
+		if id == mviewID {
+			return true
+		}
+	}
+	return false
+}
+
+func removeMaterializedViewID(ids []int64, mviewID int64) ([]int64, bool) {
+	removed := false
+	filtered := ids[:0]
+	for _, id := range ids {
+		if id == mviewID {
+			removed = true
+			continue
+		}
+		filtered = append(filtered, id)
+	}
+	return filtered, removed
 }
 
 func errDropMaterializedViewLogDependent(schemaName, baseTableName string) error {

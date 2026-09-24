@@ -857,6 +857,9 @@ type MaterializedViewLogInfo struct {
 	// BaseTableID is the table ID of the base table.
 	BaseTableID int64 `json:"base_table_id"`
 
+	// DependentMViewIDs lists materialized views that consume this log.
+	DependentMViewIDs []int64 `json:"dependent_mview_ids,omitempty"`
+
 	// Columns is the base table column list recorded in the log (user-specified columns).
 	Columns []model.CIStr `json:"columns"`
 
@@ -909,6 +912,7 @@ func (i *MaterializedViewLogInfo) Clone() *MaterializedViewLogInfo {
 		return nil
 	}
 	ni := *i
+	ni.DependentMViewIDs = append([]int64(nil), i.DependentMViewIDs...)
 	ni.Columns = append([]model.CIStr(nil), i.Columns...)
 	if i.LogAccumulationAlertRows != nil {
 		rows := *i.LogAccumulationAlertRows

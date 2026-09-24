@@ -89,7 +89,8 @@ func (b *Builder) ApplyDiff(m meta.Reader, diff *model.SchemaDiff) ([]int64, err
 		return applyDropResourceGroup(b, m, diff), nil
 	case model.ActionTruncateTablePartition, model.ActionTruncateTable:
 		return applyTruncateTableOrPartition(b, m, diff)
-	case model.ActionDropTable, model.ActionDropTablePartition:
+	case model.ActionDropTable, model.ActionDropTablePartition,
+		model.ActionDropMaterializedView, model.ActionDropMaterializedViewLog:
 		return applyDropTableOrPartition(b, m, diff)
 	case model.ActionRecoverTable:
 		return applyRecoverTable(b, m, diff)
@@ -154,6 +155,10 @@ func applyDropTableOrPartition(b *Builder, m meta.Reader, diff *model.SchemaDiff
 			continue
 		}
 
+		if diff.Type == model.ActionDropTable || diff.Type == model.ActionDropTablePartition {
+			b.deleteBundle(b.infoSchema, opt.OldTableID)
+			continue
+		}
 		// Otherwise, it indicates an extra table updated in the same DDL transaction.
 		// Drop-table diffs don't apply affected opts by default, so reload the table
 		// metadata explicitly.
@@ -406,7 +411,8 @@ func (b *Builder) getTableIDs(m meta.Reader, diff *model.SchemaDiff) (oldTableID
 		// Since the cluster-index feature also has similar problem, we chose to prevent DDL execution during the upgrade process to avoid this issue.
 		oldTableID = diff.OldTableID
 		newTableID = diff.TableID
-	case model.ActionDropTable, model.ActionDropView, model.ActionDropSequence:
+	case model.ActionDropTable, model.ActionDropView, model.ActionDropSequence,
+		model.ActionDropMaterializedView, model.ActionDropMaterializedViewLog:
 		oldTableID = diff.TableID
 
 		// Still keep the table in infoschema until when the state of table reaches StateNone. This is because
@@ -443,7 +449,7 @@ func (b *Builder) updateBundleForTableUpdate(diff *model.SchemaDiff, newTableID,
 		} else if tableIDIsValid(oldTableID) {
 			b.deleteBundle(b.infoSchema, oldTableID)
 		}
-	case model.ActionDropTable:
+	case model.ActionDropTable, model.ActionDropMaterializedView, model.ActionDropMaterializedViewLog:
 		b.deleteBundle(b.infoSchema, oldTableID)
 	case model.ActionTruncateTable:
 		b.deleteBundle(b.infoSchema, oldTableID)

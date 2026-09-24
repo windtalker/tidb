@@ -77,10 +77,16 @@ func (w *worker) onDropTableOrView(jobCtx *jobContext, job *model.Job) (ver int6
 	case model.StatePublic:
 		// public -> write only
 		if job.Type == model.ActionDropTable {
+			if err = checkTableMaterializedViewConstraints(nil, tblInfo, "DROP TABLE"); err != nil {
+				job.State = model.JobStateCancelled
+				return ver, errors.Trace(err)
+			}
 			err = checkDropTableHasForeignKeyReferredInOwner(jobCtx.infoCache, job, args)
 			if err != nil {
 				return ver, err
 			}
+		}
+		if job.Type == model.ActionDropTable || job.Type == model.ActionDropMaterializedViewLog {
 			err = checkDropMaterializedViewLogHasNoDependentMVs(jobCtx, job, tblInfo)
 			if err != nil {
 				return ver, err
@@ -129,7 +135,7 @@ func (w *worker) onDropTableOrView(jobCtx *jobContext, job *model.Job) (ver int6
 		}
 		if tblInfo.MaterializedView != nil {
 			if err = w.deleteCreateMaterializedViewRefreshInfo(jobCtx, job.TableID); err != nil {
-				return ver, errors.Trace(err)
+				return ver, newRollbackTxnError(errors.Trace(err))
 			}
 			if err = w.deleteCreateMaterializedViewRefreshAlert(jobCtx, job.TableID); err != nil {
 				logutil.DDLLogger().Warn(
@@ -143,7 +149,7 @@ func (w *worker) onDropTableOrView(jobCtx *jobContext, job *model.Job) (ver int6
 		}
 		if tblInfo.MaterializedViewLog != nil {
 			if err = w.deleteMaterializedViewLogPurgeInfo(jobCtx, job.TableID); err != nil {
-				return ver, errors.Trace(err)
+				return ver, newRollbackTxnError(errors.Trace(err))
 			}
 		}
 		if tblInfo.TiFlashReplica != nil {
@@ -1891,7 +1897,7 @@ func checkDropMaterializedViewLogHasNoDependentMVs(jobCtx *jobContext, job *mode
 		}
 		return errors.Trace(err)
 	}
-	if hasMaterializedViewDependsOnBaseTable(baseTblInfo) {
+	if hasMaterializedViewDependsOnMaterializedViewLog(droppingTable) {
 		job.State = model.JobStateCancelled
 		return errDropMaterializedViewLogDependent(job.SchemaName, baseTblInfo.Name.O)
 	}
@@ -1905,7 +1911,11 @@ func updateMaterializedViewBaseInfoOnDrop(jobCtx *jobContext, job *model.Job, dr
 	switch {
 	case droppingTable.MaterializedView != nil:
 		if len(droppingTable.MaterializedView.BaseTableIDs) == 0 {
-			return nil, errors.New("materialized view must reference at least one base table")
+			logutil.DDLLogger().Warn(
+				"materialized view has no base tables in metadata, skip dependency cleanup when dropping",
+				zap.Int64("mviewID", droppingTable.ID),
+			)
+			return nil, nil
 		}
 		baseTableIDs = droppingTable.MaterializedView.BaseTableIDs
 		apply = func(base *model.TableInfo) {
@@ -1949,12 +1959,46 @@ func updateMaterializedViewBaseInfoOnDrop(jobCtx *jobContext, job *model.Job, dr
 		processedBaseTables[baseTableID] = struct{}{}
 
 		baseTblInfo, err := jobCtx.metaMut.GetTable(job.SchemaID, baseTableID)
-		if err != nil || baseTblInfo == nil {
+		if err != nil {
+			return nil, errors.Trace(err)
+		}
+		if baseTblInfo == nil {
 			// The base table may already be dropped; keep dropping MV/MLOG table going.
 			continue
 		}
+		var mlogID int64
+		if droppingTable.MaterializedView != nil && baseTblInfo.MaterializedViewBase != nil {
+			mlogID = baseTblInfo.MaterializedViewBase.MLogID
+		}
 		apply(baseTblInfo)
 		extraInfos = append(extraInfos, schemaIDAndTableInfo{schemaID: job.SchemaID, tblInfo: baseTblInfo})
+		if mlogID == 0 {
+			continue
+		}
+		mlog, err := jobCtx.metaMut.GetTable(job.SchemaID, mlogID)
+		if err != nil {
+			return nil, errors.Trace(err)
+		}
+		if mlog == nil || mlog.MaterializedViewLog == nil {
+			logutil.DDLLogger().Error(
+				"drop materialized view: materialized view log is missing or invalid during dependency cleanup",
+				zap.Int64("mviewID", job.TableID), zap.Int64("baseTableID", baseTableID), zap.Int64("mlogID", mlogID),
+			)
+			continue
+		}
+		if mlog.MaterializedViewLog.BaseTableID != baseTableID {
+			logutil.DDLLogger().Error(
+				"drop materialized view: materialized view log belongs to a different base table during dependency cleanup",
+				zap.Int64("mviewID", job.TableID), zap.Int64("baseTableID", baseTableID), zap.Int64("mlogID", mlogID),
+				zap.Int64("mlogBaseTableID", mlog.MaterializedViewLog.BaseTableID),
+			)
+			continue
+		}
+		var removed bool
+		mlog.MaterializedViewLog.DependentMViewIDs, removed = removeMaterializedViewID(mlog.MaterializedViewLog.DependentMViewIDs, job.TableID)
+		if removed {
+			extraInfos = append(extraInfos, schemaIDAndTableInfo{schemaID: job.SchemaID, tblInfo: mlog})
+		}
 	}
 	return extraInfos, nil
 }
