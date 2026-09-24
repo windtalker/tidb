@@ -1627,7 +1627,7 @@ func TestCreateMaterializedViewRefreshInfoNextUnixSecondsDerivation(t *testing.T
 	tk.MustExec("drop materialized view log on t")
 }
 
-func TestCreateMaterializedViewRefreshInfoNextUnixSecondsUsesScheduleTimeZone(t *testing.T) {
+func TestCreateMaterializedViewRefreshInfoNextUnixSecondsUsesUTC(t *testing.T) {
 	store, dom := testkit.CreateMockStoreAndDomain(t)
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
@@ -1647,28 +1647,36 @@ func TestCreateMaterializedViewRefreshInfoNextUnixSecondsUsesScheduleTimeZone(t 
 	mvID := getMViewID("mv_schedule_next")
 
 	tk.MustQuery(fmt.Sprintf(
-		"select NEXT_REFRESH_UNIX_SECONDS = 1893549600, "+
-			"NEXT_REFRESH_UNIX_SECONDS = 1893578400 "+
+		"select NEXT_REFRESH_UNIX_SECONDS = 1893578400, "+
+			"NEXT_REFRESH_UNIX_SECONDS = 1893549600 "+
 			"from mysql.tidb_mview_refresh_info where MVIEW_ID = %d",
 		mvID,
 	)).Check(testkit.Rows("1 0"))
 
-	// START WITH and NEXT use the session timezone captured when the schedule is defined.
+	// START WITH and NEXT are evaluated in UTC.
 	tk.MustExec("create materialized view mv_schedule_start (a, s, cnt) refresh fast start with cast('2030-01-02 10:00:00' as datetime) next cast('2030-01-03 10:00:00' as datetime) as select a, sum(b), count(1) from t group by a")
 	mvStartID := getMViewID("mv_schedule_start")
 	tk.MustQuery(fmt.Sprintf(
-		"select NEXT_REFRESH_UNIX_SECONDS = 1893549600, "+
+		"select NEXT_REFRESH_UNIX_SECONDS = 1893578400, "+
 			"NEXT_REFRESH_UNIX_SECONDS = 1893636000 "+
 			"from mysql.tidb_mview_refresh_info where MVIEW_ID = %d",
 		mvStartID,
 	)).Check(testkit.Rows("1 0"))
 
+	tk.MustExec("set time_zone = 'America/Los_Angeles'")
+	tk.MustExec("create materialized view mv_dst_gap (a, s, cnt) refresh fast next cast('2021-03-14 02:30:00' as datetime) as select a, sum(b), count(1) from t group by a")
+	tk.MustQuery(fmt.Sprintf(
+		"select NEXT_REFRESH_UNIX_SECONDS = 1615689000 from mysql.tidb_mview_refresh_info where MVIEW_ID = %d",
+		getMViewID("mv_dst_gap"),
+	)).Check(testkit.Rows("1"))
+
 	tk.MustExec("drop materialized view mv_schedule_next")
 	tk.MustExec("drop materialized view mv_schedule_start")
+	tk.MustExec("drop materialized view mv_dst_gap")
 	tk.MustExec("drop materialized view log on t")
 }
 
-func TestAlterMaterializedViewRefreshScheduleTimeZone(t *testing.T) {
+func TestAlterMaterializedViewRefreshScheduleUTC(t *testing.T) {
 	store, dom := testkit.CreateMockStoreAndDomain(t)
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
@@ -1693,26 +1701,26 @@ func TestAlterMaterializedViewRefreshScheduleTimeZone(t *testing.T) {
 	}
 
 	initialInfo := getMViewInfo()
-	initialTimeZone := initialInfo.RefreshScheduleTimeZone
 	initialDefinitionSQLMode := initialInfo.DefinitionSQLMode
 	initialScheduleSQLMode := initialInfo.RefreshScheduleSQLMode
-	require.Equal(t, 0, initialTimeZone.Offset)
 
 	tk.MustExec("set time_zone = '+08:00'")
 	tk.MustExec("alter materialized view mv refresh")
 	info := getMViewInfo()
-	require.Equal(t, initialTimeZone.Name, info.RefreshScheduleTimeZone.Name)
-	require.Equal(t, initialTimeZone.Offset, info.RefreshScheduleTimeZone.Offset)
 	require.Equal(t, initialScheduleSQLMode, info.RefreshScheduleSQLMode)
 	require.Empty(t, info.RefreshNext)
 
 	tk.MustExec("set sql_mode = 'PIPES_AS_CONCAT'")
 	tk.MustExec("alter materialized view mv refresh next cast(date_add('2030-01-01', interval (1 || 2) day) as datetime)")
 	info = getMViewInfo()
-	require.Equal(t, 8*60*60, info.RefreshScheduleTimeZone.Offset)
 	require.Equal(t, initialDefinitionSQLMode, info.DefinitionSQLMode)
 	require.Equal(t, tk.Session().GetSessionVars().SQLMode, info.RefreshScheduleSQLMode)
-	tk.MustQuery("select NEXT_REFRESH_UNIX_SECONDS = UNIX_TIMESTAMP('2030-01-13 00:00:00') from mysql.tidb_mview_refresh_info where MVIEW_ID = " + strconv.FormatInt(getMViewID(), 10)).
+	tk.MustQuery("select NEXT_REFRESH_UNIX_SECONDS = TIMESTAMPDIFF(SECOND, '1970-01-01 00:00:00', '2030-01-13 00:00:00') from mysql.tidb_mview_refresh_info where MVIEW_ID = " + strconv.FormatInt(getMViewID(), 10)).
+		Check(testkit.Rows("1"))
+
+	tk.MustExec("set time_zone = 'America/Los_Angeles'")
+	tk.MustExec("alter materialized view mv refresh next cast('2021-03-14 02:30:00' as datetime)")
+	tk.MustQuery("select NEXT_REFRESH_UNIX_SECONDS = 1615689000 from mysql.tidb_mview_refresh_info where MVIEW_ID = " + strconv.FormatInt(getMViewID(), 10)).
 		Check(testkit.Rows("1"))
 }
 

@@ -4213,7 +4213,6 @@ func TestMaterializedScheduleRuntimeEvalUsesScheduleSQLMode(t *testing.T) {
 		"",
 		nextExpr,
 		allowInvalidDatesMode,
-		time.UTC,
 	)
 	require.NoError(t, err)
 	require.True(t, shouldUpdate)
@@ -4226,7 +4225,6 @@ func TestMaterializedScheduleRuntimeEvalUsesScheduleSQLMode(t *testing.T) {
 		"",
 		nextExpr,
 		strictMode,
-		time.UTC,
 	)
 	require.Error(t, err)
 	require.True(t, types.ErrWrongValue.Equal(err), "err %v", err)

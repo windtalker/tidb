@@ -817,9 +817,6 @@ type MaterializedViewInfo struct {
 
 	// DefinitionTimeZone is the timezone captured from CREATE MATERIALIZED VIEW session.
 	DefinitionTimeZone TimeZoneLocation `json:"definition_time_zone"`
-
-	// RefreshScheduleTimeZone is the timezone used to evaluate refresh schedule expressions.
-	RefreshScheduleTimeZone TimeZoneLocation `json:"refresh_schedule_time_zone"`
 }
 
 // Clone clones MaterializedViewInfo.
@@ -881,9 +878,6 @@ type MaterializedViewLogInfo struct {
 
 	// PurgeScheduleSQLMode is the SQL mode used to parse and evaluate purge schedule expressions.
 	PurgeScheduleSQLMode mysql.SQLMode `json:"purge_schedule_sql_mode"`
-
-	// PurgeScheduleTimeZone is the timezone used to evaluate purge schedule expressions.
-	PurgeScheduleTimeZone TimeZoneLocation `json:"purge_schedule_time_zone"`
 }
 
 const (

@@ -395,10 +395,6 @@ func (e *executor) CreateMaterializedView(ctx sessionctx.Context, s *ast.CreateM
 			Name:   tzName,
 			Offset: tzOffset,
 		},
-		RefreshScheduleTimeZone: model.TimeZoneLocation{
-			Name:   tzName,
-			Offset: tzOffset,
-		},
 	}
 
 	// CREATE MATERIALIZED VIEW is submitted as reorg DDL: create table first, then initial build in reorg phase.
@@ -832,13 +828,7 @@ func (e *executor) alterMaterializedViewLogPurge(
 	if err != nil {
 		return err
 	}
-	updatePurgeScheduleTimeZone := purge != nil && (purge.StartWith != nil || purge.Next != nil)
-	purgeScheduleTimeZone := ctx.GetSessionVars().Location()
-	purgeScheduleTimeZoneMeta := model.TimeZoneLocation{}
-	if updatePurgeScheduleTimeZone {
-		tzName, tzOffset := ddlutil.GetTimeZone(ctx)
-		purgeScheduleTimeZoneMeta = model.TimeZoneLocation{Name: tzName, Offset: tzOffset}
-	}
+	updatePurgeSchedule := purge != nil && (purge.StartWith != nil || purge.Next != nil)
 
 	job := &model.Job{
 		Version:        model.GetJobVerInUse(),
@@ -852,18 +842,17 @@ func (e *executor) alterMaterializedViewLogPurge(
 		SQLMode:        ctx.GetSessionVars().SQLMode,
 	}
 	args := &model.AlterMaterializedViewLogPurgeArgs{
-		PurgeMethod:                 purgeMethod,
-		PurgeStartWith:              purgeStartWith,
-		PurgeNext:                   purgeNext,
-		PurgeScheduleTimeZone:       purgeScheduleTimeZoneMeta,
-		UpdatePurgeScheduleTimeZone: updatePurgeScheduleTimeZone,
-		PurgeScheduleSQLMode:        ctx.GetSessionVars().SQLMode,
+		PurgeMethod:          purgeMethod,
+		PurgeStartWith:       purgeStartWith,
+		PurgeNext:            purgeNext,
+		UpdatePurgeSchedule:  updatePurgeSchedule,
+		PurgeScheduleSQLMode: ctx.GetSessionVars().SQLMode,
 	}
 	if err := e.doDDLJob2(ctx, job, args); err != nil {
 		return errors.Trace(err)
 	}
 
-	restoreEvalSession := setCreateMaterializedViewScheduleEvalSession(ctx, ctx.GetSessionVars().SQLMode, purgeScheduleTimeZone)
+	restoreEvalSession := setCreateMaterializedViewScheduleEvalSession(ctx, ctx.GetSessionVars().SQLMode)
 	defer restoreEvalSession()
 
 	kctx := kv.WithInternalSourceType(e.ctx, kv.InternalTxnDDL)
@@ -876,7 +865,6 @@ func (e *executor) alterMaterializedViewLogPurge(
 		purgeStartWith,
 		purgeNext,
 		ctx.GetSessionVars().SQLMode,
-		purgeScheduleTimeZone,
 		logAlterMaterializedViewLogPurgeNextUnixSecondsUpdateNull,
 	)
 	if err != nil {
@@ -900,13 +888,7 @@ func (e *executor) alterMaterializedViewRefresh(
 	if err != nil {
 		return err
 	}
-	updateRefreshScheduleTimeZone := refresh != nil && (refresh.StartWith != nil || refresh.Next != nil)
-	refreshScheduleTimeZone := ctx.GetSessionVars().Location()
-	refreshScheduleTimeZoneMeta := model.TimeZoneLocation{}
-	if updateRefreshScheduleTimeZone {
-		tzName, tzOffset := ddlutil.GetTimeZone(ctx)
-		refreshScheduleTimeZoneMeta = model.TimeZoneLocation{Name: tzName, Offset: tzOffset}
-	}
+	updateRefreshSchedule := refresh != nil && (refresh.StartWith != nil || refresh.Next != nil)
 
 	job := &model.Job{
 		Version:        model.GetJobVerInUse(),
@@ -920,18 +902,17 @@ func (e *executor) alterMaterializedViewRefresh(
 		SQLMode:        ctx.GetSessionVars().SQLMode,
 	}
 	args := &model.AlterMaterializedViewRefreshArgs{
-		RefreshMethod:                 refreshMethod,
-		RefreshStartWith:              refreshStartWith,
-		RefreshNext:                   refreshNext,
-		RefreshScheduleTimeZone:       refreshScheduleTimeZoneMeta,
-		UpdateRefreshScheduleTimeZone: updateRefreshScheduleTimeZone,
-		RefreshScheduleSQLMode:        ctx.GetSessionVars().SQLMode,
+		RefreshMethod:          refreshMethod,
+		RefreshStartWith:       refreshStartWith,
+		RefreshNext:            refreshNext,
+		UpdateRefreshSchedule:  updateRefreshSchedule,
+		RefreshScheduleSQLMode: ctx.GetSessionVars().SQLMode,
 	}
 	if err := e.doDDLJob2(ctx, job, args); err != nil {
 		return errors.Trace(err)
 	}
 
-	restoreEvalSession := setCreateMaterializedViewScheduleEvalSession(ctx, ctx.GetSessionVars().SQLMode, refreshScheduleTimeZone)
+	restoreEvalSession := setCreateMaterializedViewScheduleEvalSession(ctx, ctx.GetSessionVars().SQLMode)
 	defer restoreEvalSession()
 
 	kctx := kv.WithInternalSourceType(e.ctx, kv.InternalTxnDDL)
@@ -944,7 +925,6 @@ func (e *executor) alterMaterializedViewRefresh(
 		refreshStartWith,
 		refreshNext,
 		ctx.GetSessionVars().SQLMode,
-		refreshScheduleTimeZone,
 		logAlterMaterializedViewRefreshNextUnixSecondsUpdateNull,
 	)
 	if err != nil {

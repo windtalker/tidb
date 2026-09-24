@@ -1170,7 +1170,6 @@ func (e *executor) CreateMaterializedViewLog(ctx sessionctx.Context, s *ast.Crea
 	var purgeMethod string
 	var purgeStartWith string
 	var purgeNext string
-	tzName, tzOffset := ddlutil.GetTimeZone(ctx)
 	logAccumulationAlertRows, err := BuildMLogAccumulationAlertRows(s.AccumulationAlert)
 	if err != nil {
 		return err
@@ -1203,10 +1202,6 @@ func (e *executor) CreateMaterializedViewLog(ctx sessionctx.Context, s *ast.Crea
 		PurgeNext:                purgeNext,
 		LogAccumulationAlertRows: logAccumulationAlertRows,
 		PurgeScheduleSQLMode:     ctx.GetSessionVars().SQLMode,
-		PurgeScheduleTimeZone: model.TimeZoneLocation{
-			Name:   tzName,
-			Offset: tzOffset,
-		},
 	}
 
 	involvingSchemas := []model.InvolvingSchemaInfo{

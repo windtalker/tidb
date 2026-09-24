@@ -597,11 +597,11 @@ func TestGetModifyTableCommentArgs(t *testing.T) {
 
 func TestGetAlterMaterializedViewRefreshArgs(t *testing.T) {
 	inArgs := &AlterMaterializedViewRefreshArgs{
-		RefreshMethod:           "FAST",
-		RefreshStartWith:        "DATE_ADD(NOW(), INTERVAL 1 HOUR)",
-		RefreshNext:             "DATE_ADD(NOW(), INTERVAL 30 MINUTE)",
-		RefreshScheduleSQLMode:  mysql.ModePipesAsConcat,
-		RefreshScheduleTimeZone: TimeZoneLocation{Name: "UTC", Offset: 0},
+		RefreshMethod:          "FAST",
+		RefreshStartWith:       "DATE_ADD(NOW(), INTERVAL 1 HOUR)",
+		RefreshNext:            "DATE_ADD(NOW(), INTERVAL 30 MINUTE)",
+		RefreshScheduleSQLMode: mysql.ModePipesAsConcat,
+		UpdateRefreshSchedule:  true,
 	}
 
 	for _, v := range []JobVersion{JobVersion1, JobVersion2} {
@@ -647,11 +647,11 @@ func TestGetAlterMaterializedViewAttributesArgs(t *testing.T) {
 
 func TestGetAlterMaterializedViewLogPurgeArgs(t *testing.T) {
 	inArgs := &AlterMaterializedViewLogPurgeArgs{
-		PurgeMethod:           "DEFERRED",
-		PurgeStartWith:        "DATE_ADD(NOW(), INTERVAL 1 HOUR)",
-		PurgeNext:             "DATE_ADD(NOW(), INTERVAL 30 MINUTE)",
-		PurgeScheduleSQLMode:  mysql.ModeNoBackslashEscapes,
-		PurgeScheduleTimeZone: TimeZoneLocation{Name: "UTC", Offset: 0},
+		PurgeMethod:          "DEFERRED",
+		PurgeStartWith:       "DATE_ADD(NOW(), INTERVAL 1 HOUR)",
+		PurgeNext:            "DATE_ADD(NOW(), INTERVAL 30 MINUTE)",
+		PurgeScheduleSQLMode: mysql.ModeNoBackslashEscapes,
+		UpdatePurgeSchedule:  true,
 	}
 
 	for _, v := range []JobVersion{JobVersion1, JobVersion2} {

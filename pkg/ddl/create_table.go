@@ -990,11 +990,7 @@ func (w *worker) upsertCreateMaterializedViewRefreshInfo(jobCtx *jobContext, mvi
 	}
 	defer w.sessPool.Put(evalSessCtx)
 	evalSess := sess.NewSession(evalSessCtx)
-	scheduleTimeZone, err := mviewTableInfo.MaterializedView.RefreshScheduleTimeZone.GetLocation()
-	if err != nil {
-		return errors.Trace(err)
-	}
-	restoreEvalSession := setCreateMaterializedViewScheduleEvalSession(evalSessCtx, mviewTableInfo.MaterializedView.RefreshScheduleSQLMode, scheduleTimeZone)
+	restoreEvalSession := setCreateMaterializedViewScheduleEvalSession(evalSessCtx, mviewTableInfo.MaterializedView.RefreshScheduleSQLMode)
 	defer restoreEvalSession()
 
 	nextRefreshUnixSeconds, shouldUpdateNextRefreshUnixSeconds, err := deriveCreateMaterializedViewNextUnixSeconds(ctx, evalSess, mviewSchemaName, mviewTableInfo.Name.O, mviewTableInfo.MaterializedView)
@@ -1021,11 +1017,7 @@ func (w *worker) upsertCreateMaterializedViewLogPurgeInfo(jobCtx *jobContext, ml
 	defer w.sessPool.Put(evalSessCtx)
 	evalSess := sess.NewSession(evalSessCtx)
 	evalSQLMode := mlogTableInfo.MaterializedViewLog.PurgeScheduleSQLMode
-	scheduleTimeZone, err := mlogTableInfo.MaterializedViewLog.PurgeScheduleTimeZone.GetLocation()
-	if err != nil {
-		return errors.Trace(err)
-	}
-	restoreEvalSession := setCreateMaterializedViewScheduleEvalSession(evalSessCtx, evalSQLMode, scheduleTimeZone)
+	restoreEvalSession := setCreateMaterializedViewScheduleEvalSession(evalSessCtx, evalSQLMode)
 	defer restoreEvalSession()
 
 	nextPurgeUnixSeconds, shouldUpdateNextPurgeUnixSeconds, err := deriveCreateMaterializedViewLogNextUnixSeconds(ctx, evalSess, mlogSchemaName, mlogTableInfo.Name.O, mlogTableInfo.MaterializedViewLog)
@@ -1160,7 +1152,7 @@ func (w *worker) deleteCreateMaterializedViewRefreshAlerts(jobCtx *jobContext, m
 // Rules:
 //  1. If both START WITH and NEXT are absent, the persisted schedule is updated to NULL.
 //  2. Otherwise expressions are evaluated in the prepared eval session
-//     (schedule timezone + job SQL mode).
+//     (UTC + job SQL mode).
 //  3. START WITH has higher priority unless it is "near now" (START WITH < now + 10s) and NEXT exists.
 //  4. If the chosen expression evaluates to NULL, the persisted schedule is updated to NULL.
 func deriveCreateMaterializedViewNextUnixSeconds(
@@ -1173,10 +1165,6 @@ func deriveCreateMaterializedViewNextUnixSeconds(
 	if mviewInfo == nil {
 		return nil, false, nil
 	}
-	scheduleTimeZone, err := mviewInfo.RefreshScheduleTimeZone.GetLocation()
-	if err != nil {
-		return nil, false, errors.Trace(err)
-	}
 	return deriveCreateMaterializedScheduleNextUnixSeconds(
 		ctx,
 		ddlSess,
@@ -1185,7 +1173,6 @@ func deriveCreateMaterializedViewNextUnixSeconds(
 		mviewInfo.RefreshStartWith,
 		mviewInfo.RefreshNext,
 		mviewInfo.RefreshScheduleSQLMode,
-		scheduleTimeZone,
 		logCreateMaterializedViewNextUnixSecondsUpdateNull,
 	)
 }
@@ -1196,7 +1183,7 @@ func deriveCreateMaterializedViewNextUnixSeconds(
 // Rules:
 //  1. If both START WITH and NEXT are absent, the persisted schedule is updated to NULL.
 //  2. Otherwise expressions are evaluated in the prepared eval session
-//     (schedule timezone + job SQL mode).
+//     (UTC + job SQL mode).
 //  3. START WITH has higher priority unless it is "near now" (START WITH < now + 10s) and NEXT exists.
 //  4. If the chosen expression evaluates to NULL, the persisted schedule is updated to NULL.
 func deriveCreateMaterializedViewLogNextUnixSeconds(
@@ -1209,10 +1196,6 @@ func deriveCreateMaterializedViewLogNextUnixSeconds(
 	if mlogInfo == nil {
 		return nil, false, nil
 	}
-	scheduleTimeZone, err := mlogInfo.PurgeScheduleTimeZone.GetLocation()
-	if err != nil {
-		return nil, false, errors.Trace(err)
-	}
 	return deriveCreateMaterializedScheduleNextUnixSeconds(
 		ctx,
 		ddlSess,
@@ -1221,7 +1204,6 @@ func deriveCreateMaterializedViewLogNextUnixSeconds(
 		mlogInfo.PurgeStartWith,
 		mlogInfo.PurgeNext,
 		mlogInfo.PurgeScheduleSQLMode,
-		scheduleTimeZone,
 		logCreateMaterializedViewLogNextUnixSecondsUpdateNull,
 	)
 }
@@ -1234,7 +1216,6 @@ func deriveCreateMaterializedScheduleNextUnixSeconds(
 	startExpr string,
 	nextExpr string,
 	scheduleSQLMode mysql.SQLMode,
-	scheduleTimeZone *time.Location,
 	logNullUpdate func(schemaName string, tableName string, nullExprClause string, startExpr string, nextExpr string),
 ) (*int64, bool, error) {
 	startExpr = strings.TrimSpace(startExpr)
@@ -1270,12 +1251,12 @@ func deriveCreateMaterializedScheduleNextUnixSeconds(
 			return nil, true, nil
 		}
 		if nextExpr == "" {
-			nextUnixSeconds, err := expression.MaterializedScheduleTimeToUnixSeconds(startAt, scheduleTimeZone)
+			nextUnixSeconds, err := expression.MaterializedScheduleTimeToUnixSeconds(startAt)
 			return nextUnixSeconds, true, errors.Trace(err)
 		}
 
-		// Compare the schedule and current time in the same schedule timezone.
-		goNow, err := nowTime.GoTime(scheduleTimeZone)
+		// Compare the schedule and current time in UTC.
+		goNow, err := nowTime.GoTime(time.UTC)
 		if err != nil {
 			return nil, true, errors.Trace(err)
 		}
@@ -1289,10 +1270,10 @@ func deriveCreateMaterializedScheduleNextUnixSeconds(
 				logNullUpdate(schemaName, tableName, "NEXT", startExpr, nextExpr)
 				return nil, true, nil
 			}
-			nextUnixSeconds, err := expression.MaterializedScheduleTimeToUnixSeconds(nextAt, scheduleTimeZone)
+			nextUnixSeconds, err := expression.MaterializedScheduleTimeToUnixSeconds(nextAt)
 			return nextUnixSeconds, true, errors.Trace(err)
 		}
-		nextUnixSeconds, err := expression.MaterializedScheduleTimeToUnixSeconds(startAt, scheduleTimeZone)
+		nextUnixSeconds, err := expression.MaterializedScheduleTimeToUnixSeconds(startAt)
 		return nextUnixSeconds, true, errors.Trace(err)
 	}
 
@@ -1306,7 +1287,7 @@ func deriveCreateMaterializedScheduleNextUnixSeconds(
 			logNullUpdate(schemaName, tableName, "NEXT", startExpr, nextExpr)
 			return nil, true, nil
 		}
-		nextUnixSeconds, err := expression.MaterializedScheduleTimeToUnixSeconds(nextAt, scheduleTimeZone)
+		nextUnixSeconds, err := expression.MaterializedScheduleTimeToUnixSeconds(nextAt)
 		return nextUnixSeconds, true, errors.Trace(err)
 	}
 	return nil, false, nil
@@ -1371,7 +1352,6 @@ func logCreateMaterializedViewLogNextUnixSecondsUpdateNull(
 func setCreateMaterializedViewScheduleEvalSession(
 	sctx sessionctx.Context,
 	sqlMode mysql.SQLMode,
-	scheduleTimeZone *time.Location,
 ) func() {
 	sessVars := sctx.GetSessionVars()
 	originalSQLMode := sessVars.SQLMode
@@ -1391,8 +1371,8 @@ func setCreateMaterializedViewScheduleEvalSession(
 	sessVars.StmtCtx.SetTypeFlags(expression.MaterializedScheduleTypeFlagsWithSQLMode(sqlMode))
 	sessVars.StmtCtx.SetErrLevels(expression.MaterializedScheduleErrLevelsWithSQLMode(sqlMode))
 
-	sessVars.TimeZone = scheduleTimeZone
-	sessVars.StmtCtx.SetTimeZone(scheduleTimeZone)
+	sessVars.TimeZone = time.UTC
+	sessVars.StmtCtx.SetTimeZone(time.UTC)
 
 	return func() {
 		sessVars.SQLMode = originalSQLMode

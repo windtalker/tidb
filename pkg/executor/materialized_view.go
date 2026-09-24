@@ -2741,10 +2741,6 @@ func (e *PurgeMaterializedViewLogExec) executePurgeMaterializedViewLog(
 		}
 	}
 
-	purgeScheduleTimeZone, err := mlogInfo.PurgeScheduleTimeZone.GetLocation()
-	if err != nil {
-		return finalizeFailure(err)
-	}
 	nextPurgeUnixSeconds, shouldUpdateNextPurgeUnixSeconds, err := deriveRuntimeMaterializedScheduleNextUnixSeconds(
 		kctx,
 		scheduleEvalSctx,
@@ -2752,7 +2748,6 @@ func (e *PurgeMaterializedViewLogExec) executePurgeMaterializedViewLog(
 		mlogInfo.PurgeNext,
 		isInternalSQL,
 		mlogInfo.PurgeScheduleSQLMode,
-		purgeScheduleTimeZone,
 		func() {
 			logRuntimeMaterializedViewLogPurgeNextUnixSecondsUpdateNull(schemaName.O, mlogName.O, mlogInfo.PurgeNext)
 		},
@@ -3195,10 +3190,6 @@ func deriveMLogPurgeThrottleDeadline(
 		adaptiveDeadline = &plannedDeadline
 	}
 	if isInternalSQL {
-		purgeScheduleTimeZone, err := mlogInfo.PurgeScheduleTimeZone.GetLocation()
-		if err != nil {
-			return nil, err
-		}
 		nextPurgeUnixSeconds, shouldUpdateNextPurgeUnixSeconds, err := deriveRuntimeMaterializedScheduleNextUnixSeconds(
 			kctx,
 			evalSctx,
@@ -3206,7 +3197,6 @@ func deriveMLogPurgeThrottleDeadline(
 			mlogInfo.PurgeNext,
 			true,
 			mlogInfo.PurgeScheduleSQLMode,
-			purgeScheduleTimeZone,
 			func() {
 				logRuntimeMaterializedViewLogPurgeNextUnixSecondsUpdateNull(schemaName, mlogName, mlogInfo.PurgeNext)
 			},
@@ -4622,10 +4612,6 @@ func (e *RefreshMaterializedViewExec) executeRefreshMaterializedView(kctx contex
 		refreshRows = collectFastRefreshMLogScanRows(sessVars)
 	}
 
-	refreshScheduleTimeZone, err := tblInfo.MaterializedView.RefreshScheduleTimeZone.GetLocation()
-	if err != nil {
-		return finalizeFailure(err)
-	}
 	nextRefreshUnixSeconds, shouldUpdateNextRefreshUnixSeconds, err := deriveRuntimeMaterializedScheduleNextUnixSeconds(
 		kctx,
 		scheduleEvalSctx,
@@ -4633,7 +4619,6 @@ func (e *RefreshMaterializedViewExec) executeRefreshMaterializedView(kctx contex
 		tblInfo.MaterializedView.RefreshNext,
 		isInternalSQL,
 		tblInfo.MaterializedView.RefreshScheduleSQLMode,
-		refreshScheduleTimeZone,
 		func() {
 			logRuntimeMaterializedViewRefreshNextUnixSecondsUpdateNull(schemaName.O, tblInfo.Name.O, tblInfo.MaterializedView.RefreshNext)
 		},
@@ -4873,10 +4858,6 @@ func (e *RefreshMaterializedViewExec) executeRefreshMaterializedViewCompleteOutO
 				return scheduleErr
 			}
 			defer e.ReleaseSysSession(releaseCtx, scheduleEvalSctx)
-			refreshScheduleTimeZone, scheduleErr := tblInfo.MaterializedView.RefreshScheduleTimeZone.GetLocation()
-			if scheduleErr != nil {
-				return scheduleErr
-			}
 			nextRefreshUnixSeconds, shouldUpdateNextRefreshUnixSeconds, scheduleErr = deriveRuntimeMaterializedScheduleNextUnixSeconds(
 				kctx,
 				scheduleEvalSctx,
@@ -4884,7 +4865,6 @@ func (e *RefreshMaterializedViewExec) executeRefreshMaterializedViewCompleteOutO
 				tblInfo.MaterializedView.RefreshNext,
 				isInternalSQL,
 				tblInfo.MaterializedView.RefreshScheduleSQLMode,
-				refreshScheduleTimeZone,
 				func() {
 					logRuntimeMaterializedViewRefreshNextUnixSecondsUpdateNull(schemaName.O, tblInfo.Name.O, tblInfo.MaterializedView.RefreshNext)
 				},
@@ -6035,7 +6015,6 @@ func deriveRuntimeMaterializedScheduleNextUnixSeconds(
 	nextExpr string,
 	isInternalSQL bool,
 	scheduleSQLMode mysql.SQLMode,
-	scheduleTimeZone *time.Location,
 	logNullUpdate func(),
 ) (*int64, bool, error) {
 	if !isInternalSQL {
@@ -6047,7 +6026,6 @@ func deriveRuntimeMaterializedScheduleNextUnixSeconds(
 		startExpr,
 		nextExpr,
 		scheduleSQLMode,
-		scheduleTimeZone,
 	)
 	if err != nil {
 		return nil, false, err
@@ -6058,7 +6036,7 @@ func deriveRuntimeMaterializedScheduleNextUnixSeconds(
 	if nextAt == nil {
 		return nil, shouldUpdate, nil
 	}
-	nextUnixSeconds, err := expression.MaterializedScheduleTimeToUnixSeconds(nextAt, scheduleTimeZone)
+	nextUnixSeconds, err := expression.MaterializedScheduleTimeToUnixSeconds(nextAt)
 	return nextUnixSeconds, shouldUpdate, errors.Trace(err)
 }
 
