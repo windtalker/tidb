@@ -1026,7 +1026,7 @@ func deriveMVRefreshManualCancelNextTime(
 		sctx,
 		mviewMeta.MaterializedView.RefreshStartWith,
 		mviewMeta.MaterializedView.RefreshNext,
-		mviewMeta.MaterializedView.DefinitionSQLMode,
+		mviewMeta.MaterializedView.RefreshScheduleSQLMode,
 		scheduleTimeZone,
 	)
 	if err != nil {
@@ -1065,7 +1065,7 @@ func deriveMLogPurgeManualCancelNextTime(
 		sctx,
 		mlogMeta.MaterializedViewLog.PurgeStartWith,
 		mlogMeta.MaterializedViewLog.PurgeNext,
-		mlogMeta.MaterializedViewLog.DefinitionSQLMode,
+		mlogMeta.MaterializedViewLog.PurgeScheduleSQLMode,
 		scheduleTimeZone,
 	)
 	if err != nil {

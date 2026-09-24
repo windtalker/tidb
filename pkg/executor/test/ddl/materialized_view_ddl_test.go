@@ -222,6 +222,7 @@ func TestMaterializedViewDDLBasic(t *testing.T) {
 	require.False(t, mvTable.Meta().MaterializedView.AlertRefreshFailed)
 	expectedTZName, expectedTZOffset := ddlutil.GetTimeZone(tk.Session())
 	require.Equal(t, tk.Session().GetSessionVars().SQLMode, mvTable.Meta().MaterializedView.DefinitionSQLMode)
+	require.Equal(t, tk.Session().GetSessionVars().SQLMode, mvTable.Meta().MaterializedView.RefreshScheduleSQLMode)
 	require.Equal(t, expectedTZName, mvTable.Meta().MaterializedView.DefinitionTimeZone.Name)
 	require.Equal(t, expectedTZOffset, mvTable.Meta().MaterializedView.DefinitionTimeZone.Offset)
 	tk.MustQuery(fmt.Sprintf("select LAST_SUCCESS_READ_TSO > 0 from mysql.tidb_mview_refresh_info where MVIEW_ID = %d", mvTable.Meta().ID)).
@@ -1691,7 +1692,10 @@ func TestAlterMaterializedViewRefreshScheduleTimeZone(t *testing.T) {
 		return mvTable.Meta().MaterializedView
 	}
 
-	initialTimeZone := getMViewInfo().RefreshScheduleTimeZone
+	initialInfo := getMViewInfo()
+	initialTimeZone := initialInfo.RefreshScheduleTimeZone
+	initialDefinitionSQLMode := initialInfo.DefinitionSQLMode
+	initialScheduleSQLMode := initialInfo.RefreshScheduleSQLMode
 	require.Equal(t, 0, initialTimeZone.Offset)
 
 	tk.MustExec("set time_zone = '+08:00'")
@@ -1699,12 +1703,16 @@ func TestAlterMaterializedViewRefreshScheduleTimeZone(t *testing.T) {
 	info := getMViewInfo()
 	require.Equal(t, initialTimeZone.Name, info.RefreshScheduleTimeZone.Name)
 	require.Equal(t, initialTimeZone.Offset, info.RefreshScheduleTimeZone.Offset)
+	require.Equal(t, initialScheduleSQLMode, info.RefreshScheduleSQLMode)
 	require.Empty(t, info.RefreshNext)
 
-	tk.MustExec("alter materialized view mv refresh next cast('2030-01-02 10:00:00' as datetime)")
+	tk.MustExec("set sql_mode = 'PIPES_AS_CONCAT'")
+	tk.MustExec("alter materialized view mv refresh next cast(date_add('2030-01-01', interval (1 || 2) day) as datetime)")
 	info = getMViewInfo()
 	require.Equal(t, 8*60*60, info.RefreshScheduleTimeZone.Offset)
-	tk.MustQuery("select NEXT_REFRESH_UNIX_SECONDS = 1893549600 from mysql.tidb_mview_refresh_info where MVIEW_ID = " + strconv.FormatInt(getMViewID(), 10)).
+	require.Equal(t, initialDefinitionSQLMode, info.DefinitionSQLMode)
+	require.Equal(t, tk.Session().GetSessionVars().SQLMode, info.RefreshScheduleSQLMode)
+	tk.MustQuery("select NEXT_REFRESH_UNIX_SECONDS = UNIX_TIMESTAMP('2030-01-13 00:00:00') from mysql.tidb_mview_refresh_info where MVIEW_ID = " + strconv.FormatInt(getMViewID(), 10)).
 		Check(testkit.Rows("1"))
 }
 

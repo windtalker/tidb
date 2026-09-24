@@ -559,7 +559,7 @@ func (w *worker) onCreateMaterializedView(jobCtx *jobContext, job *model.Job) (v
 			return ver, dbterror.ErrInvalidDDLJob.GenWithStackByArgs("create materialized view: invalid build read tso")
 		}
 
-		if err = w.upsertCreateMaterializedViewRefreshInfo(jobCtx, job.SchemaName, mviewTableInfo, job.SnapshotVer, job.SQLMode); err != nil {
+		if err = w.upsertCreateMaterializedViewRefreshInfo(jobCtx, job.SchemaName, mviewTableInfo, job.SnapshotVer); err != nil {
 			job.State = model.JobStateRollingback
 			return ver, errors.Trace(err)
 		}
@@ -975,7 +975,7 @@ func (w *worker) prewriteCreateMaterializedViewRefreshInfo(jobCtx *jobContext, m
 	return nil
 }
 
-func (w *worker) upsertCreateMaterializedViewRefreshInfo(jobCtx *jobContext, mviewSchemaName string, mviewTableInfo *model.TableInfo, readTS uint64, sqlMode mysql.SQLMode) error {
+func (w *worker) upsertCreateMaterializedViewRefreshInfo(jobCtx *jobContext, mviewSchemaName string, mviewTableInfo *model.TableInfo, readTS uint64) error {
 	if mviewTableInfo == nil || mviewTableInfo.MaterializedView == nil {
 		return dbterror.ErrInvalidDDLJob.GenWithStackByArgs("create materialized view: invalid materialized view metadata")
 	}
@@ -994,7 +994,7 @@ func (w *worker) upsertCreateMaterializedViewRefreshInfo(jobCtx *jobContext, mvi
 	if err != nil {
 		return errors.Trace(err)
 	}
-	restoreEvalSession := setCreateMaterializedViewScheduleEvalSession(evalSessCtx, sqlMode, scheduleTimeZone)
+	restoreEvalSession := setCreateMaterializedViewScheduleEvalSession(evalSessCtx, mviewTableInfo.MaterializedView.RefreshScheduleSQLMode, scheduleTimeZone)
 	defer restoreEvalSession()
 
 	nextRefreshUnixSeconds, shouldUpdateNextRefreshUnixSeconds, err := deriveCreateMaterializedViewNextUnixSeconds(ctx, evalSess, mviewSchemaName, mviewTableInfo.Name.O, mviewTableInfo.MaterializedView)
@@ -1020,7 +1020,7 @@ func (w *worker) upsertCreateMaterializedViewLogPurgeInfo(jobCtx *jobContext, ml
 	}
 	defer w.sessPool.Put(evalSessCtx)
 	evalSess := sess.NewSession(evalSessCtx)
-	evalSQLMode := mlogTableInfo.MaterializedViewLog.DefinitionSQLMode
+	evalSQLMode := mlogTableInfo.MaterializedViewLog.PurgeScheduleSQLMode
 	scheduleTimeZone, err := mlogTableInfo.MaterializedViewLog.PurgeScheduleTimeZone.GetLocation()
 	if err != nil {
 		return errors.Trace(err)
@@ -1184,6 +1184,7 @@ func deriveCreateMaterializedViewNextUnixSeconds(
 		mvTableName,
 		mviewInfo.RefreshStartWith,
 		mviewInfo.RefreshNext,
+		mviewInfo.RefreshScheduleSQLMode,
 		scheduleTimeZone,
 		logCreateMaterializedViewNextUnixSecondsUpdateNull,
 	)
@@ -1219,6 +1220,7 @@ func deriveCreateMaterializedViewLogNextUnixSeconds(
 		mlogTableName,
 		mlogInfo.PurgeStartWith,
 		mlogInfo.PurgeNext,
+		mlogInfo.PurgeScheduleSQLMode,
 		scheduleTimeZone,
 		logCreateMaterializedViewLogNextUnixSecondsUpdateNull,
 	)
@@ -1231,6 +1233,7 @@ func deriveCreateMaterializedScheduleNextUnixSeconds(
 	tableName string,
 	startExpr string,
 	nextExpr string,
+	scheduleSQLMode mysql.SQLMode,
 	scheduleTimeZone *time.Location,
 	logNullUpdate func(schemaName string, tableName string, nullExprClause string, startExpr string, nextExpr string),
 ) (*int64, bool, error) {
@@ -1246,7 +1249,7 @@ func deriveCreateMaterializedScheduleNextUnixSeconds(
 	}
 
 	evalExprToDatetime := func(exprSQL string) (*types.Time, error) {
-		t, err := evalCreateMaterializedViewScheduleExprToDatetime(ddlSess, exprSQL)
+		t, err := evalCreateMaterializedViewScheduleExprToDatetime(ddlSess, exprSQL, scheduleSQLMode)
 		if err != nil {
 			return nil, err
 		}
@@ -1372,6 +1375,7 @@ func setCreateMaterializedViewScheduleEvalSession(
 ) func() {
 	sessVars := sctx.GetSessionVars()
 	originalSQLMode := sessVars.SQLMode
+	originalNoBackslashEscaped := sessVars.HasStatusFlag(mysql.ServerStatusNoBackslashEscaped)
 	originalTypeFlags := sessVars.StmtCtx.TypeFlags()
 	originalErrLevels := sessVars.StmtCtx.ErrLevels()
 
@@ -1383,6 +1387,7 @@ func setCreateMaterializedViewScheduleEvalSession(
 	originalStmtTZ := sessVars.StmtCtx.TimeZone()
 
 	sessVars.SQLMode = sqlMode
+	sessVars.SetStatusFlag(mysql.ServerStatusNoBackslashEscaped, sqlMode.HasNoBackslashEscapesMode())
 	sessVars.StmtCtx.SetTypeFlags(expression.MaterializedScheduleTypeFlagsWithSQLMode(sqlMode))
 	sessVars.StmtCtx.SetErrLevels(expression.MaterializedScheduleErrLevelsWithSQLMode(sqlMode))
 
@@ -1391,6 +1396,7 @@ func setCreateMaterializedViewScheduleEvalSession(
 
 	return func() {
 		sessVars.SQLMode = originalSQLMode
+		sessVars.SetStatusFlag(mysql.ServerStatusNoBackslashEscaped, originalNoBackslashEscaped)
 		sessVars.StmtCtx.SetErrLevels(originalErrLevels)
 		sessVars.StmtCtx.SetTypeFlags(originalTypeFlags)
 
@@ -1417,8 +1423,8 @@ func loadCreateMaterializedViewScheduleNow(
 	return rows[0].GetTime(0), nil
 }
 
-func evalCreateMaterializedViewScheduleExprToDatetime(ddlSess *sess.Session, exprSQL string) (*types.Time, error) {
-	exprNode, err := generatedexpr.ParseExpression(exprSQL)
+func evalCreateMaterializedViewScheduleExprToDatetime(ddlSess *sess.Session, exprSQL string, scheduleSQLMode mysql.SQLMode) (*types.Time, error) {
+	exprNode, err := generatedexpr.ParseExpressionWithSQLMode(exprSQL, scheduleSQLMode)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}

@@ -331,7 +331,7 @@ func evalMaterializedScheduleExprToDatetime(
 		sessVars.StmtCtx.SetTimeZone(sessVars.Location())
 	}()
 
-	exprNode, err := generatedexpr.ParseExpression(exprSQL)
+	exprNode, err := generatedexpr.ParseExpressionWithSQLMode(exprSQL, scheduleSQLMode)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}

@@ -369,7 +369,7 @@ func (d *SchemaTracker) CreateMaterializedViewLog(ctx sessionctx.Context, s *ast
 		PurgeStartWith:           purgeStartWith,
 		PurgeNext:                purgeNext,
 		LogAccumulationAlertRows: logAccumulationAlertRows,
-		DefinitionSQLMode:        ctx.GetSessionVars().SQLMode,
+		PurgeScheduleSQLMode:     ctx.GetSessionVars().SQLMode,
 		PurgeScheduleTimeZone: model.TimeZoneLocation{
 			Name:   tzName,
 			Offset: tzOffset,

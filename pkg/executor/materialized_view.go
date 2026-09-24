@@ -2751,7 +2751,7 @@ func (e *PurgeMaterializedViewLogExec) executePurgeMaterializedViewLog(
 		mlogInfo.PurgeStartWith,
 		mlogInfo.PurgeNext,
 		isInternalSQL,
-		mlogInfo.DefinitionSQLMode,
+		mlogInfo.PurgeScheduleSQLMode,
 		purgeScheduleTimeZone,
 		func() {
 			logRuntimeMaterializedViewLogPurgeNextUnixSecondsUpdateNull(schemaName.O, mlogName.O, mlogInfo.PurgeNext)
@@ -3205,7 +3205,7 @@ func deriveMLogPurgeThrottleDeadline(
 			mlogInfo.PurgeStartWith,
 			mlogInfo.PurgeNext,
 			true,
-			mlogInfo.DefinitionSQLMode,
+			mlogInfo.PurgeScheduleSQLMode,
 			purgeScheduleTimeZone,
 			func() {
 				logRuntimeMaterializedViewLogPurgeNextUnixSecondsUpdateNull(schemaName, mlogName, mlogInfo.PurgeNext)
@@ -4632,7 +4632,7 @@ func (e *RefreshMaterializedViewExec) executeRefreshMaterializedView(kctx contex
 		tblInfo.MaterializedView.RefreshStartWith,
 		tblInfo.MaterializedView.RefreshNext,
 		isInternalSQL,
-		tblInfo.MaterializedView.DefinitionSQLMode,
+		tblInfo.MaterializedView.RefreshScheduleSQLMode,
 		refreshScheduleTimeZone,
 		func() {
 			logRuntimeMaterializedViewRefreshNextUnixSecondsUpdateNull(schemaName.O, tblInfo.Name.O, tblInfo.MaterializedView.RefreshNext)
@@ -4883,7 +4883,7 @@ func (e *RefreshMaterializedViewExec) executeRefreshMaterializedViewCompleteOutO
 				tblInfo.MaterializedView.RefreshStartWith,
 				tblInfo.MaterializedView.RefreshNext,
 				isInternalSQL,
-				tblInfo.MaterializedView.DefinitionSQLMode,
+				tblInfo.MaterializedView.RefreshScheduleSQLMode,
 				refreshScheduleTimeZone,
 				func() {
 					logRuntimeMaterializedViewRefreshNextUnixSecondsUpdateNull(schemaName.O, tblInfo.Name.O, tblInfo.MaterializedView.RefreshNext)

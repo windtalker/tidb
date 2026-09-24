@@ -731,6 +731,7 @@ type AlterMaterializedViewRefreshArgs struct {
 	RefreshNext                   string           `json:"refresh_next,omitempty"`
 	RefreshScheduleTimeZone       TimeZoneLocation `json:"refresh_schedule_time_zone,omitempty"`
 	UpdateRefreshScheduleTimeZone bool             `json:"update_refresh_schedule_time_zone,omitempty"`
+	RefreshScheduleSQLMode        mysql.SQLMode    `json:"refresh_schedule_sql_mode,omitempty"`
 }
 
 func (a *AlterMaterializedViewRefreshArgs) getArgsV1(*Job) []any {
@@ -740,6 +741,7 @@ func (a *AlterMaterializedViewRefreshArgs) getArgsV1(*Job) []any {
 		a.RefreshNext,
 		a.RefreshScheduleTimeZone,
 		a.UpdateRefreshScheduleTimeZone,
+		a.RefreshScheduleSQLMode,
 	}
 }
 
@@ -750,6 +752,7 @@ func (a *AlterMaterializedViewRefreshArgs) decodeV1(job *Job) error {
 		&a.RefreshNext,
 		&a.RefreshScheduleTimeZone,
 		&a.UpdateRefreshScheduleTimeZone,
+		&a.RefreshScheduleSQLMode,
 	))
 }
 
@@ -789,6 +792,7 @@ type AlterMaterializedViewLogPurgeArgs struct {
 	PurgeNext                   string           `json:"purge_next,omitempty"`
 	PurgeScheduleTimeZone       TimeZoneLocation `json:"purge_schedule_time_zone,omitempty"`
 	UpdatePurgeScheduleTimeZone bool             `json:"update_purge_schedule_time_zone,omitempty"`
+	PurgeScheduleSQLMode        mysql.SQLMode    `json:"purge_schedule_sql_mode,omitempty"`
 }
 
 func (a *AlterMaterializedViewLogPurgeArgs) getArgsV1(*Job) []any {
@@ -798,6 +802,7 @@ func (a *AlterMaterializedViewLogPurgeArgs) getArgsV1(*Job) []any {
 		a.PurgeNext,
 		a.PurgeScheduleTimeZone,
 		a.UpdatePurgeScheduleTimeZone,
+		a.PurgeScheduleSQLMode,
 	}
 }
 
@@ -808,6 +813,7 @@ func (a *AlterMaterializedViewLogPurgeArgs) decodeV1(job *Job) error {
 		&a.PurgeNext,
 		&a.PurgeScheduleTimeZone,
 		&a.UpdatePurgeScheduleTimeZone,
+		&a.PurgeScheduleSQLMode,
 	))
 }
 

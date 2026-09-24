@@ -1202,7 +1202,7 @@ func (e *executor) CreateMaterializedViewLog(ctx sessionctx.Context, s *ast.Crea
 		PurgeStartWith:           purgeStartWith,
 		PurgeNext:                purgeNext,
 		LogAccumulationAlertRows: logAccumulationAlertRows,
-		DefinitionSQLMode:        ctx.GetSessionVars().SQLMode,
+		PurgeScheduleSQLMode:     ctx.GetSessionVars().SQLMode,
 		PurgeScheduleTimeZone: model.TimeZoneLocation{
 			Name:   tzName,
 			Offset: tzOffset,

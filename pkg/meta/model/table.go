@@ -809,6 +809,9 @@ type MaterializedViewInfo struct {
 	// DefinitionSQLMode is the SQL mode captured from CREATE MATERIALIZED VIEW session.
 	DefinitionSQLMode mysql.SQLMode `json:"definition_sql_mode"`
 
+	// RefreshScheduleSQLMode is the SQL mode used to parse and evaluate refresh schedule expressions.
+	RefreshScheduleSQLMode mysql.SQLMode `json:"refresh_schedule_sql_mode"`
+
 	// DefinitionDivPrecisionIncrement is the division precision captured from CREATE MATERIALIZED VIEW session.
 	DefinitionDivPrecisionIncrement int `json:"definition_div_precision_increment"`
 
@@ -876,8 +879,8 @@ type MaterializedViewLogInfo struct {
 	// nil means the CREATE statement did not specify ALERT ROWS and runtime keeps alerting disabled by default.
 	LogAccumulationAlertRows *uint64 `json:"log_accumulation_alert_rows,omitempty"`
 
-	// DefinitionSQLMode is the SQL mode captured from CREATE MATERIALIZED VIEW LOG session.
-	DefinitionSQLMode mysql.SQLMode `json:"definition_sql_mode"`
+	// PurgeScheduleSQLMode is the SQL mode used to parse and evaluate purge schedule expressions.
+	PurgeScheduleSQLMode mysql.SQLMode `json:"purge_schedule_sql_mode"`
 
 	// PurgeScheduleTimeZone is the timezone used to evaluate purge schedule expressions.
 	PurgeScheduleTimeZone TimeZoneLocation `json:"purge_schedule_time_zone"`

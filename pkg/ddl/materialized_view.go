@@ -389,6 +389,7 @@ func (e *executor) CreateMaterializedView(ctx sessionctx.Context, s *ast.CreateM
 		AlertOverdueSec:                 alertOverdueSec,
 		AlertRefreshFailed:              alertRefreshFailed,
 		DefinitionSQLMode:               ctx.GetSessionVars().SQLMode,
+		RefreshScheduleSQLMode:          ctx.GetSessionVars().SQLMode,
 		DefinitionDivPrecisionIncrement: ctx.GetSessionVars().DivPrecisionIncrement,
 		DefinitionTimeZone: model.TimeZoneLocation{
 			Name:   tzName,
@@ -856,6 +857,7 @@ func (e *executor) alterMaterializedViewLogPurge(
 		PurgeNext:                   purgeNext,
 		PurgeScheduleTimeZone:       purgeScheduleTimeZoneMeta,
 		UpdatePurgeScheduleTimeZone: updatePurgeScheduleTimeZone,
+		PurgeScheduleSQLMode:        ctx.GetSessionVars().SQLMode,
 	}
 	if err := e.doDDLJob2(ctx, job, args); err != nil {
 		return errors.Trace(err)
@@ -873,6 +875,7 @@ func (e *executor) alterMaterializedViewLogPurge(
 		mlogName.O,
 		purgeStartWith,
 		purgeNext,
+		ctx.GetSessionVars().SQLMode,
 		purgeScheduleTimeZone,
 		logAlterMaterializedViewLogPurgeNextUnixSecondsUpdateNull,
 	)
@@ -922,6 +925,7 @@ func (e *executor) alterMaterializedViewRefresh(
 		RefreshNext:                   refreshNext,
 		RefreshScheduleTimeZone:       refreshScheduleTimeZoneMeta,
 		UpdateRefreshScheduleTimeZone: updateRefreshScheduleTimeZone,
+		RefreshScheduleSQLMode:        ctx.GetSessionVars().SQLMode,
 	}
 	if err := e.doDDLJob2(ctx, job, args); err != nil {
 		return errors.Trace(err)
@@ -939,6 +943,7 @@ func (e *executor) alterMaterializedViewRefresh(
 		viewName.O,
 		refreshStartWith,
 		refreshNext,
+		ctx.GetSessionVars().SQLMode,
 		refreshScheduleTimeZone,
 		logAlterMaterializedViewRefreshNextUnixSecondsUpdateNull,
 	)
