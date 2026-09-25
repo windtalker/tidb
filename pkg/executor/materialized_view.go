@@ -5208,12 +5208,14 @@ func initRefreshMaterializedViewSession(
 	}
 
 	origSQLMode := sessVars.SQLMode
+	origDivPrecisionIncrement := sessVars.DivPrecisionIncrement
 	origTimeZone := sessVars.TimeZone
 	origStmtCtxTimeZone := sessVars.StmtCtx.TimeZone()
 	origTypeFlags := sessVars.StmtCtx.TypeFlags()
 	origErrLevels := sessVars.StmtCtx.ErrLevels()
 
 	sessVars.SQLMode = mviewInfo.DefinitionSQLMode
+	sessVars.DivPrecisionIncrement = mviewInfo.DefinitionDivPrecisionIncrement
 	sessVars.SetStatusFlag(mysql.ServerStatusNoBackslashEscaped, sessVars.SQLMode.HasNoBackslashEscapesMode())
 	sessVars.TimeZone = loc
 	sessVars.StmtCtx.SetTimeZone(loc)
@@ -5222,6 +5224,7 @@ func initRefreshMaterializedViewSession(
 
 	return func() {
 		sessVars.SQLMode = origSQLMode
+		sessVars.DivPrecisionIncrement = origDivPrecisionIncrement
 		sessVars.SetStatusFlag(mysql.ServerStatusNoBackslashEscaped, origSQLMode.HasNoBackslashEscapesMode())
 		sessVars.TimeZone = origTimeZone
 		sessVars.StmtCtx.SetTimeZone(origStmtCtxTimeZone)
