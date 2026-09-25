@@ -1135,6 +1135,24 @@ func buildMViewRefreshOutOfPlaceCutoverInvolvingSchemaInfo(
 			"refresh materialized view complete OUT OF PLACE cutover: base table not found",
 		)
 	}
+	mlogID := int64(0)
+	if baseTable.Meta().MaterializedViewBase != nil {
+		mlogID = baseTable.Meta().MaterializedViewBase.MLogID
+	}
+	mlogTable, ok := is.TableByID(ctx, mlogID)
+	if mlogID != 0 && !ok {
+		return nil, dbterror.ErrInvalidDDLJob.GenWithStackByArgs(
+			"refresh materialized view complete OUT OF PLACE cutover: materialized view log not found",
+		)
+	}
+	if mlogTable != nil && (mlogTable.Meta().MaterializedViewLog == nil || mlogTable.Meta().MaterializedViewLog.BaseTableID != baseTable.Meta().ID) {
+		return nil, dbterror.ErrInvalidDDLJob.GenWithStackByArgs(
+			"refresh materialized view complete OUT OF PLACE cutover: materialized view log metadata is invalid",
+		)
+	}
+	if mlogTable != nil && !hasMaterializedViewID(mlogTable.Meta().MaterializedViewLog.DependentMViewIDs, oldMViewID) {
+		mlogTable = nil
+	}
 
 	shadowTable, ok := is.TableByID(ctx, shadowTableID)
 	if !ok {
@@ -1142,8 +1160,7 @@ func buildMViewRefreshOutOfPlaceCutoverInvolvingSchemaInfo(
 			"refresh materialized view complete OUT OF PLACE cutover: shadow table not found",
 		)
 	}
-
-	return []model.InvolvingSchemaInfo{
+	involving := []model.InvolvingSchemaInfo{
 		{
 			Database: schemaName.L,
 			Table:    oldMViewMeta.Name.L,
@@ -1159,7 +1176,15 @@ func buildMViewRefreshOutOfPlaceCutoverInvolvingSchemaInfo(
 			Table:    shadowTable.Meta().Name.L,
 			Mode:     model.ExclusiveInvolving,
 		},
-	}, nil
+	}
+	if mlogTable != nil {
+		involving = append(involving, model.InvolvingSchemaInfo{
+			Database: schemaName.L,
+			Table:    mlogTable.Meta().Name.L,
+			Mode:     model.ExclusiveInvolving,
+		})
+	}
+	return involving, nil
 }
 
 func (e *executor) updateMaterializedViewRefreshInfoNextUnixSeconds(

@@ -26,6 +26,7 @@ import (
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/tidb/pkg/ddl"
 	"github.com/pingcap/tidb/pkg/kv"
+	"github.com/pingcap/tidb/pkg/meta/model"
 	"github.com/pingcap/tidb/pkg/metrics"
 	"github.com/pingcap/tidb/pkg/parser/ast"
 	"github.com/pingcap/tidb/pkg/parser/auth"
@@ -3283,6 +3284,36 @@ func TestMaterializedViewRefreshCompleteOutOfPlaceCutoverBasic(t *testing.T) {
 	tk.MustQuery("select ((select count(*) from mysql.gc_delete_range where job_id=" + jobID + ") + (select count(*) from mysql.gc_delete_range_done where job_id=" + jobID + ")) > 0").Check(testkit.Rows("1"))
 }
 
+func TestMaterializedViewRefreshCompleteOutOfPlaceUpdatesMLogDependencies(t *testing.T) {
+	store, dom := testkit.CreateMockStoreAndDomain(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("create table t_dep (a int not null, b int not null)")
+	tk.MustExec("create materialized view log on t_dep (a, b)")
+	tk.MustExec("create materialized view mv_dep (a, s, cnt) refresh fast as select a, sum(b), count(1) from t_dep group by a")
+
+	is := dom.InfoSchema()
+	oldMV, err := is.TableByName(context.Background(), pmodel.NewCIStr("test"), pmodel.NewCIStr("mv_dep"))
+	require.NoError(t, err)
+	oldMVID := oldMV.Meta().ID
+
+	tk.MustExec("refresh materialized view mv_dep complete out of place")
+
+	is = dom.InfoSchema()
+	newMV, err := is.TableByName(context.Background(), pmodel.NewCIStr("test"), pmodel.NewCIStr("mv_dep"))
+	require.NoError(t, err)
+	newMVID := newMV.Meta().ID
+	require.NotEqual(t, oldMVID, newMVID)
+	mlog, err := is.TableByName(context.Background(), pmodel.NewCIStr("test"), pmodel.NewCIStr("$mlog$t_dep"))
+	require.NoError(t, err)
+	require.NotNil(t, mlog.Meta().MaterializedViewLog)
+	require.Contains(t, mlog.Meta().MaterializedViewLog.DependentMViewIDs, newMVID)
+	require.NotContains(t, mlog.Meta().MaterializedViewLog.DependentMViewIDs, oldMVID)
+
+	tk.MustExec("drop materialized view mv_dep")
+	tk.MustExec("drop materialized view log on t_dep")
+}
+
 func TestMaterializedViewRefreshCompleteOutOfPlaceCutoverFailureRollsBackRefreshInfo(t *testing.T) {
 	store, dom := testkit.CreateMockStoreAndDomain(t)
 	tk := testkit.NewTestKit(t, store)
@@ -3450,7 +3481,7 @@ func TestMaterializedViewRefreshCompleteOutOfPlaceBuildFailureCleansShadow(t *te
 			continue
 		}
 		job, jobErr := ddl.GetHistoryJobByID(tk.Session(), id)
-		if jobErr == nil && job != nil && job.Type == pmodel.ActionDropMaterializedViewShadow {
+		if jobErr == nil && job != nil && job.Type == model.ActionDropMaterializedViewShadow {
 			cleanupJobID = fmt.Sprint(id)
 			break
 		}

@@ -464,6 +464,15 @@ func (*SchemaTracker) CreateMaterializedViewShadowTable(
 	return dbterror.ErrGeneralUnsupportedDDL.GenWithStack("CREATE MATERIALIZED VIEW SHADOW TABLE is not supported in schema tracker")
 }
 
+// DropMaterializedViewShadowTable implements the DDL interface.
+func (*SchemaTracker) DropMaterializedViewShadowTable(
+	sessionctx.Context,
+	pmodel.CIStr,
+	pmodel.CIStr,
+) error {
+	return dbterror.ErrGeneralUnsupportedDDL.GenWithStack("DROP MATERIALIZED VIEW SHADOW TABLE is not supported in schema tracker")
+}
+
 // RefreshMaterializedViewCompleteOutOfPlaceCutover implements the DDL interface.
 func (*SchemaTracker) RefreshMaterializedViewCompleteOutOfPlaceCutover(
 	sessionctx.Context,

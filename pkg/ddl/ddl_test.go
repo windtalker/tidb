@@ -795,6 +795,16 @@ func TestCheckHistoryJobStmtType(t *testing.T) {
 	require.False(t, checkHistoryJobStmtType(model.ActionCreateTables, createMLogStmt))
 }
 
+func TestReplaceMaterializedViewID(t *testing.T) {
+	ids, replaced := replaceMaterializedViewID([]int64{10, 20}, 30, 40)
+	require.False(t, replaced)
+	require.Equal(t, []int64{10, 20}, ids)
+
+	ids, replaced = replaceMaterializedViewID([]int64{10, 20, 10}, 10, 30)
+	require.True(t, replaced)
+	require.Equal(t, []int64{30, 20}, ids)
+}
+
 func TestBuildCreateMaterializedViewImportSQLNoAsOfTimestamp(t *testing.T) {
 	mvTblInfo := &model.TableInfo{
 		Name: pmodel.NewCIStr("mv"),

@@ -345,6 +345,11 @@ func (d *Checker) CreateMaterializedViewShadowTable(
 	return d.realExecutor.CreateMaterializedViewShadowTable(ctx, schemaID, schemaName, shadowTableInfo)
 }
 
+// DropMaterializedViewShadowTable implements the DDL interface.
+func (d *Checker) DropMaterializedViewShadowTable(ctx sessionctx.Context, schemaName, shadowName pmodel.CIStr) error {
+	return d.realExecutor.DropMaterializedViewShadowTable(ctx, schemaName, shadowName)
+}
+
 // RefreshMaterializedViewCompleteOutOfPlaceCutover implements the DDL interface.
 func (d *Checker) RefreshMaterializedViewCompleteOutOfPlaceCutover(
 	ctx sessionctx.Context,

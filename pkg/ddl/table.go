@@ -1285,6 +1285,31 @@ func (w *worker) onRefreshMaterializedViewCompleteOutOfPlaceCutover(jobCtx *jobC
 		}
 		return ver, errors.Trace(err)
 	}
+	var mlogTblInfo *model.TableInfo
+	if baseTblInfo.MaterializedViewBase != nil && baseTblInfo.MaterializedViewBase.MLogID != 0 {
+		mlogTblInfo, err = getTableInfo(jobCtx.metaMut, baseTblInfo.MaterializedViewBase.MLogID, job.SchemaID)
+		if err != nil {
+			if infoschema.ErrDatabaseNotExists.Equal(err) || infoschema.ErrTableNotExists.Equal(err) {
+				job.State = model.JobStateCancelled
+			}
+			return ver, errors.Trace(err)
+		}
+		if mlogTblInfo == nil || mlogTblInfo.MaterializedViewLog == nil ||
+			mlogTblInfo.MaterializedViewLog.BaseTableID != baseTableID {
+			job.State = model.JobStateCancelled
+			return ver, dbterror.ErrInvalidDDLJob.GenWithStackByArgs(
+				"refresh materialized view complete OUT OF PLACE cutover: materialized view log metadata is invalid",
+			)
+		}
+		updatedDependentMViewIDs, replaced := replaceMaterializedViewID(
+			mlogTblInfo.MaterializedViewLog.DependentMViewIDs, args.OldMViewID, args.ShadowTableID,
+		)
+		if replaced {
+			mlogTblInfo.MaterializedViewLog.DependentMViewIDs = updatedDependentMViewIDs
+		} else {
+			mlogTblInfo = nil
+		}
+	}
 	if err := rewriteMaterializedViewBaseForOutOfPlaceCutover(baseTblInfo, args.OldMViewID, args.ShadowTableID); err != nil {
 		job.State = model.JobStateCancelled
 		return ver, errors.Trace(err)
@@ -1328,7 +1353,15 @@ func (w *worker) onRefreshMaterializedViewCompleteOutOfPlaceCutover(jobCtx *jobC
 		return ver, errors.Trace(err)
 	}
 
-	ver, err = updateSchemaVersion(jobCtx, job, schemaIDAndTableInfo{schemaID: job.SchemaID, tblInfo: baseTblInfo})
+	infos := []schemaIDAndTableInfo{{schemaID: job.SchemaID, tblInfo: baseTblInfo}}
+	if mlogTblInfo != nil {
+		mlogTblInfo.UpdateTS = jobCtx.metaMut.StartTS
+		if err := repairTableOrViewWithCheck(jobCtx.metaMut, job, job.SchemaID, mlogTblInfo); err != nil {
+			return ver, errors.Trace(err)
+		}
+		infos = append(infos, schemaIDAndTableInfo{schemaID: job.SchemaID, tblInfo: mlogTblInfo})
+	}
+	ver, err = updateSchemaVersion(jobCtx, job, infos...)
 	if err != nil {
 		return ver, errors.Trace(err)
 	}
@@ -1338,6 +1371,24 @@ func (w *worker) onRefreshMaterializedViewCompleteOutOfPlaceCutover(jobCtx *jobC
 	}
 	job.FinishTableJob(model.JobStateDone, model.StatePublic, ver, newMViewTblInfo)
 	return ver, nil
+}
+
+func replaceMaterializedViewID(ids []int64, oldID, newID int64) ([]int64, bool) {
+	replaced := false
+	seen := make(map[int64]struct{}, len(ids))
+	result := make([]int64, 0, len(ids))
+	for _, id := range ids {
+		if id == oldID {
+			id = newID
+			replaced = true
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		result = append(result, id)
+	}
+	return result, replaced
 }
 
 func rewriteMaterializedViewBaseForOutOfPlaceCutover(

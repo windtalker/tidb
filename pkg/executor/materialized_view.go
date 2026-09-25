@@ -4746,7 +4746,7 @@ func (e *RefreshMaterializedViewExec) executeRefreshMaterializedViewCompleteOutO
 			return
 		}
 		if dropErr := domain.GetDomain(e.Ctx()).DDLExecutor().DropMaterializedViewShadowTable(
-			context.WithoutCancel(kctx), buildSctx, schemaName, pmodel.NewCIStr(shadowTableName),
+			buildSctx, schemaName, pmodel.NewCIStr(shadowTableName),
 		); dropErr != nil {
 			logutil.BgLogger().Warn(
 				"failed to cleanup shadow table after out-of-place complete refresh error",
