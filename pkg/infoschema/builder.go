@@ -360,6 +360,10 @@ func applyDefaultAction(b *Builder, m meta.Reader, diff *model.SchemaDiff) ([]in
 }
 
 func applyMViewRefreshOutOfPlaceCutover(b *Builder, m meta.Reader, diff *model.SchemaDiff) ([]int64, error) {
+	if b.enableV2 {
+		return applyDefaultAction(b, m, diff)
+	}
+
 	roDBInfo, ok := b.infoSchema.SchemaByID(diff.SchemaID)
 	if !ok {
 		return nil, ErrDatabaseNotExists.GenWithStackByArgs(
