@@ -376,6 +376,7 @@ func JobNeedGC(job *model.Job) bool {
 		switch job.Type {
 		case model.ActionDropSchema, model.ActionDropTable,
 			model.ActionDropMaterializedView, model.ActionDropMaterializedViewLog,
+			model.ActionDropMaterializedViewShadow,
 			model.ActionTruncateTable,
 			model.ActionDropPrimaryKey,
 			model.ActionDropTablePartition, model.ActionTruncateTablePartition,
@@ -992,7 +993,8 @@ func (w *worker) runOneJobStep(
 	case model.ActionCreateView:
 		ver, err = onCreateView(jobCtx, job)
 	case model.ActionDropTable, model.ActionDropView, model.ActionDropSequence,
-		model.ActionDropMaterializedView, model.ActionDropMaterializedViewLog:
+		model.ActionDropMaterializedView, model.ActionDropMaterializedViewLog,
+		model.ActionDropMaterializedViewShadow:
 		ver, err = w.onDropTableOrView(jobCtx, job)
 	case model.ActionDropTablePartition:
 		ver, err = w.onDropTablePartition(jobCtx, job)

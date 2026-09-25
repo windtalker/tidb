@@ -1044,6 +1044,10 @@ func (e *executor) CreateMaterializedViewShadowTable(
 	return errors.Trace(e.createTableWithInfoPost(ctx, shadowTableInfo, schemaID, scatterScope))
 }
 
+func (e *executor) DropMaterializedViewShadowTable(ctx sessionctx.Context, schemaName, shadowName pmodel.CIStr) error {
+	return e.dropTableObject(ctx, []*ast.TableName{{Schema: schemaName, Name: shadowName}}, true, materializedViewShadowObject, true)
+}
+
 func (e *executor) RefreshMaterializedViewCompleteOutOfPlaceCutover(
 	ctx sessionctx.Context,
 	schemaID int64,

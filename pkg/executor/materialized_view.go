@@ -4745,8 +4745,9 @@ func (e *RefreshMaterializedViewExec) executeRefreshMaterializedViewCompleteOutO
 		if err == nil || !shadowCreated {
 			return
 		}
-		dropShadowSQL := sqlescape.MustEscapeSQL("DROP TABLE IF EXISTS %n.%n", schemaName.O, shadowTableName)
-		if dropErr := executeRefreshMaterializedViewInternalSQL(context.WithoutCancel(kctx), buildSQLExec, dropShadowSQL); dropErr != nil {
+		if dropErr := domain.GetDomain(e.Ctx()).DDLExecutor().DropMaterializedViewShadowTable(
+			context.WithoutCancel(kctx), buildSctx, schemaName, pmodel.NewCIStr(shadowTableName),
+		); dropErr != nil {
 			logutil.BgLogger().Warn(
 				"failed to cleanup shadow table after out-of-place complete refresh error",
 				zap.String("schema", schemaName.O),

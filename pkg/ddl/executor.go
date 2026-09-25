@@ -122,6 +122,7 @@ type Executor interface {
 		schemaName pmodel.CIStr,
 		shadowTableInfo *model.TableInfo,
 	) error
+	DropMaterializedViewShadowTable(ctx sessionctx.Context, schemaName, shadowName pmodel.CIStr) error
 	RefreshMaterializedViewCompleteOutOfPlaceCutover(
 		ctx sessionctx.Context,
 		schemaID int64,
@@ -4758,6 +4759,7 @@ const (
 	sequenceObject
 	materializedViewObject
 	materializedViewLogObject
+	materializedViewShadowObject
 )
 
 // dropTableObject provides common logic to drop table-like objects, views, and sequences.
@@ -4781,7 +4783,7 @@ func (e *executor) dropTableObject(
 		fkCheck      bool
 	)
 	switch tableObjectType {
-	case tableObject, materializedViewObject, materializedViewLogObject:
+	case tableObject, materializedViewObject, materializedViewLogObject, materializedViewShadowObject:
 		dropExistErr = infoschema.ErrTableDropExists
 		objectIdents = make([]ast.Ident, len(objects))
 		for i, tn := range objects {
@@ -4801,6 +4803,8 @@ func (e *executor) dropTableObject(
 			jobType = model.ActionDropMaterializedView
 		case materializedViewLogObject:
 			jobType = model.ActionDropMaterializedViewLog
+		case materializedViewShadowObject:
+			jobType = model.ActionDropMaterializedViewShadow
 		}
 	case viewObject:
 		dropExistErr = infoschema.ErrTableDropExists
@@ -4834,10 +4838,13 @@ func (e *executor) dropTableObject(
 			return errors.Errorf("Drop tidb system table '%s.%s' is forbidden", tn.Schema.L, tn.Name.L)
 		}
 		switch tableObjectType {
-		case tableObject, materializedViewObject, materializedViewLogObject:
+		case tableObject, materializedViewObject, materializedViewLogObject, materializedViewShadowObject:
 			if !tableInfo.Meta().IsBaseTable() {
 				notExistTables = append(notExistTables, fullti.String())
 				continue
+			}
+			if tableObjectType == materializedViewShadowObject && tableInfo.Meta().MaterializedViewShadow == nil {
+				return dbterror.ErrWrongObject.GenWithStackByArgs(fullti.Schema, fullti.Name, "MATERIALIZED VIEW SHADOW TABLE")
 			}
 			if tableObjectType == tableObject && !allowMaterializedViewRelated {
 				if err := checkTableMaterializedViewConstraints(ctx.GetSessionVars(), tableInfo.Meta(), "DROP TABLE"); err != nil {

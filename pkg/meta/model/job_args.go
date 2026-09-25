@@ -338,7 +338,7 @@ type DropTableArgs struct {
 func (a *DropTableArgs) getArgsV1(job *Job) []any {
 	// Only table-like drop jobs have submission arguments in V1.
 	switch job.Type {
-	case ActionDropTable, ActionDropMaterializedView, ActionDropMaterializedViewLog:
+	case ActionDropTable, ActionDropMaterializedView, ActionDropMaterializedViewLog, ActionDropMaterializedViewShadow:
 		return []any{a.Identifiers, a.FKCheck}
 	}
 	return nil
@@ -350,7 +350,7 @@ func (a *DropTableArgs) getFinishedArgsV1(*Job) []any {
 
 func (a *DropTableArgs) decodeV1(job *Job) error {
 	switch job.Type {
-	case ActionDropTable, ActionDropMaterializedView, ActionDropMaterializedViewLog:
+	case ActionDropTable, ActionDropMaterializedView, ActionDropMaterializedViewLog, ActionDropMaterializedViewShadow:
 		return job.decodeArgs(&a.Identifiers, &a.FKCheck)
 	}
 	return nil

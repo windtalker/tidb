@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/pingcap/failpoint"
+	"github.com/pingcap/tidb/pkg/ddl"
 	"github.com/pingcap/tidb/pkg/kv"
 	"github.com/pingcap/tidb/pkg/metrics"
 	"github.com/pingcap/tidb/pkg/parser/ast"
@@ -3358,6 +3359,8 @@ func TestMaterializedViewRefreshCompleteOutOfPlaceShadowTableProtected(t *testin
 	require.ErrorContains(t, err, "not updatable")
 	err = tk.ExecToErr(fmt.Sprintf("alter table `%s` add column x int", shadowTableName))
 	require.ErrorContains(t, err, "ALTER TABLE on materialized view shadow table")
+	err = tk.ExecToErr(fmt.Sprintf("drop table `%s`", shadowTableName))
+	require.ErrorContains(t, err, "DROP TABLE on materialized view shadow table")
 
 	require.NoError(t, failpoint.Disable(pauseCreateShadowFailpoint))
 	enabled = false
@@ -3439,6 +3442,21 @@ func TestMaterializedViewRefreshCompleteOutOfPlaceBuildFailureCleansShadow(t *te
 		mviewID,
 	)).Check(testkit.Rows("failed complete out of place manual 1 1"))
 	tk.MustQuery("show tables like '\\_\\_mv\\_shadow\\_%'").Check(testkit.Rows())
+	rows := tk.MustQuery("select job_id from mysql.tidb_ddl_history order by job_id desc limit 20").Rows()
+	var cleanupJobID string
+	for _, row := range rows {
+		id, parseErr := strconv.ParseInt(fmt.Sprint(row[0]), 10, 64)
+		if parseErr != nil {
+			continue
+		}
+		job, jobErr := ddl.GetHistoryJobByID(tk.Session(), id)
+		if jobErr == nil && job != nil && job.Type == pmodel.ActionDropMaterializedViewShadow {
+			cleanupJobID = fmt.Sprint(id)
+			break
+		}
+	}
+	require.NotEmpty(t, cleanupJobID)
+	tk.MustQuery("select ((select count(*) from mysql.gc_delete_range where job_id=" + cleanupJobID + ") + (select count(*) from mysql.gc_delete_range_done where job_id=" + cleanupJobID + ")) > 0").Check(testkit.Rows("1"))
 	// Out-of-place build failure should not modify old MV serving table.
 	tk.MustQuery("select a, s, cnt from mv order by a").Check(testkit.Rows("1 15 2", "2 7 1"))
 }
