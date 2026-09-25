@@ -3346,6 +3346,10 @@ func TestMaterializedViewRefreshCompleteOutOfPlaceCutoverFailureRollsBackRefresh
 	mvTable, err = is.TableByName(context.Background(), pmodel.NewCIStr("test"), pmodel.NewCIStr("mv"))
 	require.NoError(t, err)
 	require.Equal(t, oldMViewID, mvTable.Meta().ID)
+	mlogTable, err := is.TableByName(context.Background(), pmodel.NewCIStr("test"), pmodel.NewCIStr("$mlog$t"))
+	require.NoError(t, err)
+	require.NotNil(t, mlogTable.Meta().MaterializedViewLog)
+	require.Equal(t, []int64{oldMViewID}, mlogTable.Meta().MaterializedViewLog.DependentMViewIDs)
 	tk.MustQuery("select MVIEW_ID from mysql.tidb_mview_refresh_info").Check(testkit.Rows(fmt.Sprintf("%d", oldMViewID)))
 	tk.MustQuery("select a, s, cnt from mv order by a").Check(testkit.Rows("1 15 2", "2 7 1"))
 }
