@@ -71,6 +71,14 @@ func (w *worker) onDropTableOrView(jobCtx *jobContext, job *model.Job) (ver int6
 	if err != nil {
 		return ver, errors.Trace(err)
 	}
+	if job.Type == model.ActionDropMaterializedViewShadow && tblInfo.MaterializedViewShadow == nil {
+		job.State = model.JobStateCancelled
+		return ver, dbterror.ErrWrongObject.GenWithStackByArgs(
+			job.SchemaName,
+			job.TableName,
+			"MATERIALIZED VIEW SHADOW TABLE",
+		)
+	}
 
 	originalState := job.SchemaState
 	switch tblInfo.State {

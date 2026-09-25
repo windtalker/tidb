@@ -267,6 +267,9 @@ func checkHistoryJobStmtType(jobType model.ActionType, st ast.StmtNode) bool {
 	case model.ActionDropMaterializedViewLog:
 		_, ok := st.(*ast.DropMaterializedViewLogStmt)
 		return ok
+	case model.ActionDropMaterializedViewShadow:
+		_, ok := st.(*ast.DropTableStmt)
+		return ok
 	case model.ActionMViewRefreshOutOfPlaceCutover:
 		_, ok := st.(*ast.RefreshMaterializedViewStmt)
 		return ok

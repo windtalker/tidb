@@ -1045,6 +1045,12 @@ func (e *executor) CreateMaterializedViewShadowTable(
 }
 
 func (e *executor) DropMaterializedViewShadowTable(ctx sessionctx.Context, schemaName, shadowName pmodel.CIStr) error {
+	originQuery := ctx.Value(sessionctx.QueryString)
+	ctx.SetValue(
+		sessionctx.QueryString,
+		sqlescape.MustEscapeSQL("DROP TABLE IF EXISTS %n.%n", schemaName.O, shadowName.O),
+	)
+	defer ctx.SetValue(sessionctx.QueryString, originQuery)
 	return e.dropTableObject(ctx, []*ast.TableName{{Schema: schemaName, Name: shadowName}}, true, materializedViewShadowObject, true)
 }
 
