@@ -23,8 +23,11 @@ import (
 
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/tidb/pkg/ddl"
+	"github.com/pingcap/tidb/pkg/domain"
 	"github.com/pingcap/tidb/pkg/meta/model"
 	"github.com/pingcap/tidb/pkg/parser/ast"
+	"github.com/pingcap/tidb/pkg/sessionctx"
+	"github.com/pingcap/tidb/pkg/table"
 	"github.com/pingcap/tidb/pkg/testkit"
 	"github.com/stretchr/testify/require"
 )
@@ -402,6 +405,179 @@ func TestCreateMaterializedViewRefreshInfoNextUnixSecondsUsesUTC(t *testing.T) {
 		"select NEXT_REFRESH_UNIX_SECONDS = 1636275780 from mysql.tidb_mview_refresh_info where MVIEW_ID = %d",
 		getMViewID("mv_dst_fallback"),
 	)).Check(testkit.Rows("1"))
+}
+
+func TestMaterializedViewOutOfPlaceCutoverUpdatesMLogDependencies(t *testing.T) {
+	store, dom := testkit.CreateMockStoreAndDomain(t)
+	tk := newMViewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("create table t_cutover_dependency (a int not null, b int not null)")
+	tk.MustExec("create materialized view log on t_cutover_dependency (a, b)")
+	tk.MustExec("create materialized view mv_cutover_dependency (a, s, cnt) as select a, sum(b), count(1) from t_cutover_dependency group by a")
+
+	oldMView := mustGetMaterializedView(t, dom, "mv_cutover_dependency")
+	oldMViewID := oldMView.Meta().ID
+	shadowName := ast.NewCIStr("__mv_shadow_cutover_dependency")
+	shadowInfo := oldMView.Meta().Clone()
+	shadowInfo.ID = 0
+	shadowInfo.Name = shadowName
+	shadowInfo.MaterializedView = nil
+	shadowInfo.MaterializedViewShadow = &model.MaterializedViewShadowInfo{SourceMViewID: oldMViewID}
+	dbInfo, ok := dom.InfoSchema().SchemaByName(ast.NewCIStr("test"))
+	require.True(t, ok)
+	require.NoError(t, dom.DDLExecutor().CreateMaterializedViewShadowTable(tk.Session(), dbInfo.ID, dbInfo.Name, shadowInfo))
+
+	shadowTable, err := dom.InfoSchema().TableByName(context.Background(), dbInfo.Name, shadowName)
+	require.NoError(t, err)
+	shadowTableID := shadowTable.Meta().ID
+	lastSuccessReadTSO, lastSuccessReadTSONull := getLastSuccessReadTSO(t, tk, oldMViewID)
+	oldMViewRevision := oldMView.Meta().Revision
+	const buildReadTSO uint64 = 123456789
+	setRefreshCutoverQueryString(t, tk, "mv_cutover_dependency")
+	require.NoError(t, dom.DDLExecutor().RefreshMaterializedViewCompleteOutOfPlaceCutover(
+		tk.Session(), dbInfo.ID, dbInfo.Name, oldMView.Meta().Name, oldMViewID, shadowTableID,
+		buildReadTSO, &oldMViewRevision, lastSuccessReadTSO, lastSuccessReadTSONull, nil, false,
+	))
+
+	newMView := mustGetMaterializedView(t, dom, "mv_cutover_dependency")
+	require.Equal(t, shadowTableID, newMView.Meta().ID)
+	mlog, err := dom.InfoSchema().TableByName(context.Background(), dbInfo.Name, ast.NewCIStr("$mlog$t_cutover_dependency"))
+	require.NoError(t, err)
+	require.Contains(t, mlog.Meta().MaterializedViewLog.DependentMViewIDs, shadowTableID)
+	require.NotContains(t, mlog.Meta().MaterializedViewLog.DependentMViewIDs, oldMViewID)
+
+	tk.MustExec("drop materialized view mv_cutover_dependency")
+	tk.MustExec("drop materialized view log on t_cutover_dependency")
+}
+
+func TestMaterializedViewOutOfPlaceCutoverFailureRollsBackMLogDependencies(t *testing.T) {
+	store, dom := testkit.CreateMockStoreAndDomain(t)
+	tk := newMViewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("create table t_cutover_rollback (a int not null, b int not null)")
+	tk.MustExec("create materialized view log on t_cutover_rollback (a, b)")
+	tk.MustExec("create materialized view mv_cutover_rollback (a, s, cnt) as select a, sum(b), count(1) from t_cutover_rollback group by a")
+
+	oldMView := mustGetMaterializedView(t, dom, "mv_cutover_rollback")
+	oldMViewID := oldMView.Meta().ID
+	shadowName := ast.NewCIStr("__mv_shadow_cutover_rollback")
+	shadowInfo := oldMView.Meta().Clone()
+	shadowInfo.ID = 0
+	shadowInfo.Name = shadowName
+	shadowInfo.MaterializedView = nil
+	shadowInfo.MaterializedViewShadow = &model.MaterializedViewShadowInfo{SourceMViewID: oldMViewID}
+	dbInfo, ok := dom.InfoSchema().SchemaByName(ast.NewCIStr("test"))
+	require.True(t, ok)
+	require.NoError(t, dom.DDLExecutor().CreateMaterializedViewShadowTable(tk.Session(), dbInfo.ID, dbInfo.Name, shadowInfo))
+	shadowTable, err := dom.InfoSchema().TableByName(context.Background(), dbInfo.Name, shadowName)
+	require.NoError(t, err)
+	shadowTableID := shadowTable.Meta().ID
+	lastSuccessReadTSO, lastSuccessReadTSONull := getLastSuccessReadTSO(t, tk, oldMViewID)
+	oldMViewRevision := oldMView.Meta().Revision
+
+	const cutoverFailpoint = "github.com/pingcap/tidb/pkg/ddl/mockMViewRefreshOutOfPlaceCutoverAfterMigrateRefreshInfoError"
+	setRefreshCutoverQueryString(t, tk, "mv_cutover_rollback")
+	require.NoError(t, failpoint.Enable(cutoverFailpoint, "return"))
+	err = dom.DDLExecutor().RefreshMaterializedViewCompleteOutOfPlaceCutover(
+		tk.Session(), dbInfo.ID, dbInfo.Name, oldMView.Meta().Name, oldMViewID, shadowTableID,
+		123456789, &oldMViewRevision, lastSuccessReadTSO, lastSuccessReadTSONull, nil, false,
+	)
+	require.NoError(t, failpoint.Disable(cutoverFailpoint))
+	require.ErrorContains(t, err, "error after migrating refresh info")
+
+	stillOldMView := mustGetMaterializedView(t, dom, "mv_cutover_rollback")
+	require.Equal(t, oldMViewID, stillOldMView.Meta().ID)
+	mlog, err := dom.InfoSchema().TableByName(context.Background(), dbInfo.Name, ast.NewCIStr("$mlog$t_cutover_rollback"))
+	require.NoError(t, err)
+	require.Equal(t, []int64{oldMViewID}, mlog.Meta().MaterializedViewLog.DependentMViewIDs)
+	tk.MustQuery(fmt.Sprintf("select count(*) from mysql.tidb_mview_refresh_info where mview_id = %d", oldMViewID)).Check(testkit.Rows("1"))
+	tk.MustQuery(fmt.Sprintf("select count(*) from mysql.tidb_mview_refresh_info where mview_id = %d", shadowTableID)).Check(testkit.Rows("0"))
+}
+
+func TestMaterializedViewShadowCanOnlyBeDroppedByInternalCleanup(t *testing.T) {
+	store, dom := testkit.CreateMockStoreAndDomain(t)
+	tk := newMViewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("create table t_shadow_cleanup (a int not null, b int not null)")
+	tk.MustExec("create materialized view log on t_shadow_cleanup (a, b)")
+	tk.MustExec("create materialized view mv_shadow_cleanup (a, s, cnt) as select a, sum(b), count(1) from t_shadow_cleanup group by a")
+	oldMView := mustGetMaterializedView(t, dom, "mv_shadow_cleanup")
+	shadowName := ast.NewCIStr("__mv_shadow_cleanup")
+	shadowInfo := oldMView.Meta().Clone()
+	shadowInfo.ID = 0
+	shadowInfo.Name = shadowName
+	shadowInfo.MaterializedView = nil
+	shadowInfo.MaterializedViewShadow = &model.MaterializedViewShadowInfo{SourceMViewID: oldMView.Meta().ID}
+	dbInfo, ok := dom.InfoSchema().SchemaByName(ast.NewCIStr("test"))
+	require.True(t, ok)
+	require.NoError(t, dom.DDLExecutor().CreateMaterializedViewShadowTable(tk.Session(), dbInfo.ID, dbInfo.Name, shadowInfo))
+	shadowTable, err := dom.InfoSchema().TableByName(context.Background(), dbInfo.Name, shadowName)
+	require.NoError(t, err)
+	shadowTableID := shadowTable.Meta().ID
+
+	err = tk.ExecToErr("drop table `__mv_shadow_cleanup`")
+	require.ErrorContains(t, err, "DROP TABLE on materialized view shadow table")
+	stillExists, err := dom.InfoSchema().TableByName(context.Background(), dbInfo.Name, shadowName)
+	require.NoError(t, err)
+	require.Equal(t, shadowTableID, stillExists.Meta().ID)
+
+	require.NoError(t, dom.DDLExecutor().DropMaterializedViewShadowTable(tk.Session(), dbInfo.Name, shadowName))
+	_, err = dom.InfoSchema().TableByName(context.Background(), dbInfo.Name, shadowName)
+	require.Error(t, err)
+	cleanupJobID := findLatestDDLHistoryJobID(t, tk, model.ActionDropMaterializedViewShadow)
+	require.NotZero(t, cleanupJobID)
+	tk.MustQuery(fmt.Sprintf(
+		"select ((select count(*) from mysql.gc_delete_range where job_id=%d) + (select count(*) from mysql.gc_delete_range_done where job_id=%d)) > 0",
+		cleanupJobID, cleanupJobID,
+	)).Check(testkit.Rows("1"))
+}
+
+func mustGetMaterializedView(t *testing.T, dom *domain.Domain, name string) table.Table {
+	t.Helper()
+	mv, err := dom.InfoSchema().TableByName(context.Background(), ast.NewCIStr("test"), ast.NewCIStr(name))
+	require.NoError(t, err)
+	require.NotNil(t, mv.Meta().MaterializedView)
+	return mv
+}
+
+func setRefreshCutoverQueryString(t *testing.T, tk *testkit.TestKit, mvName string) {
+	t.Helper()
+	sctx := tk.Session()
+	original := sctx.Value(sessionctx.QueryString)
+	sctx.SetValue(sessionctx.QueryString, fmt.Sprintf("REFRESH MATERIALIZED VIEW %s COMPLETE OUT OF PLACE", mvName))
+	t.Cleanup(func() { sctx.SetValue(sessionctx.QueryString, original) })
+}
+
+func getLastSuccessReadTSO(t *testing.T, tk *testkit.TestKit, mvID int64) (uint64, bool) {
+	t.Helper()
+	rows := tk.MustQuery(fmt.Sprintf(
+		"select LAST_SUCCESS_READ_TSO is null, LAST_SUCCESS_READ_TSO from mysql.tidb_mview_refresh_info where MVIEW_ID = %d",
+		mvID,
+	)).Rows()
+	require.Len(t, rows, 1)
+	isNull := fmt.Sprint(rows[0][0]) == "1"
+	if isNull {
+		return 0, true
+	}
+	readTSO, err := strconv.ParseUint(fmt.Sprint(rows[0][1]), 10, 64)
+	require.NoError(t, err)
+	return readTSO, false
+}
+
+func findLatestDDLHistoryJobID(t *testing.T, tk *testkit.TestKit, action model.ActionType) int64 {
+	t.Helper()
+	rows := tk.MustQuery("select job_id from mysql.tidb_ddl_history order by job_id desc limit 20").Rows()
+	for _, row := range rows {
+		jobID, err := strconv.ParseInt(fmt.Sprint(row[0]), 10, 64)
+		if err != nil {
+			continue
+		}
+		job, err := ddl.GetHistoryJobByID(tk.Session(), jobID)
+		if err == nil && job != nil && job.Type == action {
+			return jobID
+		}
+	}
+	return 0
 }
 
 func TestCreateMaterializedViewRejectNonBaseObject(t *testing.T) {

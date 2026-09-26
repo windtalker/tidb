@@ -1739,7 +1739,8 @@ func doGCPlacementRules(se sessionapi.Session, _ uint64,
 	// Notify PD to drop the placement rules of partition-ids and table-id, even if there may be no placement rules.
 	var physicalTableIDs []int64
 	switch historyJob.Type {
-	case model.ActionDropTable, model.ActionDropMaterializedView, model.ActionDropMaterializedViewLog:
+	case model.ActionDropTable, model.ActionDropMaterializedView, model.ActionDropMaterializedViewLog,
+		model.ActionDropMaterializedViewShadow:
 		var args *model.DropTableArgs
 		args, err = model.GetFinishedDropTableArgs(historyJob)
 		if err != nil {
@@ -1842,7 +1843,8 @@ func (w *GCWorker) doGCLabelRules(dr util.DelRangeTask) (err error) {
 
 	if historyJob.Type == model.ActionDropTable ||
 		historyJob.Type == model.ActionDropMaterializedView ||
-		historyJob.Type == model.ActionDropMaterializedViewLog {
+		historyJob.Type == model.ActionDropMaterializedViewLog ||
+		historyJob.Type == model.ActionDropMaterializedViewShadow {
 		var (
 			args  *model.DropTableArgs
 			rules map[string]*label.Rule

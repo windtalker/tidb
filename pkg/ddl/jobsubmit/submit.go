@@ -259,7 +259,7 @@ func getRequiredGIDCount(specs []*JobSpec) int {
 		case model.ActionCreateMaterializedView:
 			args := spec.Args.(*model.CreateMaterializedViewArgs)
 			count += idCountForTable(args.TableInfo)
-		case model.ActionCreateView, model.ActionCreateSequence, model.ActionCreateTable:
+		case model.ActionCreateView, model.ActionCreateSequence, model.ActionCreateTable, model.ActionCreateMaterializedViewShadow:
 			args := spec.Args.(*model.CreateTableArgs)
 			count += idCountForTable(args.TableInfo)
 		case model.ActionCreateTables:
@@ -306,7 +306,7 @@ func assignGIDsForJobs(specs []*JobSpec, ids []int64) {
 				alloc.assignIDsForTable(args.TableInfo)
 			}
 			spec.Job.TableID = args.TableInfo.ID
-		case model.ActionCreateView, model.ActionCreateSequence, model.ActionCreateTable:
+		case model.ActionCreateView, model.ActionCreateSequence, model.ActionCreateTable, model.ActionCreateMaterializedViewShadow:
 			args := spec.Args.(*model.CreateTableArgs)
 			if !spec.IDAllocated {
 				alloc.assignIDsForTable(args.TableInfo)
@@ -513,6 +513,12 @@ func job2TableIDs(spec *JobSpec) string {
 			if baseTableID > 0 {
 				return makeStringForIDs([]int64{spec.Job.TableID, baseTableID})
 			}
+		}
+		return strconv.FormatInt(spec.Job.TableID, 10)
+	case model.ActionMViewRefreshOutOfPlaceCutover:
+		args := spec.Args.(*model.RefreshMaterializedViewCompleteOutOfPlaceCutoverArgs)
+		if args != nil && args.ShadowTableID > 0 {
+			return makeStringForIDs([]int64{spec.Job.TableID, args.ShadowTableID})
 		}
 		return strconv.FormatInt(spec.Job.TableID, 10)
 	default:
