@@ -23,6 +23,7 @@ import (
 	"github.com/pingcap/tidb/pkg/infoschema/internal"
 	"github.com/pingcap/tidb/pkg/meta"
 	"github.com/pingcap/tidb/pkg/meta/model"
+	pmodel "github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/stretchr/testify/require"
 )
 
@@ -93,6 +94,9 @@ func TestApplyMViewRefreshOutOfPlaceCutoverDiff(t *testing.T) {
 			require.Equal(t, oldMView.Name, newTable.Meta().Name)
 			require.NotNil(t, newTable.Meta().MaterializedView)
 			require.Nil(t, newTable.Meta().MaterializedViewShadow)
+			shadowByName, err := is.TableByName(context.Background(), pmodel.NewCIStr("test"), pmodel.NewCIStr("__mv_shadow"))
+			require.Error(t, err)
+			require.Nil(t, shadowByName)
 			newTable, err = is.TableByName(context.Background(), dbInfo.Name, oldMView.Name)
 			require.NoError(t, err)
 			require.Equal(t, shadowTable.ID, newTable.Meta().ID)
