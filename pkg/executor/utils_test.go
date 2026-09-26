@@ -23,6 +23,7 @@ import (
 	"github.com/pingcap/tidb/pkg/domain"
 	"github.com/pingcap/tidb/pkg/executor/internal/exec"
 	"github.com/pingcap/tidb/pkg/extension"
+	"github.com/pingcap/tidb/pkg/meta/model"
 	"github.com/pingcap/tidb/pkg/parser/ast"
 	"github.com/pingcap/tidb/pkg/parser/auth"
 	"github.com/pingcap/tidb/pkg/planner/core"
@@ -346,6 +347,23 @@ func TestApplyMLogPurgeDeleteTiFlashThreads(t *testing.T) {
 	require.Equal(t, int64(9), sessVars.TiFlashMaxThreads)
 	restore()
 	require.Equal(t, int64(9), sessVars.TiFlashMaxThreads)
+}
+
+func TestInitRefreshMaterializedViewSessionAppliesDefinitionDivPrecisionIncrement(t *testing.T) {
+	sessVars := variable.NewSessionVars(nil)
+	sessVars.DivPrecisionIncrement = 2
+	sessVars.TimeZone = time.UTC
+	sessVars.StmtCtx.SetTimeZone(time.UTC)
+
+	restore, err := initRefreshMaterializedViewSession(sessVars, &model.MaterializedViewInfo{
+		DefinitionDivPrecisionIncrement: 9,
+		DefinitionTimeZone:              model.TimeZoneLocation{Name: "UTC"},
+	})
+	require.NoError(t, err)
+	require.Equal(t, 9, sessVars.DivPrecisionIncrement)
+
+	restore()
+	require.Equal(t, 2, sessVars.DivPrecisionIncrement)
 }
 
 func TestMVTaskCancelControllerIsManualCancelRequested(t *testing.T) {

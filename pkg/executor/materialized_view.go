@@ -2741,18 +2741,13 @@ func (e *PurgeMaterializedViewLogExec) executePurgeMaterializedViewLog(
 		}
 	}
 
-	purgeScheduleTimeZone, err := mlogInfo.PurgeScheduleTimeZone.GetLocation()
-	if err != nil {
-		return finalizeFailure(err)
-	}
 	nextPurgeUnixSeconds, shouldUpdateNextPurgeUnixSeconds, err := deriveRuntimeMaterializedScheduleNextUnixSeconds(
 		kctx,
 		scheduleEvalSctx,
 		mlogInfo.PurgeStartWith,
 		mlogInfo.PurgeNext,
 		isInternalSQL,
-		mlogInfo.DefinitionSQLMode,
-		purgeScheduleTimeZone,
+		mlogInfo.PurgeScheduleSQLMode,
 		func() {
 			logRuntimeMaterializedViewLogPurgeNextUnixSecondsUpdateNull(schemaName.O, mlogName.O, mlogInfo.PurgeNext)
 		},
@@ -3195,18 +3190,13 @@ func deriveMLogPurgeThrottleDeadline(
 		adaptiveDeadline = &plannedDeadline
 	}
 	if isInternalSQL {
-		purgeScheduleTimeZone, err := mlogInfo.PurgeScheduleTimeZone.GetLocation()
-		if err != nil {
-			return nil, err
-		}
 		nextPurgeUnixSeconds, shouldUpdateNextPurgeUnixSeconds, err := deriveRuntimeMaterializedScheduleNextUnixSeconds(
 			kctx,
 			evalSctx,
 			mlogInfo.PurgeStartWith,
 			mlogInfo.PurgeNext,
 			true,
-			mlogInfo.DefinitionSQLMode,
-			purgeScheduleTimeZone,
+			mlogInfo.PurgeScheduleSQLMode,
 			func() {
 				logRuntimeMaterializedViewLogPurgeNextUnixSecondsUpdateNull(schemaName, mlogName, mlogInfo.PurgeNext)
 			},
@@ -4622,18 +4612,13 @@ func (e *RefreshMaterializedViewExec) executeRefreshMaterializedView(kctx contex
 		refreshRows = collectFastRefreshMLogScanRows(sessVars)
 	}
 
-	refreshScheduleTimeZone, err := tblInfo.MaterializedView.RefreshScheduleTimeZone.GetLocation()
-	if err != nil {
-		return finalizeFailure(err)
-	}
 	nextRefreshUnixSeconds, shouldUpdateNextRefreshUnixSeconds, err := deriveRuntimeMaterializedScheduleNextUnixSeconds(
 		kctx,
 		scheduleEvalSctx,
 		tblInfo.MaterializedView.RefreshStartWith,
 		tblInfo.MaterializedView.RefreshNext,
 		isInternalSQL,
-		tblInfo.MaterializedView.DefinitionSQLMode,
-		refreshScheduleTimeZone,
+		tblInfo.MaterializedView.RefreshScheduleSQLMode,
 		func() {
 			logRuntimeMaterializedViewRefreshNextUnixSecondsUpdateNull(schemaName.O, tblInfo.Name.O, tblInfo.MaterializedView.RefreshNext)
 		},
@@ -4760,8 +4745,9 @@ func (e *RefreshMaterializedViewExec) executeRefreshMaterializedViewCompleteOutO
 		if err == nil || !shadowCreated {
 			return
 		}
-		dropShadowSQL := sqlescape.MustEscapeSQL("DROP TABLE IF EXISTS %n.%n", schemaName.O, shadowTableName)
-		if dropErr := executeRefreshMaterializedViewInternalSQL(context.WithoutCancel(kctx), buildSQLExec, dropShadowSQL); dropErr != nil {
+		if dropErr := domain.GetDomain(e.Ctx()).DDLExecutor().DropMaterializedViewShadowTable(
+			buildSctx, schemaName, pmodel.NewCIStr(shadowTableName),
+		); dropErr != nil {
 			logutil.BgLogger().Warn(
 				"failed to cleanup shadow table after out-of-place complete refresh error",
 				zap.String("schema", schemaName.O),
@@ -4873,18 +4859,13 @@ func (e *RefreshMaterializedViewExec) executeRefreshMaterializedViewCompleteOutO
 				return scheduleErr
 			}
 			defer e.ReleaseSysSession(releaseCtx, scheduleEvalSctx)
-			refreshScheduleTimeZone, scheduleErr := tblInfo.MaterializedView.RefreshScheduleTimeZone.GetLocation()
-			if scheduleErr != nil {
-				return scheduleErr
-			}
 			nextRefreshUnixSeconds, shouldUpdateNextRefreshUnixSeconds, scheduleErr = deriveRuntimeMaterializedScheduleNextUnixSeconds(
 				kctx,
 				scheduleEvalSctx,
 				tblInfo.MaterializedView.RefreshStartWith,
 				tblInfo.MaterializedView.RefreshNext,
 				isInternalSQL,
-				tblInfo.MaterializedView.DefinitionSQLMode,
-				refreshScheduleTimeZone,
+				tblInfo.MaterializedView.RefreshScheduleSQLMode,
 				func() {
 					logRuntimeMaterializedViewRefreshNextUnixSecondsUpdateNull(schemaName.O, tblInfo.Name.O, tblInfo.MaterializedView.RefreshNext)
 				},
@@ -5228,12 +5209,14 @@ func initRefreshMaterializedViewSession(
 	}
 
 	origSQLMode := sessVars.SQLMode
+	origDivPrecisionIncrement := sessVars.DivPrecisionIncrement
 	origTimeZone := sessVars.TimeZone
 	origStmtCtxTimeZone := sessVars.StmtCtx.TimeZone()
 	origTypeFlags := sessVars.StmtCtx.TypeFlags()
 	origErrLevels := sessVars.StmtCtx.ErrLevels()
 
 	sessVars.SQLMode = mviewInfo.DefinitionSQLMode
+	sessVars.DivPrecisionIncrement = mviewInfo.DefinitionDivPrecisionIncrement
 	sessVars.SetStatusFlag(mysql.ServerStatusNoBackslashEscaped, sessVars.SQLMode.HasNoBackslashEscapesMode())
 	sessVars.TimeZone = loc
 	sessVars.StmtCtx.SetTimeZone(loc)
@@ -5242,6 +5225,7 @@ func initRefreshMaterializedViewSession(
 
 	return func() {
 		sessVars.SQLMode = origSQLMode
+		sessVars.DivPrecisionIncrement = origDivPrecisionIncrement
 		sessVars.SetStatusFlag(mysql.ServerStatusNoBackslashEscaped, origSQLMode.HasNoBackslashEscapesMode())
 		sessVars.TimeZone = origTimeZone
 		sessVars.StmtCtx.SetTimeZone(origStmtCtxTimeZone)
@@ -6035,7 +6019,6 @@ func deriveRuntimeMaterializedScheduleNextUnixSeconds(
 	nextExpr string,
 	isInternalSQL bool,
 	scheduleSQLMode mysql.SQLMode,
-	scheduleTimeZone *time.Location,
 	logNullUpdate func(),
 ) (*int64, bool, error) {
 	if !isInternalSQL {
@@ -6047,7 +6030,6 @@ func deriveRuntimeMaterializedScheduleNextUnixSeconds(
 		startExpr,
 		nextExpr,
 		scheduleSQLMode,
-		scheduleTimeZone,
 	)
 	if err != nil {
 		return nil, false, err
@@ -6058,7 +6040,7 @@ func deriveRuntimeMaterializedScheduleNextUnixSeconds(
 	if nextAt == nil {
 		return nil, shouldUpdate, nil
 	}
-	nextUnixSeconds, err := expression.MaterializedScheduleTimeToUnixSeconds(nextAt, scheduleTimeZone)
+	nextUnixSeconds, err := expression.MaterializedScheduleTimeToUnixSeconds(nextAt)
 	return nextUnixSeconds, shouldUpdate, errors.Trace(err)
 }
 
