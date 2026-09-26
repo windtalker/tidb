@@ -163,7 +163,8 @@ const (
 	// inTxnRetry is set when visiting in transaction retry.
 	inTxnRetry
 	// inCreateOrDropTable is set when visiting create/drop table/view/sequence,
-	// rename table, alter table add foreign key, alter table in prepare stmt, and BR restore.
+	// rename table, complete out-of-place materialized view refresh, alter table add
+	// foreign key, alter table in prepare stmt, and BR restore.
 	// TODO need a better name to clarify it's meaning
 	inCreateOrDropTable
 	// parentIsJoin is set when visiting node's parent is join.
@@ -329,12 +330,21 @@ func (p *preprocessor) Enter(in ast.Node) bool {
 		p.checkAlterTableGrammar(node)
 	case *ast.AlterMaterializedViewStmt:
 		p.stmtTp = TypeAlter
-		// The view name is not an existing table. Avoid resolving it as a normal table name.
+		// ALTER MATERIALIZED VIEW validates its target during DDL handling; do not
+		// register it as an ordinary table dependency during preprocessing.
 		p.flag |= inCreateOrDropTable
 	case *ast.AlterMaterializedViewLogStmt:
 		p.stmtTp = TypeAlter
 	case *ast.PurgeMaterializedViewLogStmt:
 		p.stmtTp = TypeAlter
+	case *ast.RefreshMaterializedViewStmt:
+		if node.Type == ast.RefreshMaterializedViewTypeComplete &&
+			node.CompleteType == ast.RefreshMaterializedViewCompleteTypeOutOfPlace {
+			// Complete out-of-place refresh validates its target in the refresh
+			// executor and manages cutover separately. Do not register the target as
+			// a normal table dependency in the refresh session's MDL-related table set.
+			p.flag |= inCreateOrDropTable
+		}
 	case *ast.CreateDatabaseStmt:
 		p.stmtTp = TypeCreate
 		p.checkCreateDatabaseGrammar(node)
@@ -665,7 +675,7 @@ func (p *preprocessor) Leave(in ast.Node) bool {
 		p.flag &= ^inCreateOrDropTable
 	case *ast.CreateMaterializedViewStmt:
 		p.flag &= ^inCreateOrDropTable
-	case *ast.AlterMaterializedViewStmt, *ast.DropMaterializedViewStmt, *ast.DropTableStmt, *ast.AlterTableStmt, *ast.RenameTableStmt:
+	case *ast.AlterMaterializedViewStmt, *ast.DropMaterializedViewStmt, *ast.RefreshMaterializedViewStmt, *ast.DropTableStmt, *ast.AlterTableStmt, *ast.RenameTableStmt:
 		p.flag &= ^inCreateOrDropTable
 	case *driver.ParamMarkerExpr:
 		if p.flag&inPrepare == 0 {

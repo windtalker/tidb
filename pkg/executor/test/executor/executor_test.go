@@ -2664,3 +2664,33 @@ func TestIssue52984(t *testing.T) {
 		tk.MustQuery("select p, o, v, sum(v) over w as 'sum' from t window w as (partition by p order by o rows between 0 preceding and 0 following) limit 10;")
 	}
 }
+
+func TestMaterializedViewRefreshCompleteOutOfPlaceCutoverWithoutMDLWorkaround(t *testing.T) {
+	store := testkit.CreateMockStore(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("set tidb_mview_enable = on")
+	tk.MustExec("create table t_mv_oop_mdl (a int not null, b int not null)")
+	tk.MustExec("insert into t_mv_oop_mdl values (1, 10), (1, 5), (2, 7)")
+	tk.MustExec("create materialized view log on t_mv_oop_mdl (a, b) purge next date_add(now(), interval 1 hour)")
+	tk.MustExec("create materialized view mv_oop_mdl (a, s, cnt) refresh fast next date_add(now(), interval 1 hour) as select a, sum(b), count(1) from t_mv_oop_mdl group by a")
+
+	oldMViewIDRows := tk.MustQuery(
+		"select tidb_table_id from information_schema.tables where table_schema = 'test' and table_name = 'mv_oop_mdl'",
+	).Rows()
+	require.Len(t, oldMViewIDRows, 1)
+	tk.MustExec("insert into t_mv_oop_mdl values (2, 3), (3, 4)")
+
+	// The refresh target must not be tracked as an ordinary table reference that blocks its own DDL.
+	tk.MustExec("refresh materialized view mv_oop_mdl complete out of place")
+
+	newMViewIDRows := tk.MustQuery(
+		"select tidb_table_id from information_schema.tables where table_schema = 'test' and table_name = 'mv_oop_mdl'",
+	).Rows()
+	require.Len(t, newMViewIDRows, 1)
+	require.NotEqual(t, oldMViewIDRows[0][0], newMViewIDRows[0][0])
+	tk.MustQuery("select a, s, cnt from mv_oop_mdl order by a").Check(testkit.Rows("1 15 2", "2 10 2", "3 4 1"))
+	checkKit := testkit.NewTestKit(t, store)
+	checkKit.MustExec("use test")
+	checkKit.MustQuery("show tables like '\\_\\_mv\\_shadow\\_%'").Check(testkit.Rows())
+}

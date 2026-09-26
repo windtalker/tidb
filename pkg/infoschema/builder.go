@@ -125,7 +125,32 @@ func (b *Builder) applyCreateTables(m meta.Reader, diff *model.SchemaDiff) ([]in
 
 func applyMViewRefreshOutOfPlaceCutover(b *Builder, m meta.Reader, diff *model.SchemaDiff) ([]int64, error) {
 	if b.enableV2 {
-		return applyDefaultAction(b, m, diff)
+		dbInfo, ok := b.infoschemaV2.SchemaByID(diff.SchemaID)
+		if !ok {
+			return nil, ErrDatabaseNotExists.GenWithStackByArgs(fmt.Sprintf("(Schema ID %d)", diff.SchemaID))
+		}
+		oldTableID, newTableID := diff.OldTableID, diff.TableID
+		b.updateBundleForTableUpdate(diff, newTableID, oldTableID)
+
+		tblIDs := make([]int64, 0, 2)
+		if tableIDIsValid(oldTableID) {
+			tblIDs = applyDropTable(b, diff, dbInfo, oldTableID, tblIDs)
+		}
+		// The shadow table already exists when the cutover diff is applied. Drop
+		// its old name/index before recreating it with the MV metadata written by
+		// the cutover worker; otherwise InfoSchema v2 retains the shadow name.
+		if tableIDIsValid(newTableID) && newTableID != oldTableID {
+			tblIDs = applyDropTable(b, diff, dbInfo, newTableID, tblIDs)
+		}
+		if tableIDIsValid(newTableID) {
+			allocs, _ := allocByID(b, newTableID)
+			var err error
+			tblIDs, err = applyCreateTable(b, m, dbInfo, newTableID, allocs, diff.Type, tblIDs, diff.Version)
+			if err != nil {
+				return nil, errors.Trace(err)
+			}
+		}
+		return b.applyAffectedOpts(m, tblIDs, diff, diff.Type)
 	}
 
 	roDBInfo, ok := b.infoSchema.SchemaByID(diff.SchemaID)

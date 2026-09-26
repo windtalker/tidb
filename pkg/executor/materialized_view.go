@@ -1715,11 +1715,6 @@ func (e *RefreshMaterializedViewExec) executeRefreshMaterializedViewCompleteOutO
 		if !ok {
 			return errors.New("materialized view complete out-of-place refresh is not supported")
 		}
-		// The refresh statement reads the MV and its base table before submitting
-		// the cutover DDL. Those table IDs are recorded in the calling session's
-		// MDL state, but the cutover itself must acquire the exclusive lock and
-		// must not be blocked by the session that submits it.
-		e.Ctx().GetSessionVars().ClearRelatedTableForMDL()
 		return ddlExecutor.RefreshMaterializedViewCompleteOutOfPlaceCutover(
 			e.Ctx(),
 			tblInfo.DBID,

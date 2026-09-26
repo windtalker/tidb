@@ -22,6 +22,8 @@ The port is limited to PR5 from `cp_mv_for_master_base`'s tracking document. SHO
 - [x] (2026-09-12) Regenerated Bazel metadata and completed scoped compilation/tests, vet, lint, and diff review.
 - [x] (2026-09-13) Added the out-of-place cutover statistics-subscriber branch and a regression test covering old/new stats metadata.
 - [x] (2026-09-13) Restored the direct preprocessor shadow-table readability check and a regression test that stops at preprocessing.
+- [x] (2026-09-26) Ported complete out-of-place refresh-target preprocessing so the MV name is not registered as a normal table dependency; removed the related-table MDL clearing workaround and added preprocess plus out-of-place cutover regression tests.
+- [x] (2026-09-26) Fixed InfoSchema v2 out-of-place cutover to remove both the old MV and existing shadow name/index before rebuilding the shadow ID as the public MV; added name-based v1/v2 builder assertions.
 
 ## Surprises & Discoveries
 
@@ -64,6 +66,18 @@ The comparison source is `remotes/xufei/cp_mv_for_master`, compared against the 
   `CheckMViewShadowReadable` for `SELECT` table resolution. The regression test calls
   `Preprocess` without invoking later plan builders and verifies that user reads are
   rejected.
+- **Resolved (2026-09-26):** `REFRESH MATERIALIZED VIEW ... COMPLETE OUT OF PLACE`
+  sets `inCreateOrDropTable` while preprocessing its target name, so the target
+  is not registered as a normal table reference in the caller's MDL state. Other
+  refresh modes retain normal target resolution. The out-of-place cutover no
+  longer needs `ClearRelatedTableForMDL`; focused preprocess tests and an
+  end-to-end out-of-place cutover test cover both sides of this change.
+- **Resolved (2026-09-26):** InfoSchema v2 previously used the generic table-update
+  path for `ActionMViewRefreshOutOfPlaceCutover`. That removed the old MV ID but did
+  not remove the already-created shadow ID/name before recreating it, leaving the
+  shadow table visible after a successful cutover. The v2 path now drops both IDs,
+  recreates the shadow ID from cutover metadata, and is covered by name-based builder
+  assertions plus the executor cutover test.
 
 ### Missing focused tests
 
