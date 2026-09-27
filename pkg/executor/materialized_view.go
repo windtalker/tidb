@@ -2693,7 +2693,7 @@ func (e *PurgeMaterializedViewLogExec) executePurgeMaterializedViewLog(
 					effectiveBatchSize = throttlePlan.effectiveDeleteBatchSize(batchSize)
 				}
 				deleteLoopStart = time.Now()
-				for _, rowIDRange := range deletePlan.rowIDRanges {
+				for rangeIndex, rowIDRange := range deletePlan.rowIDRanges {
 					for {
 						batchPurgeRows, batchErr := purgeMaterializedViewLogData(
 							kctx,
@@ -2714,10 +2714,9 @@ func (e *PurgeMaterializedViewLogExec) executePurgeMaterializedViewLog(
 							txnFinished = true
 							return finalizeFailure(batchErr)
 						}
-						if batchPurgeRows < effectiveBatchSize {
-							break
-						}
-						if throttlePlan != nil {
+						hasMoreRanges := rangeIndex+1 < len(deletePlan.rowIDRanges)
+						batchCompleted := batchPurgeRows >= effectiveBatchSize
+						if throttlePlan != nil && shouldThrottleMLogPurgeDeleteBatch(batchCompleted, hasMoreRanges) {
 							if sleepErr := throttlePlan.maybeSleep(kctx, deleteLoopStart, totalPurgeRows); sleepErr != nil {
 								if taskCancelController.isManualCancelRequested() {
 									return finalizeFailure(sleepErr)
@@ -2734,6 +2733,9 @@ func (e *PurgeMaterializedViewLogExec) executePurgeMaterializedViewLog(
 							} else {
 								effectiveBatchSize = throttlePlan.effectiveDeleteBatchSize(batchSize)
 							}
+						}
+						if !batchCompleted {
+							break
 						}
 					}
 				}
@@ -3605,6 +3607,10 @@ func (p *mlogPurgeThrottlePlan) maybeSleep(
 	case <-timer.C:
 		return nil
 	}
+}
+
+func shouldThrottleMLogPurgeDeleteBatch(batchCompleted, hasMoreRanges bool) bool {
+	return batchCompleted || hasMoreRanges
 }
 
 func (p *mlogPurgeThrottlePlan) recalculateBatchSizeOnNoWait(totalDeletedRows int64) error {

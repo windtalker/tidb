@@ -346,12 +346,18 @@ func evalMaterializedScheduleExprToDatetime(
 		return nil, nil
 	}
 
-	targetTp := types.NewFieldType(mysql.TypeDatetime)
-	targetTp.SetDecimal(types.MaxFsp)
-	datetimeV, err := v.ConvertTo(evalCtx.TypeCtx(), targetTp)
-	if err != nil {
-		return nil, errors.Trace(err)
+	if v.Kind() != types.KindMysqlTime {
+		return nil, errors.Errorf(
+			"materialized schedule expression evaluated to %s, expected DATE/DATETIME/TIMESTAMP",
+			types.KindStr(v.Kind()),
+		)
 	}
-	t := datetimeV.GetMysqlTime()
+	t := v.GetMysqlTime()
+	if tp := t.Type(); tp != mysql.TypeDate && tp != mysql.TypeDatetime && tp != mysql.TypeTimestamp {
+		return nil, errors.Errorf(
+			"materialized schedule expression evaluated to %s, expected DATE/DATETIME/TIMESTAMP",
+			types.TypeStr(tp),
+		)
+	}
 	return &t, nil
 }

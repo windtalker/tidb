@@ -639,12 +639,12 @@ func TestCreateMaterializedViewLogPurgeExprTypeValidation(t *testing.T) {
 	require.ErrorContains(t, err, "PURGE IMMEDIATE is not supported for CREATE MATERIALIZED VIEW LOG")
 
 	err = tk.ExecToErr("create materialized view log on t (a) purge start with 1 next date_add(now(), interval 1 hour)")
-	require.ErrorContains(t, err, "PURGE START WITH expression must return DATETIME/TIMESTAMP")
+	require.ErrorContains(t, err, "PURGE START WITH expression must return DATE/DATETIME/TIMESTAMP")
 
 	err = tk.ExecToErr("create materialized view log on t (a) purge next 600")
-	require.ErrorContains(t, err, "PURGE NEXT expression must return DATETIME/TIMESTAMP")
+	require.ErrorContains(t, err, "PURGE NEXT expression must return DATE/DATETIME/TIMESTAMP")
 
-	tk.MustExec("create materialized view log on t (a) purge start with now() next date_add(now(), interval 1 hour)")
+	tk.MustExec("create materialized view log on t (a) purge start with current_date next date_add(now(), interval 1 hour)")
 }
 
 func TestCreateMaterializedViewLogAccumulationAlert(t *testing.T) {
@@ -838,12 +838,12 @@ func TestAlterMaterializedViewLogPurgeExprTypeValidation(t *testing.T) {
 	tk.MustExec("create materialized view log on t (a) purge next date_add(now(), interval 1 hour)")
 
 	err := tk.ExecToErr("alter materialized view log on t purge start with 1 next date_add(now(), interval 1 hour)")
-	require.ErrorContains(t, err, "PURGE START WITH expression must return DATETIME/TIMESTAMP")
+	require.ErrorContains(t, err, "PURGE START WITH expression must return DATE/DATETIME/TIMESTAMP")
 
 	err = tk.ExecToErr("alter materialized view log on t purge next 300")
-	require.ErrorContains(t, err, "PURGE NEXT expression must return DATETIME/TIMESTAMP")
+	require.ErrorContains(t, err, "PURGE NEXT expression must return DATE/DATETIME/TIMESTAMP")
 
-	tk.MustExec("alter materialized view log on t purge start with now() next date_add(now(), interval 1 hour)")
+	tk.MustExec("alter materialized view log on t purge start with current_date next date_add(now(), interval 1 hour)")
 }
 
 func TestAlterMaterializedViewLogPurgeUpdatesMetaAndNextUnixSeconds(t *testing.T) {

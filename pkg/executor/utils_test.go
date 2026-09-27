@@ -261,6 +261,25 @@ func TestMLogPurgeAdaptiveBatchSizeComputed(t *testing.T) {
 	plan = &mlogPurgeThrottlePlan{targetRate: 100000}
 	batch = plan.effectiveDeleteBatchSize(10000)
 	require.Equal(t, int64(10000), batch)
+
+	t.Run("throttle across row ID ranges", func(t *testing.T) {
+		tests := []struct {
+			name           string
+			batchCompleted bool
+			hasMoreRanges  bool
+			want           bool
+		}{
+			{name: "full batch", batchCompleted: true, want: true},
+			{name: "partial batch before another range", hasMoreRanges: true, want: true},
+			{name: "empty range before another range", hasMoreRanges: true, want: true},
+			{name: "partial final batch", want: false},
+		}
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				require.Equal(t, tt.want, shouldThrottleMLogPurgeDeleteBatch(tt.batchCompleted, tt.hasMoreRanges))
+			})
+		}
+	})
 }
 
 func TestMLogPurgeAdaptiveBatchSizeReplannedAfterNoWait(t *testing.T) {
