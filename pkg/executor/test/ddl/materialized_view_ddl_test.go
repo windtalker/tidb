@@ -155,6 +155,11 @@ func TestDropMaterializedViewIfExists(t *testing.T) {
 	tk.MustExec("create materialized view log on t_drop_if_exists (a)")
 	tk.MustExec("create materialized view mv_drop_if_exists (a, cnt) as select a, count(1) from t_drop_if_exists group by a")
 
+	err = tk.ExecToErr("drop materialized view log if exists on mv_drop_if_exists")
+	require.ErrorContains(t, err, "is not BASE TABLE")
+	err = tk.ExecToErr("drop materialized view log if exists on `$mlog$t_drop_if_exists`")
+	require.ErrorContains(t, err, "is not BASE TABLE")
+
 	err = tk.ExecToErr("drop materialized view if exists t_drop_if_exists")
 	require.ErrorContains(t, err, "is not MATERIALIZED VIEW")
 
@@ -166,6 +171,7 @@ func TestDropMaterializedViewIfExists(t *testing.T) {
 	require.ErrorContains(t, err, "is not BASE TABLE")
 
 	tk.MustExec("drop materialized view log if exists on t_no_mlog_drop_if_exists")
+	tk.MustQuery("show warnings").Check(testkit.Rows("Note 1051 Unknown table 'test.t_no_mlog_drop_if_exists'"))
 	tk.MustExec("drop materialized view log if exists on t_drop_if_exists")
 	tk.MustExec("drop materialized view log if exists on t_drop_if_exists")
 }
@@ -2277,6 +2283,96 @@ func TestDropMaterializedViewLogRecheckWithConcurrentCreateMaterializedView(t *t
 	baseTable, err := is.TableByName(context.Background(), pmodel.NewCIStr("test"), pmodel.NewCIStr("t"))
 	require.NoError(t, err)
 	require.True(t, baseTable.Meta().MaterializedViewBase == nil || (baseTable.Meta().MaterializedViewBase.MLogID == 0 && len(baseTable.Meta().MaterializedViewBase.MViewIDs) == 0))
+}
+
+func TestTruncateTableRecheckMaterializedViewConstraints(t *testing.T) {
+	store, dom := testkit.CreateMockStoreAndDomain(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("create table t_truncate_mlog_recheck (a int)")
+
+	const baseTableName = "t_truncate_mlog_recheck"
+	baseTable, err := dom.InfoSchema().TableByName(context.Background(), pmodel.NewCIStr("test"), pmodel.NewCIStr(baseTableName))
+	require.NoError(t, err)
+	baseTableID := baseTable.Meta().ID
+	mlogTableName := model.MaterializedViewLogTableName(pmodel.NewCIStr(baseTableName))
+
+	createStartedCh := make(chan struct{})
+	allowCreateCh := make(chan struct{})
+	var createStartedOnce sync.Once
+	var allowCreateOnce sync.Once
+	allowCreate := func() {
+		allowCreateOnce.Do(func() {
+			close(allowCreateCh)
+		})
+	}
+	t.Cleanup(allowCreate)
+	testfailpoint.EnableCall(t, "github.com/pingcap/tidb/pkg/ddl/beforeRunOneJobStep", func(job *model.Job) {
+		if job.Type != model.ActionCreateMaterializedViewLog || job.TableName != mlogTableName.L {
+			return
+		}
+		createStartedOnce.Do(func() {
+			close(createStartedCh)
+		})
+		<-allowCreateCh
+	})
+
+	createErrCh := make(chan error, 1)
+	go func() {
+		tkCreate := testkit.NewTestKit(t, store)
+		tkCreate.MustExec("use test")
+		createErrCh <- tkCreate.ExecToErr("create materialized view log on t_truncate_mlog_recheck (a)")
+	}()
+	select {
+	case <-createStartedCh:
+	case <-time.After(10 * time.Second):
+		t.Fatal("timeout waiting for CREATE MATERIALIZED VIEW LOG worker")
+	}
+
+	entryCheckDoneCh := make(chan struct{})
+	var entryCheckDoneOnce sync.Once
+	testfailpoint.EnableCall(t, "github.com/pingcap/tidb/pkg/ddl/afterCheckTruncateTableMaterializedViewConstraints", func(tableID int64) {
+		if tableID == baseTableID {
+			entryCheckDoneOnce.Do(func() {
+				close(entryCheckDoneCh)
+			})
+		}
+	})
+	truncateErrCh := make(chan error, 1)
+	go func() {
+		tkTruncate := testkit.NewTestKit(t, store)
+		tkTruncate.MustExec("use test")
+		truncateErrCh <- tkTruncate.ExecToErr("truncate table t_truncate_mlog_recheck")
+	}()
+	select {
+	case <-entryCheckDoneCh:
+	case <-time.After(10 * time.Second):
+		t.Fatal("timeout waiting for TRUNCATE TABLE materialized view constraint precheck")
+	}
+
+	allowCreate()
+	select {
+	case err := <-createErrCh:
+		require.NoError(t, err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("timeout waiting for CREATE MATERIALIZED VIEW LOG")
+	}
+	select {
+	case err := <-truncateErrCh:
+		require.ErrorContains(t, err, "TRUNCATE TABLE on base table with materialized view log")
+	case <-time.After(10 * time.Second):
+		t.Fatal("timeout waiting for TRUNCATE TABLE job")
+	}
+
+	is := dom.InfoSchema()
+	baseTable, err = is.TableByName(context.Background(), pmodel.NewCIStr("test"), pmodel.NewCIStr(baseTableName))
+	require.NoError(t, err)
+	require.Equal(t, baseTableID, baseTable.Meta().ID)
+	require.NotNil(t, baseTable.Meta().MaterializedViewBase)
+	mlogTable, ok := is.TableByID(context.Background(), baseTable.Meta().MaterializedViewBase.MLogID)
+	require.True(t, ok)
+	require.NotNil(t, mlogTable.Meta().MaterializedViewLog)
+	require.Equal(t, baseTableID, mlogTable.Meta().MaterializedViewLog.BaseTableID)
 }
 
 func TestDropMaterializedViewRefreshInfoFailureRollsBackMetadata(t *testing.T) {

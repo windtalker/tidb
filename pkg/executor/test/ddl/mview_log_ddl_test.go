@@ -969,7 +969,8 @@ func TestDropMaterializedViewLogPrivilege(t *testing.T) {
 	tkSelect := testkit.NewTestKit(t, store)
 	require.NoError(t, tkSelect.Session().Auth(&auth.UserIdentity{Username: "u_drop_mlog_select", Hostname: "%"}, nil, nil, nil))
 	err := tkSelect.ExecToErr("drop materialized view log on test.t_drop_mlog_priv")
-	require.ErrorContains(t, err, "DROP command denied")
+	require.ErrorContains(t, err, "DROP MATERIALIZED VIEW LOG command denied")
+	require.ErrorContains(t, err, "for table 't_drop_mlog_priv'")
 
 	tkDrop := testkit.NewTestKit(t, store)
 	require.NoError(t, tkDrop.Session().Auth(&auth.UserIdentity{Username: "u_drop_mlog_ok", Hostname: "%"}, nil, nil, nil))
