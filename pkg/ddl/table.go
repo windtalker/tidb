@@ -1335,6 +1335,15 @@ func (w *worker) onRefreshMaterializedViewCompleteOutOfPlaceCutover(jobCtx *jobC
 		)
 	}
 
+	if oldMViewTblInfo.TiFlashReplica != nil {
+		if err := infosync.DeleteTiFlashTableSyncProgress(oldMViewTblInfo); err != nil {
+			logutil.DDLLogger().Error(
+				"DeleteTiFlashTableSyncProgress fails during materialized view cutover",
+				zap.Error(err),
+				zap.Int64("tableID", oldMViewTblInfo.ID),
+			)
+		}
+	}
 	if err := jobCtx.metaMut.DropTableOrView(job.SchemaID, args.OldMViewID); err != nil {
 		return ver, errors.Trace(err)
 	}
