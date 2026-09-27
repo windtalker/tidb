@@ -142,6 +142,46 @@ func TestIsCreateMaterializedViewBaseCheckCancelledErr(t *testing.T) {
 	require.False(t, isCreateMaterializedViewBaseCheckCancelledErr(fmt.Errorf("retry later")))
 }
 
+func TestSetSchemaDiffForCreateMaterializedViewLogRollback(t *testing.T) {
+	diff := &model.SchemaDiff{}
+	job := &model.Job{
+		Type:    model.ActionCreateMaterializedViewLog,
+		State:   model.JobStateRollbackDone,
+		TableID: 123,
+	}
+
+	require.NoError(t, SetSchemaDiffForCreateTable(diff, job, nil))
+	require.Equal(t, int64(123), diff.OldTableID)
+	require.Zero(t, diff.TableID)
+}
+
+func TestUpdateMaterializedViewBaseInfoOnCreateMissingBaseTable(t *testing.T) {
+	store, err := mockstore.NewMockStore()
+	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, store.Close())
+	}()
+
+	ctx := kv.WithInternalSourceType(context.Background(), kv.InternalTxnDDL)
+	err = kv.RunInNewTxn(ctx, store, false, func(_ context.Context, txn kv.Transaction) error {
+		metaMut := meta.NewMutator(txn)
+		require.NoError(t, metaMut.CreateDatabase(&model.DBInfo{ID: 1, Name: pmodel.NewCIStr("test")}))
+
+		job := &model.Job{SchemaID: 1}
+		createdTable := &model.TableInfo{
+			ID: 2,
+			MaterializedView: &model.MaterializedViewInfo{
+				BaseTableIDs: []int64{123},
+			},
+		}
+		_, err := updateMaterializedViewBaseInfoOnCreate(&jobContext{metaMut: metaMut}, job, createdTable)
+		require.True(t, infoschema.ErrTableNotExists.Equal(err))
+		require.Equal(t, model.JobStateCancelled, job.State)
+		return nil
+	})
+	require.NoError(t, err)
+}
+
 func TestRollingbackCreateMaterializedViewCannotCancelKeepsState(t *testing.T) {
 	job := &model.Job{
 		ID:          42,

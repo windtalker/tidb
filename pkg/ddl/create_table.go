@@ -581,7 +581,6 @@ func (w *worker) onCreateMaterializedView(jobCtx *jobContext, job *model.Job) (v
 			return ver, errors.Trace(err)
 		}
 		finishedTableInfos := make([]*model.TableInfo, 0, len(baseTableIDs)+1)
-		finishedTableInfos = append(finishedTableInfos, mviewTableInfo)
 		for _, baseTableID := range baseTableIDs {
 			baseTblInfo, getErr := getTableInfo(jobCtx.metaMut, baseTableID, job.SchemaID)
 			if getErr != nil {
@@ -589,6 +588,7 @@ func (w *worker) onCreateMaterializedView(jobCtx *jobContext, job *model.Job) (v
 			}
 			finishedTableInfos = append(finishedTableInfos, baseTblInfo)
 		}
+		finishedTableInfos = append(finishedTableInfos, mviewTableInfo)
 		job.FinishMultipleTableJob(model.JobStateDone, model.StatePublic, ver, finishedTableInfos)
 		return ver, nil
 
@@ -1613,7 +1613,7 @@ func updateMaterializedViewBaseInfoOnCreate(jobCtx *jobContext, job *model.Job, 
 		}
 		processedBaseTables[baseTableID] = struct{}{}
 
-		baseTblInfo, err := jobCtx.metaMut.GetTable(job.SchemaID, baseTableID)
+		baseTblInfo, err := getTableInfo(jobCtx.metaMut, baseTableID, job.SchemaID)
 		if err != nil {
 			job.State = model.JobStateCancelled
 			return nil, errors.Trace(err)

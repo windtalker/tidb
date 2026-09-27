@@ -576,7 +576,7 @@ func TestMaterializedViewBaseModifyColumnMultiSchemaInvolvingSchemaInfo(t *testi
 }
 
 func TestCreateMaterializedViewHistoryJobSchemaVersion(t *testing.T) {
-	store := testkit.CreateMockStore(t)
+	store, dom := testkit.CreateMockStoreAndDomain(t)
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
 	tk.MustExec("create table t (a int not null, b int not null)")
@@ -591,6 +591,11 @@ func TestCreateMaterializedViewHistoryJobSchemaVersion(t *testing.T) {
 	historyJob, err := ddl.GetHistoryJobByID(tk.Session(), jobID)
 	require.NoError(t, err)
 	require.Greater(t, historyJob.BinlogInfo.SchemaVersion, int64(0))
+	mvTable, err := dom.InfoSchema().TableByName(context.Background(), pmodel.NewCIStr("test"), pmodel.NewCIStr("mv_hist_schema_ver"))
+	require.NoError(t, err)
+	require.NotNil(t, historyJob.BinlogInfo.TableInfo)
+	require.Equal(t, mvTable.Meta().ID, historyJob.BinlogInfo.TableInfo.ID)
+	require.Equal(t, mvTable.Meta().Name, historyJob.BinlogInfo.TableInfo.Name)
 }
 
 func TestExchangePartitionRejectsMaterializedViewRelatedTable(t *testing.T) {
