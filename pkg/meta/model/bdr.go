@@ -66,6 +66,7 @@ var BDRActionMap = map[DDLBDRType][]ActionType{
 		ActionDropTable,
 		ActionDropMaterializedView,
 		ActionDropMaterializedViewLog,
+		ActionDropMaterializedViewShadow,
 		ActionDropColumn,
 		ActionAddForeignKey,
 		ActionDropForeignKey,
