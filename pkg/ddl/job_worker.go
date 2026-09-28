@@ -628,7 +628,7 @@ func (w *worker) transitOneJobStep(
 				return 0, err
 			}
 			if job.Type == model.ActionMViewRefreshOutOfPlaceCutover {
-				w.cleanupMViewOutOfPlaceCutoverAfterCommit(job)
+				w.cleanupMViewOutOfPlaceCutoverAfterCommit(jobCtx, job)
 			}
 			job.State = model.JobStateSynced
 		}

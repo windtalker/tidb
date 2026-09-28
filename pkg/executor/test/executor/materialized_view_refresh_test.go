@@ -3355,6 +3355,46 @@ func TestMaterializedViewRefreshCompleteOutOfPlaceCutoverFailureRollsBackRefresh
 	tk.MustQuery("select a, s, cnt from mv order by a").Check(testkit.Rows("1 15 2", "2 7 1"))
 }
 
+func TestMaterializedViewRefreshCompleteOutOfPlaceCutoverPublishEventErrorKeepsMetadataAtomic(t *testing.T) {
+	store, dom := testkit.CreateMockStoreAndDomain(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("create table t_cutover_publish_error (a int not null, b int not null)")
+	tk.MustExec("create materialized view log on t_cutover_publish_error (a, b) purge next date_add(now(), interval 1 hour)")
+	tk.MustExec("create materialized view mv_cutover_publish_error (a, s, cnt) refresh fast next date_add(now(), interval 1 hour) as select a, sum(b), count(1) from t_cutover_publish_error group by a")
+
+	is := dom.InfoSchema()
+	mvTable, err := is.TableByName(context.Background(), pmodel.NewCIStr("test"), pmodel.NewCIStr("mv_cutover_publish_error"))
+	require.NoError(t, err)
+	oldMViewID := mvTable.Meta().ID
+	tk.MustExec(fmt.Sprintf(
+		"insert into mysql.tidb_mview_refresh_alert (MVIEW_ID, MVIEW_SCHEMA, MVIEW_NAME, ALERT_LEVEL, UPDATE_TIME) values (%d, 'test', 'mv_cutover_publish_error', 'warning', UTC_TIMESTAMP())",
+		oldMViewID,
+	))
+
+	originErrLimit := variable.GetDDLErrorCountLimit()
+	variable.SetDDLErrorCountLimit(0)
+	defer variable.SetDDLErrorCountLimit(originErrLimit)
+
+	const publishEventErrorFailpoint = "github.com/pingcap/tidb/pkg/ddl/asyncNotifyEventError"
+	require.NoError(t, failpoint.Enable(publishEventErrorFailpoint, "1*return()"))
+	defer func() { _ = failpoint.Disable(publishEventErrorFailpoint) }()
+	tk.MustExec("insert into t_cutover_publish_error values (1, 10)")
+	err = tk.ExecToErr("refresh materialized view mv_cutover_publish_error complete out of place")
+	require.ErrorContains(t, err, "mock publish event error")
+	require.NoError(t, failpoint.Disable(publishEventErrorFailpoint))
+
+	is = dom.InfoSchema()
+	mvTable, err = is.TableByName(context.Background(), pmodel.NewCIStr("test"), pmodel.NewCIStr("mv_cutover_publish_error"))
+	require.NoError(t, err)
+	require.Equal(t, oldMViewID, mvTable.Meta().ID)
+	tk.MustQuery(fmt.Sprintf("select count(*) from mysql.tidb_mview_refresh_info where MVIEW_ID = %d", oldMViewID)).Check(testkit.Rows("1"))
+	tk.MustQuery(fmt.Sprintf("select count(*) from mysql.tidb_mview_refresh_alert where MVIEW_ID = %d", oldMViewID)).Check(testkit.Rows("1"))
+
+	tk.MustExec("refresh materialized view mv_cutover_publish_error complete out of place")
+	tk.MustQuery(fmt.Sprintf("select count(*) from mysql.tidb_mview_refresh_alert where MVIEW_ID = %d", oldMViewID)).Check(testkit.Rows("0"))
+}
+
 func TestMaterializedViewRefreshCompleteOutOfPlaceCutoverKeepsTiFlashProgressUntilCommit(t *testing.T) {
 	const mockTiFlashStoreCountFailpoint = "github.com/pingcap/tidb/pkg/infoschema/mockTiFlashStoreCount"
 	const cutoverBeforeCommitFailpoint = "github.com/pingcap/tidb/pkg/ddl/mockMViewRefreshOutOfPlaceCutoverBeforeCommitError"

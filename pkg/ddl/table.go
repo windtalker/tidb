@@ -51,7 +51,7 @@ import (
 
 const tiflashCheckTiDBHTTPAPIHalfInterval = 2500 * time.Millisecond
 
-func (w *worker) cleanupMViewOutOfPlaceCutoverAfterCommit(job *model.Job) {
+func (w *worker) cleanupMViewOutOfPlaceCutoverAfterCommit(jobCtx *jobContext, job *model.Job) {
 	args, err := model.GetRefreshMaterializedViewCompleteOutOfPlaceCutoverArgs(job)
 	if err != nil {
 		logutil.DDLLogger().Warn(
@@ -60,6 +60,14 @@ func (w *worker) cleanupMViewOutOfPlaceCutoverAfterCommit(job *model.Job) {
 			zap.Error(err),
 		)
 		return
+	}
+
+	if err := w.deleteMViewRefreshAlertForOutOfPlaceCutover(jobCtx, args.OldMViewID); err != nil {
+		logutil.DDLLogger().Warn(
+			"failed to delete stale materialized view refresh alert after cutover",
+			zap.Int64("tableID", args.OldMViewID),
+			zap.Error(err),
+		)
 	}
 
 	// The Stage-1 materialized view is non-partitioned, so the old physical
@@ -1348,14 +1356,6 @@ func (w *worker) onRefreshMaterializedViewCompleteOutOfPlaceCutover(jobCtx *jobC
 	failpoint.Inject("mockMViewRefreshOutOfPlaceCutoverAfterMigrateRefreshInfoError", func() {
 		failpoint.Return(ver, errors.New("mock refresh materialized view complete OUT OF PLACE cutover error after migrating refresh info"))
 	})
-	if err := w.deleteMViewRefreshAlertForOutOfPlaceCutover(jobCtx, args.OldMViewID); err != nil {
-		logutil.DDLLogger().Warn(
-			"refresh materialized view complete OUT OF PLACE cutover: failed to delete stale refresh alert",
-			zap.Int64("oldMViewID", args.OldMViewID),
-			zap.Int64("shadowTableID", args.ShadowTableID),
-			zap.Error(err),
-		)
-	}
 	failpoint.Inject("mockMViewRefreshOutOfPlaceCutoverBeforeCommitError", func() {
 		failpointErr := errors.New("mock refresh materialized view complete OUT OF PLACE cutover error before commit")
 		w.sess.Rollback()
