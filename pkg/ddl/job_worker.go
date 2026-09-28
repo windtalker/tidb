@@ -624,6 +624,12 @@ func (w *worker) transitOneJobStep(
 
 	if job.IsDone() || job.IsRollbackDone() || job.IsCancelled() {
 		if job.IsDone() {
+			if err := w.checkBeforeCommit(); err != nil {
+				return 0, err
+			}
+			if job.Type == model.ActionMViewRefreshOutOfPlaceCutover {
+				w.cleanupMViewOutOfPlaceCutoverAfterCommit(job)
+			}
 			job.State = model.JobStateSynced
 		}
 		// Inject the failpoint to prevent the progress of index creation.

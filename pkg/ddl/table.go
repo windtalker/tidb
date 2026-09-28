@@ -51,6 +51,28 @@ import (
 
 const tiflashCheckTiDBHTTPAPIHalfInterval = 2500 * time.Millisecond
 
+func (w *worker) cleanupMViewOutOfPlaceCutoverAfterCommit(job *model.Job) {
+	args, err := model.GetRefreshMaterializedViewCompleteOutOfPlaceCutoverArgs(job)
+	if err != nil {
+		logutil.DDLLogger().Warn(
+			"failed to decode materialized view cutover args for post-commit cleanup",
+			zap.Int64("jobID", job.ID),
+			zap.Error(err),
+		)
+		return
+	}
+
+	// The Stage-1 materialized view is non-partitioned, so the old physical
+	// table ID is sufficient to remove its TiFlash progress entry.
+	if err := infosync.DeleteTiFlashTableSyncProgress(&model.TableInfo{ID: args.OldMViewID}); err != nil {
+		logutil.DDLLogger().Warn(
+			"failed to delete old materialized view TiFlash sync progress after cutover",
+			zap.Int64("tableID", args.OldMViewID),
+			zap.Error(err),
+		)
+	}
+}
+
 func repairTableOrViewWithCheck(t *meta.Mutator, job *model.Job, schemaID int64, tbInfo *model.TableInfo) error {
 	err := checkTableInfoValid(tbInfo)
 	if err != nil {
@@ -1334,16 +1356,18 @@ func (w *worker) onRefreshMaterializedViewCompleteOutOfPlaceCutover(jobCtx *jobC
 			zap.Error(err),
 		)
 	}
-
-	if oldMViewTblInfo.TiFlashReplica != nil {
-		if err := infosync.DeleteTiFlashTableSyncProgress(oldMViewTblInfo); err != nil {
-			logutil.DDLLogger().Error(
-				"DeleteTiFlashTableSyncProgress fails during materialized view cutover",
-				zap.Error(err),
-				zap.Int64("tableID", oldMViewTblInfo.ID),
-			)
+	failpoint.Inject("mockMViewRefreshOutOfPlaceCutoverBeforeCommitError", func() {
+		failpointErr := errors.New("mock refresh materialized view complete OUT OF PLACE cutover error before commit")
+		w.sess.Rollback()
+		if err := w.sess.Begin(w.workCtx); err != nil {
+			failpoint.Return(ver, errors.Trace(err))
 		}
-	}
+		job.Error = toTError(failpointErr)
+		job.ErrorCount++
+		job.State = model.JobStateCancelled
+		failpoint.Return(ver, failpointErr)
+	})
+
 	if err := jobCtx.metaMut.DropTableOrView(job.SchemaID, args.OldMViewID); err != nil {
 		return ver, errors.Trace(err)
 	}

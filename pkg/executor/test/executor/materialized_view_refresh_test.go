@@ -25,6 +25,7 @@ import (
 
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/tidb/pkg/ddl"
+	"github.com/pingcap/tidb/pkg/domain/infosync"
 	"github.com/pingcap/tidb/pkg/kv"
 	"github.com/pingcap/tidb/pkg/meta/model"
 	"github.com/pingcap/tidb/pkg/metrics"
@@ -3354,6 +3355,47 @@ func TestMaterializedViewRefreshCompleteOutOfPlaceCutoverFailureRollsBackRefresh
 	tk.MustQuery("select a, s, cnt from mv order by a").Check(testkit.Rows("1 15 2", "2 7 1"))
 }
 
+func TestMaterializedViewRefreshCompleteOutOfPlaceCutoverKeepsTiFlashProgressUntilCommit(t *testing.T) {
+	const mockTiFlashStoreCountFailpoint = "github.com/pingcap/tidb/pkg/infoschema/mockTiFlashStoreCount"
+	const cutoverBeforeCommitFailpoint = "github.com/pingcap/tidb/pkg/ddl/mockMViewRefreshOutOfPlaceCutoverBeforeCommitError"
+	require.NoError(t, failpoint.Enable(mockTiFlashStoreCountFailpoint, "return(true)"))
+	defer func() {
+		require.NoError(t, failpoint.Disable(mockTiFlashStoreCountFailpoint))
+	}()
+
+	store, dom := testkit.CreateMockStoreAndDomain(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("create table t_tiflash_cutover (a int not null, b int not null)")
+	tk.MustExec("insert into t_tiflash_cutover values (1, 10), (2, 7)")
+	tk.MustExec("create materialized view log on t_tiflash_cutover (a, b) purge next date_add(now(), interval 1 hour)")
+	tk.MustExec("create materialized view mv_tiflash_cutover (a, s, cnt) refresh fast next date_add(now(), interval 1 hour) as select a, sum(b), count(1) from t_tiflash_cutover group by a")
+	tk.MustExec("alter table mv_tiflash_cutover set tiflash replica 1")
+
+	mvTable, err := dom.InfoSchema().TableByName(context.Background(), pmodel.NewCIStr("test"), pmodel.NewCIStr("mv_tiflash_cutover"))
+	require.NoError(t, err)
+	oldMViewID := mvTable.Meta().ID
+	infosync.UpdateTiFlashProgressCache(oldMViewID, 0.75)
+	_, exists := infosync.GetTiFlashProgressFromCache(oldMViewID)
+	require.True(t, exists)
+
+	originErrLimit := variable.GetDDLErrorCountLimit()
+	variable.SetDDLErrorCountLimit(0)
+	defer variable.SetDDLErrorCountLimit(originErrLimit)
+	require.NoError(t, failpoint.Enable(cutoverBeforeCommitFailpoint, "return"))
+	tk.MustExec("insert into t_tiflash_cutover values (3, 4)")
+	err = tk.ExecToErr("refresh materialized view mv_tiflash_cutover complete out of place")
+	require.ErrorContains(t, err, "error before commit")
+	require.NoError(t, failpoint.Disable(cutoverBeforeCommitFailpoint))
+
+	_, exists = infosync.GetTiFlashProgressFromCache(oldMViewID)
+	require.True(t, exists)
+
+	tk.MustExec("refresh materialized view mv_tiflash_cutover complete out of place")
+	_, exists = infosync.GetTiFlashProgressFromCache(oldMViewID)
+	require.False(t, exists)
+}
+
 func TestMaterializedViewRefreshCompleteOutOfPlaceShadowTableProtected(t *testing.T) {
 	store, _ := testkit.CreateMockStoreAndDomain(t)
 	tk := testkit.NewTestKit(t, store)
@@ -3390,12 +3432,23 @@ func TestMaterializedViewRefreshCompleteOutOfPlaceShadowTableProtected(t *testin
 		return shadowTableName != ""
 	}, 30*time.Second, 100*time.Millisecond)
 
-	err := tk.ExecToErr(fmt.Sprintf("insert into `%s` values (9, 9, 9)", shadowTableName))
+	tkUser := testkit.NewTestKit(t, store)
+	tkUser.MustExec("use test")
+	tkUser.Session().GetSessionVars().User = &auth.UserIdentity{AuthUsername: "test", AuthHostname: "%"}
+	err := tkUser.ExecToErr(fmt.Sprintf("insert into `%s` values (9, 9, 9)", shadowTableName))
 	require.ErrorContains(t, err, "not updatable")
-	err = tk.ExecToErr(fmt.Sprintf("alter table `%s` add column x int", shadowTableName))
+	err = tkUser.ExecToErr(fmt.Sprintf("alter table `%s` add column x int", shadowTableName))
 	require.ErrorContains(t, err, "ALTER TABLE on materialized view shadow table")
-	err = tk.ExecToErr(fmt.Sprintf("drop table `%s`", shadowTableName))
+	err = tkUser.ExecToErr(fmt.Sprintf("drop table `%s`", shadowTableName))
 	require.ErrorContains(t, err, "DROP TABLE on materialized view shadow table")
+	err = tkUser.ExecToErr(fmt.Sprintf(
+		"update t_shadow_guard n join `%s` s on n.a = s.a set n.b = s.s", shadowTableName,
+	))
+	require.ErrorContains(t, err, "SELECT command denied")
+	err = tkUser.ExecToErr(fmt.Sprintf(
+		"delete n from t_shadow_guard n join `%s` s on n.a = s.a", shadowTableName,
+	))
+	require.ErrorContains(t, err, "SELECT command denied")
 
 	require.NoError(t, failpoint.Disable(pauseCreateShadowFailpoint))
 	enabled = false
