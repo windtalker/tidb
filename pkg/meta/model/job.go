@@ -111,16 +111,16 @@ const (
 	ActionAlterTablePartitioning          ActionType = 71
 	ActionRemovePartitioning              ActionType = 72
 	ActionAddVectorIndex                  ActionType = 73
-	ActionCreateMaterializedViewLog       ActionType = 74
-	ActionCreateMaterializedView          ActionType = 75
-	ActionAlterMaterializedViewRefresh    ActionType = 76
-	ActionAlterMaterializedViewLogPurge   ActionType = 77
-	ActionAlterMaterializedViewAttributes ActionType = 78
-	ActionMViewRefreshOutOfPlaceCutover   ActionType = 79
-	ActionCreateMaterializedViewShadow    ActionType = 80
-	ActionDropMaterializedViewLog         ActionType = 81
-	ActionDropMaterializedView            ActionType = 82
-	ActionDropMaterializedViewShadow      ActionType = 83
+	ActionCreateMaterializedViewLog       ActionType = 85
+	ActionCreateMaterializedView          ActionType = 86
+	ActionDropMaterializedViewLog         ActionType = 87
+	ActionDropMaterializedView            ActionType = 88
+	ActionAlterMaterializedViewRefresh    ActionType = 89
+	ActionAlterMaterializedViewLogPurge   ActionType = 90
+	ActionAlterMaterializedViewAttributes ActionType = 91
+	ActionMViewRefreshOutOfPlaceCutover   ActionType = 92
+	ActionCreateMaterializedViewShadow    ActionType = 93
+	ActionDropMaterializedViewShadow      ActionType = 94
 )
 
 // ActionMap is the map of DDL ActionType to string.
