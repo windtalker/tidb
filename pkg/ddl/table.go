@@ -1288,7 +1288,7 @@ func (w *worker) onRefreshMaterializedViewCompleteOutOfPlaceCutover(jobCtx *jobC
 		}
 		return ver, errors.Trace(err)
 	}
-	if shadowTblInfo.MaterializedView != nil || shadowTblInfo.IsView() || shadowTblInfo.IsSequence() {
+	if shadowTblInfo.MaterializedView != nil || shadowTblInfo.MaterializedViewLog != nil || shadowTblInfo.IsView() || shadowTblInfo.IsSequence() {
 		job.State = model.JobStateCancelled
 		return ver, dbterror.ErrInvalidDDLJob.GenWithStackByArgs(
 			"refresh materialized view complete OUT OF PLACE cutover: shadow table is not a protected physical table",
