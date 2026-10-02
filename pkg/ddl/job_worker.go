@@ -73,6 +73,7 @@ type rollbackTxnError struct{ cause error }
 
 func (e *rollbackTxnError) Error() string { return e.cause.Error() }
 func (e *rollbackTxnError) Unwrap() error { return e.cause }
+func (e *rollbackTxnError) Cause() error  { return e.cause }
 
 func newRollbackTxnError(err error) error { return &rollbackTxnError{cause: err} }
 
