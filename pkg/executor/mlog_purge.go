@@ -1375,7 +1375,7 @@ func deriveMLogPurgeNextUnixSeconds(
 		return nil, true, nil
 	}
 	nextAt, shouldUpdate, err := expression.DeriveMaterializedScheduleNextTime(
-		kctx, evalSctx, mlogInfo.PurgeNext,
+		kctx, evalSctx, mlogInfo.PurgeStartWith, mlogInfo.PurgeNext,
 		mlogInfo.PurgeScheduleSQLMode,
 	)
 	if err != nil {
