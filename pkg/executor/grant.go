@@ -120,6 +120,9 @@ func (e *GrantExec) Next(ctx context.Context, _ *chunk.Chunk) error {
 		}
 		// Note the table name compare is not case sensitive here.
 		// In TiDB, system variable lower_case_table_names = 2 which means name comparisons are not case-sensitive.
+		if tbl != nil && tbl.Meta().MaterializedViewShadow != nil {
+			return errors.Errorf("cannot grant privileges on materialized view shadow table %s", tbl.Meta().Name.O)
+		}
 		if tbl != nil && tbl.Meta().Name.L != strings.ToLower(e.Level.TableName) {
 			return infoschema.ErrTableNotExists.GenWithStackByArgs(dbName, e.Level.TableName)
 		}

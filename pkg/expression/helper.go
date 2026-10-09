@@ -169,6 +169,7 @@ func EvalMaterializedScheduleExpr(
 func DeriveMaterializedScheduleNextTime(
 	kctx context.Context,
 	evalSctx sessionctx.Context,
+	startExpr string,
 	nextExpr string,
 	scheduleSQLMode mysql.SQLMode,
 ) (*types.Time, bool, error) {
