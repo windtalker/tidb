@@ -296,6 +296,14 @@ failpoint-disable: tools/bin/failpoint-ctl
 # Restoring gofail failpoints...
 	@$(FAILPOINT_DISABLE)
 
+.PHONY: bazel-failpoint-enable
+bazel-failpoint-enable:
+	find $$PWD/ -mindepth 1 -type d | grep -vE "(\.git|\.idea|tools)" | xargs bazel $(BAZEL_GLOBAL_CONFIG) run $(BAZEL_CMD_CONFIG) @com_github_pingcap_failpoint//failpoint-ctl:failpoint-ctl -- enable
+
+.PHONY: bazel-failpoint-disable
+bazel-failpoint-disable:
+	find $$PWD/ -mindepth 1 -type d | grep -vE "(\.git|\.idea|tools)" | xargs bazel $(BAZEL_GLOBAL_CONFIG) run $(BAZEL_CMD_CONFIG) @com_github_pingcap_failpoint//failpoint-ctl:failpoint-ctl -- disable
+
 .PHONY: tools/bin/ut
 tools/bin/ut: tools/check/ut.go
 	cd tools/check; \
@@ -581,7 +589,7 @@ generate_grafana_scripts:
 bazel_ci_prepare:
 	bazel $(BAZEL_GLOBAL_CONFIG) run $(BAZEL_CMD_CONFIG) //:gazelle
 	bazel $(BAZEL_GLOBAL_CONFIG) run $(BAZEL_CMD_CONFIG) //:gazelle -- update-repos -from_file=go.mod -to_macro DEPS.bzl%go_deps  -build_file_proto_mode=disable -prune
-	bazel $(BAZEL_GLOBAL_CONFIG) run $(BAZEL_CMD_CONFIG)  //cmd/mirror:mirror -- --mirror> tmp.txt
+	bazel $(BAZEL_GLOBAL_CONFIG) run $(BAZEL_CMD_CONFIG)  //cmd/mirror:mirror > tmp.txt
 	mv tmp.txt DEPS.bzl
 	bazel $(BAZEL_GLOBAL_CONFIG) run $(BAZEL_CMD_CONFIG)  \
 		--run_under="cd $(CURDIR) && " \
@@ -602,7 +610,7 @@ bazel_prepare: ## Update and generate BUILD.bazel files. Please run this before 
 		--run_under="cd $(CURDIR) && " \
 		 //tools/tazel:tazel
 	$(eval $@TMP_OUT := $(shell mktemp -d -t tidbbzl.XXXXXX))
-	bazel run  //cmd/mirror -- --mirror> $($@TMP_OUT)/tmp.txt
+	bazel run  //cmd/mirror > $($@TMP_OUT)/tmp.txt
 	cp $($@TMP_OUT)/tmp.txt DEPS.bzl
 	rm -rf $($@TMP_OUT)
 
@@ -639,6 +647,12 @@ bazel_coverage_test_ddlargsv1: failpoint-enable bazel_ci_simple_prepare
 		--@io_bazel_rules_go//go/config:cover_format=go_cover --define gotags=deadlock,intest,ddlargsv1 \
 		-- //... -//cmd/... -//tests/graceshutdown/... \
 		-//tests/globalkilltest/... -//tests/readonlytest/... -//br/pkg/task:task_test -//tests/realtikvtest/...
+
+.PHONY: bazel_bin
+bazel_bin: ## Build importer/tidb binary files with Bazel build system
+	mkdir -p bin
+	bazel $(BAZEL_GLOBAL_CONFIG) build $(BAZEL_CMD_CONFIG) \
+		//cmd/importer:importer //cmd/tidb-server:tidb-server --define gotags=$(BUILD_TAGS) --//build:with_nogo_flag=false
 
 .PHONY: bazel_build
 bazel_build:
@@ -804,6 +818,16 @@ bazel_ddltest: failpoint-enable bazel_ci_simple_prepare
 bazel_lint: bazel_prepare
 	bazel build //... --//build:with_nogo_flag=$(NOGO_FLAG)
 
+.PHONY: bazel_lint_changed
+bazel_lint_changed: bazel_prepare
+	@PKGS="$$(build/get_changed_bazel_pkgs.sh)"; \
+	echo "$$PKGS"; \
+	if [ -z "$$PKGS" ]; then \
+		echo "No changed bazel packages detected, skip bazel_lint_changed."; \
+		exit 0; \
+	fi; \
+	bazel build $(BAZEL_CMD_CONFIG) $$PKGS --//build:with_nogo_flag=$(NOGO_FLAG)
+
 .PHONY: docker
 docker:
 	docker build -t "$(DOCKERPREFIX)tidb:latest" --build-arg 'GOPROXY=$(shell go env GOPROXY),' -f Dockerfile .
@@ -815,7 +839,7 @@ docker-test:
 .PHONY: bazel_mirror
 bazel_mirror:
 	$(eval $@TMP_OUT := $(shell mktemp -d -t tidbbzl.XXXXXX))
-	bazel $(BAZEL_GLOBAL_CONFIG) run $(BAZEL_CMD_CONFIG)  //cmd/mirror:mirror -- --mirror> $($@TMP_OUT)/tmp.txt
+	bazel $(BAZEL_GLOBAL_CONFIG) run $(BAZEL_CMD_CONFIG)  //cmd/mirror:mirror > $($@TMP_OUT)/tmp.txt
 	cp $($@TMP_OUT)/tmp.txt DEPS.bzl
 	rm -rf $($@TMP_OUT)
 
@@ -825,4 +849,4 @@ bazel_sync:
 
 .PHONY: bazel_mirror_upload
 bazel_mirror_upload:
-	bazel $(BAZEL_GLOBAL_CONFIG) run $(BAZEL_CMD_CONFIG)  //cmd/mirror -- --mirror --upload
+	@echo "bazel_mirror_upload is deprecated; Go modules are resolved through GOPROXY. Run 'make bazel_mirror' to regenerate DEPS.bzl."

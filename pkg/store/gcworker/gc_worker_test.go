@@ -1501,6 +1501,85 @@ func TestGCPlacementRules(t *testing.T) {
 	require.Equal(t, 1, deletePlacementRuleCounter)
 }
 
+func TestGCPlacementRulesForCreateMaterializedViewRollback(t *testing.T) {
+	s := createGCWorkerSuite(t)
+
+	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/pkg/store/gcworker/mockHistoryJobForGC", `return("create-mv-rollback:20")`))
+	defer func() {
+		require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/pkg/store/gcworker/mockHistoryJobForGC"))
+	}()
+
+	var gcPlacementRuleCache sync.Map
+	bundleID := "TiDB_DDL_20"
+	bundle, err := placement.NewBundleFromOptions(&model.PlacementSettings{
+		PrimaryRegion: "r1",
+		Regions:       "r1, r2",
+	})
+	require.NoError(t, err)
+	bundle.ID = bundleID
+
+	require.NoError(t, infosync.PutRuleBundles(context.Background(), []*placement.Bundle{bundle}))
+	got, err := infosync.GetRuleBundle(context.Background(), bundleID)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	require.False(t, got.IsEmpty())
+
+	dr := util.DelRangeTask{JobID: 1, ElementID: 20}
+	err = doGCPlacementRules(createSession(s.store), 1, dr, &gcPlacementRuleCache)
+	require.NoError(t, err)
+	v, ok := gcPlacementRuleCache.Load(int64(20))
+	require.True(t, ok)
+	require.Equal(t, struct{}{}, v)
+
+	got, err = infosync.GetRuleBundle(context.Background(), bundleID)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	require.True(t, got.IsEmpty())
+}
+
+func TestGCPlacementRulesForMaterializedViewOutOfPlaceCutover(t *testing.T) {
+	s := createGCWorkerSuite(t)
+
+	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/pkg/store/gcworker/mockHistoryJobForGC", `return("mview-cutover:20:30")`))
+	defer func() {
+		require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/pkg/store/gcworker/mockHistoryJobForGC"))
+	}()
+
+	var gcPlacementRuleCache sync.Map
+	oldBundleID := "TiDB_DDL_20"
+	oldBundle, err := placement.NewBundleFromOptions(&model.PlacementSettings{
+		PrimaryRegion: "r1",
+		Regions:       "r1, r2",
+	})
+	require.NoError(t, err)
+	oldBundle.ID = oldBundleID
+	shadowBundleID := "TiDB_DDL_30"
+	shadowBundle := oldBundle.Clone()
+	shadowBundle.ID = shadowBundleID
+
+	require.NoError(t, infosync.PutRuleBundles(context.Background(), []*placement.Bundle{oldBundle, shadowBundle}))
+	got, err := infosync.GetRuleBundle(context.Background(), oldBundleID)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	require.False(t, got.IsEmpty())
+
+	dr := util.DelRangeTask{JobID: 1, ElementID: 20}
+	err = doGCPlacementRules(createSession(s.store), 1, dr, &gcPlacementRuleCache)
+	require.NoError(t, err)
+	v, ok := gcPlacementRuleCache.Load(int64(20))
+	require.True(t, ok)
+	require.Equal(t, struct{}{}, v)
+
+	got, err = infosync.GetRuleBundle(context.Background(), oldBundleID)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	require.True(t, got.IsEmpty())
+	got, err = infosync.GetRuleBundle(context.Background(), shadowBundleID)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	require.False(t, got.IsEmpty())
+}
+
 func TestGCLabelRules(t *testing.T) {
 	s := createGCWorkerSuite(t)
 

@@ -19,6 +19,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/pingcap/errors"
 	"github.com/pingcap/tidb/pkg/expression"
 	"github.com/pingcap/tidb/pkg/kv"
 	"github.com/pingcap/tidb/pkg/meta/model"
@@ -30,10 +31,12 @@ import (
 	"github.com/pingcap/tidb/pkg/planner/core/operator/physicalop"
 	"github.com/pingcap/tidb/pkg/planner/util"
 	"github.com/pingcap/tidb/pkg/sessionctx"
+	"github.com/pingcap/tidb/pkg/sessionctx/variable"
 	"github.com/pingcap/tidb/pkg/table"
 	"github.com/pingcap/tidb/pkg/tablecodec"
 	"github.com/pingcap/tidb/pkg/types"
 	"github.com/pingcap/tidb/pkg/util/codec"
+	"github.com/pingcap/tidb/pkg/util/dbterror/plannererrors"
 	"github.com/pingcap/tidb/pkg/util/set"
 	"github.com/pingcap/tidb/pkg/util/size"
 )
@@ -227,6 +230,8 @@ func BuildPhysicalJoinSchema(joinType logicalop.JoinType, join base.PhysicalPlan
 		util.ResetNotNullFlag(newSchema, leftSchema.Len(), newSchema.Len())
 	} else if joinType == logicalop.RightOuterJoin {
 		util.ResetNotNullFlag(newSchema, 0, leftSchema.Len())
+	} else if joinType == logicalop.FullOuterJoin {
+		util.ResetNotNullFlag(newSchema, 0, newSchema.Len())
 	}
 	return newSchema
 }
@@ -409,4 +414,80 @@ func EncodeUniqueIndexValuesForKey(ctx sessionctx.Context, tblInfo *model.TableI
 		return nil, err
 	}
 	return encodedIdxVals, nil
+}
+
+// CheckMViewUpdatable checks whether a DML operation on a materialized view or materialized view
+// log table should be rejected. It returns an error if the table is an MV or MV log and the current
+// session is not in internal maintenance mode.
+func CheckMViewUpdatable(
+	sv *variable.SessionVars, tableInfo *model.TableInfo, aliasName, op string,
+) error {
+	if tableInfo.MaterializedView == nil && tableInfo.MaterializedViewLog == nil && tableInfo.MaterializedViewShadow == nil {
+		return nil
+	}
+
+	allowMaintenance, err := allowMViewMaintenanceBypass(sv)
+	if err != nil {
+		return err
+	}
+	if allowMaintenance {
+		return nil
+	}
+
+	if aliasName == "" {
+		aliasName = tableInfo.Name.O
+	}
+
+	return plannererrors.ErrNonUpdatableTable.GenWithStackByArgs(aliasName, op)
+}
+
+func allowMViewMaintenanceBypass(sv *variable.SessionVars) (bool, error) {
+	if sv == nil || !sv.InMaterializedViewMaintenance {
+		return false, nil
+	}
+	// All MV maintenance work should uses internal sessions (restricted SQL).
+	if !sv.InRestrictedSQL {
+		return false, plannererrors.ErrInternal.GenWithStack(
+			"materialized view maintenance should only run in restricted SQL mode",
+		)
+	}
+	return true, nil
+}
+
+// CheckMViewReadable checks whether a read on an MV-related table should be rejected.
+func CheckMViewReadable(sv *variable.SessionVars, tableInfo *model.TableInfo, aliasName string) error {
+	if tableInfo == nil || (tableInfo.MaterializedView == nil && tableInfo.MaterializedViewShadow == nil) {
+		return nil
+	}
+	if tableInfo.MaterializedViewShadow != nil {
+		allowMaintenance, err := allowMViewMaintenanceBypass(sv)
+		if err != nil {
+			return err
+		}
+		if allowMaintenance || sv == nil || sv.User == nil {
+			return nil
+		}
+		if aliasName == "" {
+			aliasName = tableInfo.Name.O
+		}
+		return plannererrors.ErrTableaccessDenied.GenWithStackByArgs("SELECT", sv.User.AuthUsername, sv.User.AuthHostname, aliasName)
+	}
+
+	initBuildState := tableInfo.MaterializedView.GetInitBuildState()
+	if initBuildState.IsReady() {
+		return nil
+	}
+
+	allowMaintenance, err := allowMViewMaintenanceBypass(sv)
+	if err != nil {
+		return err
+	}
+	if allowMaintenance {
+		return nil
+	}
+
+	if aliasName == "" {
+		aliasName = tableInfo.Name.O
+	}
+	return errors.New(initBuildState.AccessErrorMessage(aliasName))
 }
