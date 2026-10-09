@@ -27,37 +27,51 @@ The current history is not a suitable PR split. The first port commit,
 later fixes are small, but cherry-picking the existing commits would still leave
 one monolithic PR.
 
-This document defines a stacked-PR sequence. Each PR has one primary ownership
-boundary, can be validated independently, and is merged before the next PR is
-rebased onto the updated master.
+This document originally defined a stacked-PR sequence. Each PR has one primary
+ownership boundary and can be validated independently. The actual merge order has
+since changed; see the status and dependency sections below for the remaining work.
+
+## Current Status
+
+As of 2026-10-09, PR1, PR2, and PR4 have been merged into `master`. This plan is
+now a status and remaining-work reference; the original merge order has changed.
+
+| PR | Scope | Status |
+| --- | --- | --- |
+| PR1 | Parser SQL surface | Merged to master |
+| PR2 | Shadow metadata and DDL cutover | Merged to master |
+| PR3 | Refresh planner | Remaining |
+| PR4 | Delta merge executor | Merged to master |
+| PR5 | Refresh runtime and observability | Remaining |
+| PR6 | Integration tests and documentation | Remaining |
 
 ## Dependency Graph
 
 ```text
-PR1  Parser SQL surface
+PR1  Parser SQL surface [MERGED]
   |
   v
-PR2  Shadow metadata and DDL cutover
+PR2  Shadow metadata and DDL cutover [MERGED]
   |
-  +------> PR3  Refresh planner
-                    |
-                    v
-             PR4  Delta merge executor
-                    |
-                    v
-             PR5  Refresh runtime and observability
-                    |
-                    v
-             PR6  Integration tests and documentation
+  v
+PR3  Refresh planner [REMAINING] ---------+
+                                         |
+PR4  Delta merge executor [MERGED] ------+--> PR5  Refresh runtime and observability
+                                              |
+                                              v
+                                         PR6  Integration tests and documentation
 ```
 
 The parser PR is the first dependency because every later runtime layer consumes
-the refresh AST. The shadow/cutover PR and planner PR both provide contracts used
-by the runtime. The delta executor PR depends on planner physical operators. The
-runtime PR consumes all of those layers and must include the observability pieces
-that its control flow directly calls.
+the refresh AST. The shadow/cutover PR and planner PR provide contracts used by
+the runtime. Although the original stack placed PR4 after PR3, PR4 has now merged
+independently; the remaining runtime work depends on both the planner work in PR3
+and the executor work already available from PR4. PR5 must include the
+observability pieces that its control flow directly calls.
 
 ## PR1: Parser SQL Surface
+
+**Status: Merged to master.**
 
 ### Intent
 
@@ -95,6 +109,8 @@ Run the repository parser-generation checks after updating `parser.y`; keep the
 generated output in the same PR as its source grammar.
 
 ## PR2: Shadow Metadata and DDL Cutover
+
+**Status: Merged to master.**
 
 ### Intent
 
@@ -142,6 +158,8 @@ go test ./pkg/statistics/handle/ddl -tags=intest,deadlock -count=1
 
 ## PR3: Refresh Planner
 
+**Status: Remaining.**
+
 ### Intent
 
 Add the logical and physical refresh planning layer without implementing the
@@ -181,6 +199,8 @@ recorded separately from this PR's targeted validation.
 
 ## PR4: Delta Merge Executor
 
+**Status: Merged to master.**
+
 ### Intent
 
 Implement the executor-side operators for fast refresh and delta merge plans.
@@ -195,11 +215,10 @@ Keep the complete refresh lifecycle out of this PR.
 - `pkg/util/execdetails/runtime_stats.go`
 - Related `BUILD.bazel` files
 
-`MViewCompleteDeltaApplyExec` currently lives in the large
-`pkg/executor/materialized_view.go` file. Before constructing this PR, move that
-operator into a new dedicated executor file under `pkg/executor/` as a mechanical
-refactor. Keep that move separate from behavior changes so PR4 remains easy to
-review.
+The original split plan called for moving `MViewCompleteDeltaApplyExec` out of the
+large `pkg/executor/materialized_view.go` file into a dedicated executor file as a
+mechanical refactor, separate from behavior changes. This was part of the PR4
+scope; no such extraction remains as a task in the open PRs.
 
 The refresh executor builder that dispatches the top-level refresh statement stays
 in PR5, where the complete runtime lifecycle is introduced.
@@ -211,6 +230,8 @@ go test ./pkg/executor/mviewdeltamergeagg -tags=intest,deadlock -count=1
 ```
 
 ## PR5: Refresh Runtime and Observability
+
+**Status: Remaining.**
 
 ### Intent
 
@@ -279,6 +300,8 @@ use failpoints must run through `failpoint-go-test.sh`.
 
 ## PR6: Integration Tests and Documentation
 
+**Status: Remaining.**
+
 ### Intent
 
 Finish the stack with end-to-end coverage, final observability output assertions,
@@ -313,9 +336,11 @@ Keep the current final branch as a source snapshot before reconstructing the sta
 git tag mv-refresh-port-monolithic-final 15798f0d919
 ```
 
-Create each PR branch from the previous PR branch. Do not cherry-pick
-`af4b52a80b7` as a whole. Reconstruct each incremental diff by path and, for files
-that mix multiple layers, by hunk. The main mixed files are:
+PR1, PR2, and PR4 are already in master and should not be recreated. Rebase the
+remaining PR3, PR5, and PR6 work onto the current master, preserving their scope
+boundaries. Do not cherry-pick `af4b52a80b7` as a whole. Reconstruct any remaining
+incremental diff by path and, for files that mix multiple layers, by hunk. The
+main mixed files are:
 
 - `pkg/ddl/materialized_view.go`
 - `pkg/executor/materialized_view.go`
@@ -326,9 +351,9 @@ the stack. After the complete refresh port is ready, double-check the final port
 against `cp_mv_for_master` before submission, and resolve any unintended behavioral
 or diff differences.
 
-After a PR merges, rebase the next stacked branch onto the new master and check the
-result with `git range-diff`. Keep generated Bazel metadata with the code that
-requires it; do not create a standalone BUILD-only PR.
+After each remaining PR merges, rebase the next branch onto the new master and
+check the result with `git range-diff`. Keep generated Bazel metadata with the
+code that requires it; do not create a standalone BUILD-only PR.
 
 Every PR contains Go additions, import changes, or new tests, so run
 `make bazel_prepare` for each branch. Code PRs also use `make lint` and the scoped
