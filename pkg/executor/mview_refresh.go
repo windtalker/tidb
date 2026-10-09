@@ -900,7 +900,6 @@ func (e *RefreshMaterializedViewExec) executeRefreshMaterializedView(kctx contex
 	nextRefreshUnixSeconds, shouldUpdateNextRefreshUnixSeconds, err := deriveRuntimeMaterializedScheduleNextUnixSeconds(
 		kctx,
 		scheduleEvalSctx,
-		tblInfo.MaterializedView.RefreshStartWith,
 		tblInfo.MaterializedView.RefreshNext,
 		isInternalSQL,
 		tblInfo.MaterializedView.RefreshScheduleSQLMode,
@@ -1153,7 +1152,6 @@ func (e *RefreshMaterializedViewExec) executeRefreshMaterializedViewCompleteOutO
 			nextRefreshUnixSeconds, shouldUpdateNextRefreshUnixSeconds, scheduleErr = deriveRuntimeMaterializedScheduleNextUnixSeconds(
 				kctx,
 				scheduleEvalSctx,
-				tblInfo.MaterializedView.RefreshStartWith,
 				tblInfo.MaterializedView.RefreshNext,
 				isInternalSQL,
 				tblInfo.MaterializedView.RefreshScheduleSQLMode,
@@ -2246,7 +2244,6 @@ func collectMLogScanPlanIDs(plan plannercorebase.PhysicalPlan, mlogTableID int64
 func deriveRuntimeMaterializedScheduleNextUnixSeconds(
 	kctx context.Context,
 	evalSctx sessionctx.Context,
-	startExpr string,
 	nextExpr string,
 	isInternalSQL bool,
 	scheduleSQLMode mysql.SQLMode,
@@ -2258,7 +2255,6 @@ func deriveRuntimeMaterializedScheduleNextUnixSeconds(
 	nextAt, shouldUpdate, err := expression.DeriveMaterializedScheduleNextTime(
 		kctx,
 		evalSctx,
-		startExpr,
 		nextExpr,
 		scheduleSQLMode,
 	)
