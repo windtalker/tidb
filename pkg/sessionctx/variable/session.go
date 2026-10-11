@@ -358,7 +358,6 @@ func (tc *TransactionContext) UpdateDeltaForTable(
 	item := tc.TableDeltaMap[physicalTableID]
 	item.Delta += delta
 	item.Count += count
-	item.TableID = physicalTableID
 	tc.TableDeltaMap[physicalTableID] = item
 }
 
@@ -1054,6 +1053,7 @@ type SessionVars struct {
 	MergeJoinCostFactor        float64
 	HashJoinCostFactor         float64
 	IndexJoinCostFactor        float64
+	IndexJoinMaxScanRowsRatio  float64
 
 	// enableForceInlineCTE is used to enable/disable force inline CTE.
 	enableForceInlineCTE bool
@@ -2228,6 +2228,7 @@ func NewSessionVars(hctx HookContext) *SessionVars {
 		MergeJoinCostFactor:            DefOptMergeJoinCostFactor,
 		HashJoinCostFactor:             DefOptHashJoinCostFactor,
 		IndexJoinCostFactor:            DefOptIndexJoinCostFactor,
+		IndexJoinMaxScanRowsRatio:      DefOptIndexJoinMaxScanRowsRatio,
 		CommandValue:                   uint32(mysql.ComSleep),
 		TiDBOptJoinReorderThreshold:    DefTiDBOptJoinReorderThreshold,
 		SlowQueryFile:                  config.GetGlobalConfig().Log.SlowQueryFile,
@@ -3054,7 +3055,17 @@ type TableDelta struct {
 	Delta    int64
 	Count    int64
 	InitTime time.Time // InitTime is the time that this delta is generated.
-	TableID  int64
+}
+
+// MergeFrom merges another delta into the receiver and keeps the earliest InitTime.
+func (td *TableDelta) MergeFrom(incoming TableDelta) {
+	td.Delta += incoming.Delta
+	td.Count += incoming.Count
+	if td.InitTime.IsZero() {
+		td.InitTime = incoming.InitTime
+	} else if !incoming.InitTime.IsZero() && incoming.InitTime.Before(td.InitTime) { // This can happen when merges arrive out of order (e.g., overlapping dump/merge runs).
+		td.InitTime = incoming.InitTime
+	}
 }
 
 // Clone returns a cloned TableDelta.
@@ -3063,7 +3074,6 @@ func (td TableDelta) Clone() TableDelta {
 		Delta:    td.Delta,
 		Count:    td.Count,
 		InitTime: td.InitTime,
-		TableID:  td.TableID,
 	}
 }
 

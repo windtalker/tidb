@@ -37,7 +37,6 @@ import (
 	"github.com/pingcap/tidb/pkg/testkit/testdata"
 	contextutil "github.com/pingcap/tidb/pkg/util/context"
 	"github.com/pingcap/tidb/pkg/util/hint"
-	"github.com/pingcap/tidb/pkg/util/memory"
 	"github.com/pingcap/tidb/pkg/util/size"
 	"github.com/stretchr/testify/require"
 )
@@ -1538,14 +1537,6 @@ func TestPhysicalApplyIsNotPhysicalJoin(t *testing.T) {
 }
 
 func TestDisableReuseChunk(t *testing.T) {
-	originMemTotal := memory.MemTotal
-	defer func() {
-		memory.MemTotal = originMemTotal
-	}()
-	memory.MemTotal = func() (uint64, error) {
-		return 256 * size.GB, nil
-	}
-
 	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
