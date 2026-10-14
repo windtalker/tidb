@@ -2,6 +2,7 @@
 
 **状态：设计草案，待讨论，尚未实现**
 **日期：2026-10-13**
+**更新日期：2026-10-14**
 **适用分支：`nested_mv`**
 
 本设计支持已有自身 MLog 或下游 MV 的物化视图执行 `COMPLETE OUT OF PLACE`。
@@ -11,6 +12,10 @@ OOP 成功后，下游仍可查询已有数据，但旧的增量消费基线失�
 状态模型按 source 与 MV 的多对多关系设计。当前 SQL 仍只支持单 source，单 source
 使用同一套协议的一条入边；未来多 source SQL 和增量计算算法不应要求重做失效与恢复机制。
 本次不支持普通表 TRUNCATE，也不放开对 MV、MLog 内部存储对象的直接 TRUNCATE。
+
+MLog 代际是通用机制，是否推进代际由操作语义决定。当前设计范围内，普通表尚不支持
+会导致其 MLog 代际变化的操作；MV 的 COMPLETE OUT OF PLACE 会导致其自身 MLog
+代际推进。普通表 DML、MV FAST 和 COMPLETE DELTA APPLY 均保持对应 MLog 的代际不变。
 
 ## 1 背景与设计边界
 
@@ -47,9 +52,15 @@ parent OOP 持有目标 MV 的维护排他权，等待已有 refresh 数据事�
 FAST、DELTA APPLY 和会修改该 MV 数据的维护入口进入切换临界区。shadow build 不是
 对 serving MV 的写入，也不向 serving MV 的 MLog 追加历史数据。
 
-只有确认旧 MV 写事务及其 MLog 写入已经结束，才能划分新旧日志代际。切换完成后的写者
-必须重新解析新 MV 身份和 MLog 绑定。物理 MV ID 改变时，维护锁与 schema 发布的交接
-也必须维持这个保证，不能仅假设使用旧 ID 的 advisory lock 会自动覆盖新 ID。
+划分新旧日志代际前，需要确认对目标 MV 的旧 refresh 数据事务及其自身 MLog 写入已经
+结束。切换完成后的写者必须重新解析新 MV 身份和 MLog 绑定。物理 MV ID 改变时，维护锁
+与 schema 发布的交接也必须维持这个保证，不能仅假设使用旧 ID 的 advisory lock 会自动
+覆盖新 ID。
+
+以 `t -> mv1 -> mv2` 为例，`MLog(t)` 的直接 source 是普通表 t，随用户 DML 持续写入；
+`MLog(mv1)` 的直接 source 是 mv1，随 mv1 的 refresh 写入。对 mv1 执行 OOP 时，
+需要控制的是 mv1 与 `MLog(mv1)` 的写入，并推进 `MLog(mv1)` 的代际。上游 t 的 DML
+及 `MLog(t)` 写入可以继续，`MLog(t)` 的代际不变，快照之后的变化仍供 mv1 后续 FAST 消费。
 
 普通表有任意用户写事务；它们可能跨过 TRUNCATE 的切换边界。仅递增 generation
 不能证明这些写事务及日志属于正确的 source 实例。因此普通表 TRUNCATE 不属于本次
@@ -191,6 +202,9 @@ ID 和计算日志保留范围。`SOURCE_ID` 是当前结构引用，`BASELINE_M
 | `LOG_GENERATION` | 当前日志代际，初始化为 1；断点时单调递增 |
 | `GENERATION_START_TSO` | 当前代际的日志区间下界；初始兼容值为 0 |
 
+这些字段统一用于普通表和 MV 的 MLog，不按 source 类型另设代际模型。本次定义的代际
+推进操作是 MV OOP；普通表当前支持的操作不会触发其 MLog 的代际推进。
+
 `SOURCE_ID` 的副本用于拒绝 schema cache 与日志运行状态不属于同一次切换的组合，
 不能用它覆盖 `TableInfo` 的结构定义。generation 溢出时拒绝切换，不回绕。
 
@@ -229,9 +243,10 @@ MLog 数据行新增 generation 字段，前提是第 5.2 节的生产端区间�
 - `F`：实际执行 cutover 事务的 start TSO，候选来源为当前 worker 的事务 startTS。
 - `C`：cutover commit TSO，用于描述时序，不要求预先知道其数值。
 
-目标 MV 维护排他权已等待旧写者结束，且期间没有 serving MV / MLog 写入，所以旧日志
-记录的 commit TSO 均小于 `F`。切换后恢复的写者产生的日志 commit TSO 大于 `C`，
-也大于 `F`。在 cutover 同事务设置：
+目标 MV 维护排他权已等待旧 refresh 数据事务结束，且期间没有对 serving MV 及其自身
+MLog 的写入，所以该 MLog 的旧日志记录 commit TSO 均小于 `F`。这一条件不限制上游
+普通表及其 MLog 的并发写入。切换后恢复的目标 MV 写者产生的日志 commit TSO 大于
+`C`，也大于 `F`。在 cutover 同事务设置：
 
 ```text
 LOG_GENERATION := old_generation + 1
