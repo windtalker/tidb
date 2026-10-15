@@ -6014,9 +6014,8 @@ func (b *PlanBuilder) buildDDL(ctx context.Context, node ast.DDLNode) (base.Plan
 
 				newDBName := spec.NewTable.Schema.L
 				if newDBName == "" {
-					newDBName = b.ctx.GetSessionVars().CurrentDB
+					newDBName = strings.ToLower(b.ctx.GetSessionVars().CurrentDB)
 				}
-
 				if b.ctx.GetSessionVars().User != nil {
 					authErr = plannererrors.ErrTableaccessDenied.GenWithStackByArgs("CREATE", b.ctx.GetSessionVars().User.AuthUsername,
 						b.ctx.GetSessionVars().User.AuthHostname, spec.NewTable.Name.L)
