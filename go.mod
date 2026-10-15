@@ -108,7 +108,7 @@ require (
 	github.com/stretchr/testify v1.9.0
 	github.com/tdakkota/asciicheck v0.2.0
 	github.com/tiancaiamao/appdash v0.0.0-20181126055449-889f96f722a2
-	github.com/tikv/client-go/v2 v2.0.8-0.20260713095422-3a987fd9f0ec
+	github.com/tikv/client-go/v2 v2.0.8-0.20261012023449-dd5296cd0da7
 	github.com/tikv/pd/client v0.0.0-20250901062501-1646b924d286
 	github.com/timakin/bodyclose v0.0.0-20240125160201-f835fa56326a
 	github.com/twmb/murmur3 v1.1.6
@@ -320,7 +320,6 @@ require (
 
 replace (
 	github.com/go-ldap/ldap/v3 => github.com/YangKeao/ldap/v3 v3.4.5-0.20230421065457-369a3bab1117
-	github.com/tikv/client-go/v2 => github.com/windtalker/client-go/v2 v2.0.0-alpha.0.20261011010233-11f76c4ba9d5
 	github.com/pingcap/tidb/pkg/parser => ./pkg/parser
 
 	// TODO: `sourcegraph.com/sourcegraph/appdash` has been archived, and the original host has been removed.
