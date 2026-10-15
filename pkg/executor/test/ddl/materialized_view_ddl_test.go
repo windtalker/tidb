@@ -199,7 +199,7 @@ func TestDropMaterializedViewWithDependentMaterializedView(t *testing.T) {
 }
 
 func TestDropMaterializedViewRecheckWithConcurrentCreateMaterializedView(t *testing.T) {
-	store := testkit.CreateMockStore(t)
+	store, dom := testkit.CreateMockStoreAndDomain(t)
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
 	tk.MustExec("create table t_nested_drop_race (a int not null, b int not null)")
@@ -232,8 +232,16 @@ func TestDropMaterializedViewRecheckWithConcurrentCreateMaterializedView(t *test
 	err := <-dropErrCh
 	require.ErrorContains(t, err, "cannot drop materialized view test.mv_nested_parent_drop_race: dependent materialized views exist")
 	tk.MustQuery("show tables like 'mv_nested_parent_drop_race'").Check(testkit.Rows("mv_nested_parent_drop_race"))
+	parentMLog, err := dom.InfoSchema().TableByName(context.Background(), pmodel.NewCIStr("test"), pmodel.NewCIStr("$mlog$mv_nested_parent_drop_race"))
+	require.NoError(t, err)
+	child, err := dom.InfoSchema().TableByName(context.Background(), pmodel.NewCIStr("test"), pmodel.NewCIStr("mv_nested_child_drop_race"))
+	require.NoError(t, err)
+	require.Equal(t, []int64{child.Meta().ID}, parentMLog.Meta().MaterializedViewLog.DependentMViewIDs)
 
 	tk.MustExec("drop materialized view mv_nested_child_drop_race")
+	parentMLog, err = dom.InfoSchema().TableByName(context.Background(), pmodel.NewCIStr("test"), pmodel.NewCIStr("$mlog$mv_nested_parent_drop_race"))
+	require.NoError(t, err)
+	require.Empty(t, parentMLog.Meta().MaterializedViewLog.DependentMViewIDs)
 	tk.MustExec("drop materialized view log on mv_nested_parent_drop_race")
 	tk.MustExec("drop materialized view mv_nested_parent_drop_race")
 	tk.MustExec("drop materialized view log on t_nested_drop_race")
@@ -2356,6 +2364,7 @@ func TestCreateMaterializedViewOnMaterializedView(t *testing.T) {
 	require.Equal(t, parentMLog.Meta().ID, parent.Meta().MaterializedViewBase.MLogID)
 	require.Equal(t, parent.Meta().ID, parentMLog.Meta().MaterializedViewLog.BaseTableID)
 	require.Contains(t, parent.Meta().MaterializedViewBase.MViewIDs, child.Meta().ID)
+	require.Equal(t, []int64{child.Meta().ID}, parentMLog.Meta().MaterializedViewLog.DependentMViewIDs)
 }
 
 func TestMaterializedViewNestedDependencyChain(t *testing.T) {

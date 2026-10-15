@@ -228,7 +228,7 @@ func TestBuildMaterializedViewSource(t *testing.T) {
 	require.Equal(t, mlogID, res.MLogTableID)
 	require.Equal(t, []string{"a"}, res.GroupKeySourceCols)
 
-	parent.MaterializedView.InitBuildState = model.MVInitBuildBuilding
+	parent.MaterializedView.InitBuildState = model.MViewInitBuildBuilding
 	_, err = mview.Build(sctx.GetPlanCtx(), is, child, mview.BuildOptions{FromTS: 10}, nil)
 	require.ErrorContains(t, err, "source materialized view mv_parent is not ready")
 }

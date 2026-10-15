@@ -923,11 +923,11 @@ func TestValidateMaterializedViewSourceState(t *testing.T) {
 	require.ErrorContains(t, validateMaterializedViewSourceState("test", view), "is not BASE TABLE")
 
 	building := base.Clone()
-	building.MaterializedView = &model.MaterializedViewInfo{InitBuildState: model.MVInitBuildBuilding}
+	building.MaterializedView = &model.MaterializedViewInfo{InitBuildState: model.MViewInitBuildBuilding}
 	require.ErrorContains(t, validateMaterializedViewSourceState("test", building), "initial build is in progress")
 
 	deferred := base.Clone()
-	deferred.MaterializedView = &model.MaterializedViewInfo{InitBuildState: model.MVInitBuildDeferred}
+	deferred.MaterializedView = &model.MaterializedViewInfo{InitBuildState: model.MViewInitBuildDeferred}
 	require.ErrorContains(t, validateMaterializedViewSourceState("test", deferred), "initial build has not completed")
 }
 
