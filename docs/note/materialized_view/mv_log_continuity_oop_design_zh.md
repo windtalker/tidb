@@ -20,7 +20,7 @@ MLog 代际是通用机制，是否推进代际由操作语义决定。当前设
 FAST 和 COMPLETE DELTA APPLY 保留现有 `for_update_ts` 数据读取路径。刷新按实际读取
 快照确认日志身份，不要求 source 状态一直保持不变到刷新提交；consumer 不对上游
 MLog info 行加锁。不换 MLog ID 时按快照比较 generation；换 ID 时按快照校验 MLog
-绑定，两种方案都保留逐 source 的消费基线。
+绑定，两种方案都按 `(MVIEW_ID, MLOG_ID)` 保存 FAST 消费基线，并复用 MV 级统一水位。
 
 ## 1 背景与设计边界
 
@@ -105,20 +105,25 @@ graph LR
 ```
 
 source 指普通物理表或 ready MV。边 `S -> M` 表示 M 的定义直接读取 S。
-结构图中的一条边对应一条消费基线；同一 source 被多个 MV 使用时，每个 consumer
-有自己的记录。同一 source 在 SQL 中出现多次，不以 SQL alias 重复建立消费基线。
+每个 MV 都登记 source 日志信息；真实日志按 MV / MLog 保存，任一 source 缺少 MLog
+时额外登记一个无日志占位。同一 source 当前至多拥有一个 MLog，MLog 也只有一个
+owner，因此无需在消费基线中重复保存 source ID。同一 source 在 SQL 中出现多次，
+不以 SQL alias 重复建立消费基线。
 
 本设计采用以下不变量：
 
 1. `TableInfo` 是结构依赖的权威定义；运行基线表不能单独建立或删除结构依赖。
-2. 结构边集合与运行基线记录集合一致；缺行、重复身份或无效绑定不能被 FAST 默认为有效。
+2. FAST 要求所有 source 都有 MLog、没有无日志占位，且当前需要的日志集合与已登记
+   基线集合一致；缺少当前日志记录、仍保留旧日志记录或无效绑定都不能被默认为有效。
 3. 日志身份由 `(MLOG_ID, LOG_GENERATION)` 共同确定。新建 MLog 即使 generation 相同，
    也不能继承旧 MLog 的有效基线。
-4. FAST 要求所有入边在实际计算快照上具有有效基线，且日志覆盖各自的消费区间。
-5. 一次成功刷新原子提交目标数据、自身 MLog、全部入边基线和整体刷新成功信息。
-6. COMPLETE 确认的是实际读取的 source 身份和日志代际；不能确认提交时新看到的代际。
-7. OOP 原子切换对象身份、结构依赖、日志代际和基线记录的键。任一步失败都不能留下
-   已切换的部分运行状态。
+4. FAST 要求所有日志在实际计算快照上具有有效基线，并覆盖从 MV 级统一水位开始的
+   消费区间；多 source 刷新也使用统一的逻辑水位。
+5. 一次成功刷新原子提交目标数据、自身 MLog、FAST 消费基线和 MV 级水位及成功信息。
+6. COMPLETE 校验实际读取的 source ID 与读取快照上的绑定一致；需要保留 FAST 能力时，
+   再确认该快照上的日志身份与代际，不能确认提交时新看到的代际。
+7. OOP 原子切换对象身份、结构依赖、日志代际，并迁移目标自身的运行记录。下游保留
+   已确认的日志身份与代际。任一步失败都不能留下已切换的部分运行状态。
 8. 目标维护排他权保证同一 MV 写入串行；consumer 按实际快照校验上游身份并原子确认
    基线，不对上游 MLog 状态建立提交屏障。对象引用和基线改键仍受正常冲突检查保护。
 
@@ -129,17 +134,25 @@ source 指普通物理表或 ready MV。边 `S -> M` 表示 M 的定义直接读
 ```text
 At(S, U) = (source_id, mlog_id, generation, generation_start_tso) @ U
 Used(M, S) = 本次计划实际读取的 source / MLog 物理身份
-Baseline(M, S) = (baseline_mlog_id, baseline_generation, read_tso)
+W(M) = mysql.tidb_mview_refresh_info 中的 LAST_SUCCESS_READ_TSO
+RequiredLogs(M, U) = M 在 schema@U 上全部结构 source 对应的 MLog ID 集合
+RegisteredLogs(M) = M 在 FAST 消费基线表中登记的正 MLog ID 集合，不含 0 占位
+HasNoMLogPlaceholder(M) = M 存在 MLOG_ID = 0 的记录
+Baseline(M, L) = 键 (M, L) 下的 BASELINE_LOG_GENERATION
 
 Valid(M, S, U) =
     Used(M, S) 与 At(S, U) 的 source / MLog 绑定一致
-    AND baseline 各字段非 NULL
-    AND baseline_mlog_id == Used(M, S).mlog_id == At(S, U).mlog_id
-    AND baseline_generation == At(S, U).generation
-    AND read_tso >= At(S, U).generation_start_tso
+    AND W(M) 非 NULL
+    AND 键 (M, At(S, U).mlog_id) 下存在非 NULL 的 generation 基线
+    AND Baseline(M, At(S, U).mlog_id) == At(S, U).generation
+    AND W(M) >= At(S, U).generation_start_tso
     AND 日志保留与 purge 完整性检查通过
 
-CanFast(M, U) = 对所有结构入边 S -> M，Valid(M, S, U) 均成立
+CanFast(M, U) = M 的定义允许 FAST
+    AND schema@U 上全部 source 都有 MLog
+    AND NOT HasNoMLogPlaceholder(M)
+    AND RequiredLogs(M, U) == RegisteredLogs(M)
+    AND 对所有结构入边 S -> M，Valid(M, S, U) 均成立
 ```
 
 generation 匹配只能证明未跨过已声明的日志断点，不能代替 purge 完整性检查。
@@ -152,10 +165,14 @@ generation 匹配只能证明未跨过已声明的日志断点，不能代替 pu
 
 | 状态 | 判定 | 允许的恢复 |
 | --- | --- | --- |
-| 未建立基线 | 基线字段为 NULL | initial build 或 COMPLETE |
+| 缺少 source MLog | 存在 `MLOG_ID = 0` 占位，或快照上的 source 缺少 MLog | 继续 COMPLETE；建齐 MLog 并建立基线后才可 FAST |
+| 未建立基线 | generation 或 MV 级水位为 NULL，或尚无当前日志记录 | initial build 或 COMPLETE |
 | 有效 | 检查快照上的日志身份、边集合和保留范围均匹配 | FAST 或 COMPLETE |
-| 需要 COMPLETE | 代际、MLog 身份不匹配，或消费区间存在日志缺口 | COMPLETE |
-| 元数据不一致 | 应有记录缺失、owner 不匹配或出现多余边 | 报一致性错误，先恢复有效结构与运行记录 |
+| 需要 COMPLETE | 代际、MLog 集合不匹配，或消费区间存在日志缺口 | COMPLETE |
+| 元数据不一致 | 整组登记缺失、结构绑定非法、owner 不匹配或运行记录损坏 | 报一致性错误，先恢复有效结构与运行记录 |
+
+MLog 换 ID 后，基线仍记录旧日志、缺少当前日志是预期的失效状态，不要求 cutover 为
+下游补写新日志基线。FAST 必须拒绝该状态，COMPLETE 可原子重建完整的基线集合。
 
 不保存整个 MV 的 `REQUIRES_COMPLETE_REFRESH` 布尔值，也不通过手工修改 generation
 匹配值来恢复 FAST。运行记录必须由实际的数据构建结果建立。
@@ -177,34 +194,61 @@ generation 匹配只能证明未跨过已声明的日志断点，不能代替 pu
 [create_table.go](../../../pkg/ddl/create_table.go)的
 `updateMaterializedViewBaseInfoOnCreate`。本机制不另建一套结构图作为第二个权威来源。
 
-### 4.2 新增每条依赖的消费基线表
+### 4.2 新增 FAST 日志消费基线表
 
 ```sql
-CREATE TABLE mysql.tidb_mview_source_refresh_info (
+CREATE TABLE mysql.tidb_mview_fast_refresh_source_info (
     MVIEW_ID BIGINT NOT NULL,
-    SOURCE_ID BIGINT NOT NULL,
-    BASELINE_MLOG_ID BIGINT DEFAULT NULL,
+    MLOG_ID BIGINT NOT NULL,
     BASELINE_LOG_GENERATION BIGINT UNSIGNED DEFAULT NULL,
-    LAST_SUCCESS_READ_TSO BIGINT UNSIGNED DEFAULT NULL,
-    PRIMARY KEY (MVIEW_ID, SOURCE_ID),
-    KEY idx_source (SOURCE_ID, MVIEW_ID)
+    PRIMARY KEY (MVIEW_ID, MLOG_ID),
+    KEY idx_mlog (MLOG_ID, MVIEW_ID)
 );
 ```
 
-主键支持读取一个 MV 的全部入边；反向索引支持枚举一个 source 的 consumer、迁移 source
-ID 和计算日志保留范围。`SOURCE_ID` 是当前结构引用，`BASELINE_MLOG_ID` 是数据基线
-实际确认过的日志，两者用途不同。OOP 改键时不能顺便把下游确认值改成新日志身份。
+主键支持读取一个 MV 的全部 FAST 日志基线；反向索引支持按 MLog 查找已登记的消费
+记录。结构 consumer 集合仍从 `TableInfo` 枚举，不能仅凭此表缺行判定没有消费者。
+所有 MV 都有记录，`MLOG_ID` 的取值约定为：
 
-未完成 initial build 的记录保留三个 NULL 基线字段。建立或恢复基线时一起填写；字段
-部分非 NULL 视为元数据不一致。consumer OOP 改变自身 ID 时，自己的入边记录也要改键。
+| MLOG_ID | BASELINE_LOG_GENERATION | 含义 |
+| --- | --- | --- |
+| `0` | 必须为 NULL | 登记时至少一个 source 没有 MLog，尚无完整 FAST 基线 |
+| 正 ID | NULL | 已登记真实日志，但尚未确认可用于 FAST 的代际 |
+| 正 ID | 非 NULL | 已确认该日志代际，仍需结合统一水位与快照检查判断能否 FAST |
 
-每条边单独保存水位，使 future 多 source 算法不依赖“所有 source 永远共用一个字段”的
-假设。当前单 source 和 COMPLETE 重算仍可使用现有统一读取快照。
+联合主键列不能为 NULL，因此用 `0` 表示无日志占位，`0` 不对应真实 MLog。一个 MV
+至多有一条占位记录；未来多 source 时，已有日志的正 ID 记录与占位可以并存，任一
+source 缺少 MLog 就不能 FAST。占位不表达具体哪条结构边缺少日志，也不参与真实
+MLog 的 purge 水位计算；该信息仍从结构元数据取得。补建 MLog 后，占位由成功建立
+基线的 COMPLETE 清理，不能仅因日志已经存在就把 0 改成当前日志身份。
 
-若采用第 5.4 节的纯换 ID 方案，可省略 `BASELINE_LOG_GENERATION`，其余字段及逐边
-记录仍保留。source 的 `MaterializedViewBase.MLogID` 表示绑定，不能替代每个 consumer 已确认的
-`BASELINE_MLOG_ID`。普通刷新原子更新自己的基线；并发 cutover 已迁移记录时，通过
-条件更新及事务冲突检查拒绝旧写入，不能用 UPSERT 恢复旧键。
+public MV 整组登记记录缺失是元数据不一致，不能用缺行代替 0 占位。MLog 换 ID 后
+仅缺少当前日志的记录、但仍保留旧日志记录，则是前述可通过 COMPLETE 恢复的状态。
+
+不保存 `SOURCE_ID`：source 与 MLog 的绑定已经由结构元数据定义，刷新使用实际计划
+中的 source ID 与读取快照上的绑定进行校验。source OOP 保留 MLog ID 时，下游记录
+无需改键。consumer 自己 OOP 改变 ID 时，其记录仍需迁移 `MVIEW_ID`。
+
+不重复保存 `LAST_SUCCESS_READ_TSO`：全部日志共同使用第 4.4 节的 MV 级统一水位，
+多 source 本身不要求逐日志水位。本机制不提供同一 MV 的各个 source 独立推进消费
+进度的操作。
+
+initial build 前按已知 MLog ID 登记 generation 为 NULL 的记录，缺少日志时补 0
+占位，MV 级水位也为 NULL。全部 source 已有 MLog 且需要建立 FAST 基线时，成功构建
+后原子确认全部 generation 与统一水位并清除占位。MLog 换 ID 时保留下游旧记录；下游
+成功 COMPLETE 时，按其实际读取快照原子替换整个日志基线集合并更新统一水位。
+目标 ID 已迁移时，通过维护互斥、条件更新及事务冲突检查拒绝旧写入，不能用不受约束的
+UPSERT 恢复旧目标的记录。
+
+明确只做 COMPLETE 的 MV 也登记真实日志或占位，但不要求已经建立有效 FAST 基线，
+也不因其消费进度阻塞 purge；仍需校验实际 source 物理身份。`MLOG_ID = 0` 表示缺少
+source MLog，不表示刷新方式为 COMPLETE；没有占位也不自动赋予 FAST 能力。是否
+保留 FAST 能力由 MV 定义的明确契约决定，不能由缺行或最近只执行过 COMPLETE 推断。
+未来切换到 FAST 时按第 10.5 节建立或验证基线。当前 MV 定义只支持 FAST，本次不
+新增 COMPLETE-only 或切换刷新方式的 SQL 语法。
+
+第 5.4 节讨论纯换 ID 方案如何进一步省略 generation；本草案保留该字段以支持默认的
+保留 MLog ID 方案。
 
 ### 4.3 扩展 MLog 运行状态
 
@@ -230,11 +274,15 @@ consumer refresh 通过辅助内部 session 做 snapshot 查询，不对这行�
 写者之间的竞争与 consumer 的只读校验分开。普通 source DML 不需要每行更新 generation。
 现有系统表定义见 [bootstrap.go](../../../pkg/session/bootstrap.go)。
 
-### 4.4 整体 refresh-info 保留任务职责
+### 4.4 整体 refresh-info 保存统一水位与任务状态
 
 `mysql.tidb_mview_refresh_info` 继续承担目标 MV 的刷新行锁、调度、整体成功时间与水位。
-当前 `LAST_SUCCESS_READ_TSO` 与唯一入边水位同步提交；未来多 source 的 FAST 正确性
-及 purge 保留范围从边记录判断，整体字段的汇总语义需要明确，不能代替逐 source 基线。
+`LAST_SUCCESS_READ_TSO` 是该 MV 全部 source 共用的成功逻辑水位；普通刷新使用实际
+计算 TS，bounded FAST 保持既有指定上界语义。FAST 从此水位开始消费各个 MLog，
+purge 结合此水位与对应日志基线的有效性计算保护范围。
+
+水位、目标数据及全部日志身份与代际确认在同一事务提交。日志身份没有变化的普通 FAST
+只需保留原基线并推进统一水位，无需重复写入相同的 generation。
 
 普通 COMPLETE 不改 `TableInfo`。OOP 本来就有 cutover DDL，在该事务中同时处理
 运行状态；这不增加一个仅用于清除失效标记的 DDL job。
@@ -275,13 +323,15 @@ SOURCE_ID := new_mv_id
 无需先读取最新 generation 再申请数据 TS；旧快照只能确认旧代际。
 
 `R_build` 更新目标 MV 的上游消费基线，`F` 划分目标 MV 自己的输出日志。这两个时间
-不能互换。也不能仅用 `read_tso >= F` 判定恢复成功：child 可以在 `F` 之后、`C` 之前
+不能互换。也不能仅用 `W(M) >= F` 判定恢复成功：child 可以在 `F` 之后、`C` 之前
 读到旧 MV，仍须用身份与 generation 验证它实际读取的基线。
 
 如果无法证明旧写者已经结束，或者 worker 事务重试时不能维持上述区间，保留 MLog ID
 的方案就不成立；应改用新 MLog 实例，不能以推进 generation 掩盖日志混用。
 
 ### 5.3 刷新模式与输出代际
+
+表中的入边基线针对需要保留 FAST 能力的目标；输出 MLog 的行为由该目标的刷新方式决定。
 
 | 目标 MV 的刷新方式 | 恢复自己的入边基线 | 自身输出 MLog |
 | --- | --- | --- |
@@ -296,18 +346,25 @@ DELTA APPLY 必须沿用本模式已有的 SQL 和 schema 限制，不承诺对�
 ### 5.4 更换 MLog 物理 ID 的备选方案
 
 若约定每次破坏日志连续性都更换 MLog ID，且不复用旧 ID，则 ID 本身可以表达日志断点，
-无需为这类切换另加 generation。逐 source 基线表仍保存 `(BASELINE_MLOG_ID,
-LAST_SUCCESS_READ_TSO)`，支持每个 consumer 独立恢复及未来多 source 水位。
+无需为这类切换另加 generation。FAST 基线表仍按 `(MVIEW_ID, MLOG_ID)` 保存每个
+consumer 已确认的日志集合，水位统一使用整体 refresh-info 的字段。
 
 OOP 在同一 cutover 事务中切换 source 与新 MLog 的绑定、结构依赖及运行记录。
-source ID 改变时迁移下游基线的 `SOURCE_ID` 键，但保留旧 `BASELINE_MLOG_ID` 和水位；
-不能把尚未 COMPLETE 的下游直接确认到新 MLog。COMPLETE 按实际 source 数据快照
-捕获其绑定的 MLog ID，成功时连同数据一起写入基线。
+下游原有的 MLog 基线记录和统一水位不变；不能将旧日志键改成新日志键，或把尚未
+COMPLETE 的下游直接确认到新 MLog。当前需要的日志集合出现新 ID 时，FAST 因缺少
+其有效基线而失败。COMPLETE 按实际 source 数据快照捕获其绑定的 MLog 集合，成功时
+连同数据、统一水位原子替换全部基线记录，清理旧日志键。
+
+若纯换 ID 方案进一步省略 `BASELINE_LOG_GENERATION`，正日志 ID 集合与非 NULL 的
+整体水位共同表达已确认基线；0 仍仅表示缺少 source MLog。initial build 的整体水位
+保持 NULL，并由 building 结构依赖保护。已有成功水位的 MV 不提前把旧日志键改成未
+确认的新日志键，而是在成功 COMPLETE 时与数据及水位一起替换。默认方案仍保留
+nullable generation，用它区分已登记但尚未确认的身份。
 
 FAST 的检查条件为：
 
 ```text
-BASELINE_MLOG_ID == 本次计划实际读取的 MLog ID == schema@U 中 source 绑定的 MLog ID
+基线记录的 MLOG_ID == 本次计划实际读取的 MLog ID == schema@U 中 source 绑定的 MLog ID
 ```
 
 前一个等式可在编译时检查，后一个在数据语句完成后、提交前检查。旧 MLog 即使仍然
@@ -349,20 +406,26 @@ schema 编译。新 MLog 的创建、purge 状态与保留水位、原子切换�
 换 MLog ID 时取得 `U` 的 snapshot InfoSchema，解析 source 与 MLog 绑定，验证第 5.4
 节的三个 ID 相等。消费基线表记录的是已确认身份，不能用查询它来代替当前绑定检查。
 
+所有 COMPLETE 都要校验本次实际读取的 source ID 与 `schema@U` 中对应 source ID
+一致，多 source 时校验完整集合。左侧取最终成功执行尝试的实际计划，右侧取实际数据
+快照上的绑定；不一致就回滚重试。即使只做 COMPLETE 而不要求有效 FAST 基线，也不能因
+全量重算而跳过此项校验。现有 MDL/schema 冲突检查继续生效。
+
 OOP 的上游读取快照为 shadow build 实际 TS `R_build`，按同样原则校验其实际身份并
-捕获全部入边令牌。令牌和 `R_build` 传入 cutover job，不能在 worker 提交或重试时
-替换成上游最新代际。允许并发的上游普通 DML 继续，不要求上游在刷新期间停止写入。
+在需要保留 FAST 能力时捕获全部日志令牌。令牌和 `R_build` 传入 cutover job，不能在
+worker 提交或重试时替换成上游最新代际。允许并发的上游普通 DML 继续，不要求上游
+在刷新期间停止写入。
 
 ### 6.2 FAST
 
 1. 先取得目标维护排他权，再开始刷新数据事务并取得现有 refresh-info 行锁。
-2. 从结构元数据枚举全部 source，加载该 MV 的已确认基线，检查边集合一致。
-3. 编译时检查计划读取的 MLog ID 与基线相同，保留水位区间和 purge 完整性检查。
+2. 从结构元数据枚举全部 source，加载该 MV 的日志基线及统一水位，检查日志集合一致。
+3. 编译时检查计划读取的 MLog ID 均有已确认基线，保留水位区间和 purge 完整性检查。
 4. 按现有 `for_update_ts` 路径执行增量计划；目标数据及自身 MLog 写入尚未提交。
 5. 保存最终计算使用的 `U`，按第 6.1 节读取 `generation@U` 或 `schema@U` 的绑定，
    完成全部入边的快照校验。提前检查可用于尽早报错，不能替代这项权威检查。
-6. 校验通过后，在原数据事务中原子更新全部边水位和整体 refresh-info 并提交。
-   普通 FAST 沿用已确认日志身份，水位推进到保存的 `U`；任一步失败整体回滚。
+6. 校验通过后，沿用已确认的日志身份与代际，在原数据事务中原子提交数据与整体
+   refresh-info。普通 FAST 将统一水位推进到保存的 `U`；任一步失败整体回滚。
 
 generation 或基线 MLog ID 不匹配时返回需要 COMPLETE 的错误，说明具体 source 和
 日志身份。没有数据语句的 no-op 显式选取校验快照，先验证基线再返回，不因此推进水位。
@@ -373,13 +436,21 @@ generation 或基线 MLog ID 不匹配时返回需要 COMPLETE 的错误，说�
 ### 6.3 COMPLETE DELTA APPLY 与普通 COMPLETE
 
 COMPLETE 可以从无有效增量基线的状态开始。它读取全部 source 重新计算结果，并按
-实际数据快照校验结构依赖、物理绑定及 source 令牌。DELTA APPLY 的普通计算快照为
-最终成功尝试的 `U`，确认的代际来自 `U`，不要求等于旧基线或提交时的最新值。
+实际数据快照校验结构依赖和 source 物理绑定。DELTA APPLY 的普通计算快照为最终
+成功尝试的 `U`；需要保留 FAST 能力时，捕获 `U` 上全部 MLog 的身份与代际，不要求
+等于旧基线或提交时的最新值。
 
-校验通过后，在同一数据事务中一起提交：目标 MV 数据、自身 MLog 的行级差异、全部
-入边的日志身份与水位、整体成功信息。任一步失败一起回滚；不先提交恢复状态再写数据。
+校验通过后，在同一数据事务中一起提交：目标 MV 数据、自身 MLog 的行级差异、完整
+FAST 日志基线集合、统一水位及成功信息。基线集合以本次快照为准原子替换，删除旧
+日志记录，不能只更新新旧集合的交集。任一步失败一起回滚；不先提交恢复状态再写数据。
 source 在读取快照之后切换，不单独构成代际校验失败，但仍可能触发第 7.5 节的对象
 或基线记录冲突。COMPLETE IN PLACE 保持现有读取行为，按其实际 TS 确认基线。
+
+明确只做 COMPLETE 的 MV 同样按本次快照维护真实日志或无日志占位，并更新统一
+成功水位，但不要求其 generation 构成有效 FAST 基线。未按本次快照确认的日志代际
+保持 NULL，不能沿用旧代际配上新水位来假装有效。source ID 校验与正常 DDL 冲突
+检查仍需执行。其 source OOP 或未来支持的 TRUNCATE 不造成必须先修复日志连续性
+才能 COMPLETE 的问题；source 换 ID 后读旧物理表的风险仍须通过快照绑定校验处理。
 
 同一个 parent 的其他 consumer 记录不受这次恢复影响。中间层 MV 通过 DELTA APPLY
 恢复入边时，其自身 MLog 仍连续，这次恢复不会使其下游对应的消费边失效。
@@ -392,7 +463,8 @@ build 阶段保持 shadow 受保护、不可作为合法 source，不改 serving
 cutover 在目标维护排他权仍有效的条件下，执行对象 revision、依赖集合和基线迁移检查，
 完成第 8 节的原子迁移。目标自身入边使用 build 快照实际确认的基线；它作为 consumer
 不锁上游 MLog 状态。目标作为 source 推进自己的输出日志代际，或按第 5.4 节换 MLog
-ID；这项状态写入仍需与其 purge 协调。下游确认值保留原值，由后续快照检查识别断点。
+ID；这项状态写入仍需与其 purge 协调。下游日志键与确认值保留原值，由后续快照检查
+识别断点；不因 source ID 变化迁移下游消费基线。
 
 cutover 失败时旧 MV、旧代际和全部旧基线继续成立，清理 shadow；不能留下已递增的
 generation 或已经改键的部分边记录。
@@ -417,9 +489,9 @@ R：FAST 校验通过，尝试提交数据及 g1、U 的基线
 source 在 `U` 之后推进代际本身不要求本次回滚。反之，切换在 `U` 之前生效时，
 FAST 比较基线与 `generation@U` / MLog 绑定会失败，未提交数据全部回滚。
 
-仍需保留目标 MV 的维护互斥及 refresh-info 行锁、全部边记录的条件更新和对象/schema
-冲突检查。OOP 更新自身输出状态与 purge 写状态之间仍需协调；consumer 不参与这组
-共享状态行锁，也不因多个 source 而增加上游日志锁序。
+仍需保留目标 MV 的维护互斥及 refresh-info 行锁、基线重建或迁移时的条件更新和
+对象/schema 冲突检查。OOP 更新自身输出状态与 purge 写状态之间仍需协调；consumer
+不参与这组共享状态行锁，也不因多个 source 而增加上游日志锁序。
 
 ### 7.2 多 source 与恢复竞争
 
@@ -429,11 +501,12 @@ B 在 U 之后 OOP，提交 B:g2
 C 按 U 校验，尝试原子提交 A:g1、B:g1 的全部基线和数据
 ```
 
-C 不因 B 在 `U` 之后推进代际而必须失败，能否提交由对象引用、边改键及事务冲突检查
+C 不因 B 在 `U` 之后推进代际而必须失败，能否提交由对象引用及事务冲突检查
 决定。提交成功时全部基线都确认 `U` 的状态，其中 B 的旧基线已失效；不能把它改写为 g2。
 若 B 在 `U` 之前切换，COMPLETE 只有实际读取、确认 B:g2 的数据才可建立 g2 基线；
 旧物理绑定与 `schema@U` 不一致时回滚。FAST 则额外要求各边原基线与 `U` 的身份相同。
-一次成功刷新确认完整 source 集合；不能部分提交边水位，也不提供单独恢复一条入边的操作。
+一次成功刷新确认完整日志集合和统一水位；不能只提交部分基线，也不提供单独推进某个
+source 消费进度的操作。
 
 ### 7.3 多 consumer 独立恢复
 
@@ -458,9 +531,13 @@ cutover 的 `InvolvingSchemaInfo` 必须覆盖实际修改的 source、目标、
 
 ### 7.5 目标或 source 身份变化
 
-按快照校验通过不代表忽略身份变更。consumer 捕获旧 source ID，而 parent OOP 已将
-边记录改键时，必须通过条件更新、影响行数及事务冲突检查拒绝旧键写入；不能用 UPSERT
-重新创建旧记录。consumer 自己 OOP 期间同样不能把旧 build 的结果确认成新 source 身份。
+按快照校验通过不代表忽略身份变更。parent OOP 不再为 source ID 变化改写下游消费
+基线的键；实际 source ID 与计算快照不匹配时，刷新仍须回滚。source 在计算快照之后
+切换时，下游只能保留该快照上的日志身份，不能将其确认值改写成新日志身份或代际。
+
+consumer 自己 OOP 会迁移其 `MVIEW_ID`。针对旧目标的请求必须通过维护互斥、条件
+更新、影响行数及事务冲突检查拒绝旧目标写入，不能用 UPSERT 重新创建旧目标的记录，也
+不能把旧 build 的结果确认成新 source 身份。
 
 跨节点 schema cache 暂未收敛时，运行 owner 与缓存的 MLog owner 不一致，应重读或返回
 可重试错误。比对时须使用同一快照，不能将最新 schema 与历史 generation 拼接。旧 MV
@@ -495,13 +572,14 @@ schema、日志状态和基线已经共同生效。恢复任务依据持久化 j
 | 输出 MLog 的 `TableInfo` | `BaseTableID` 从 `M_old` 改为 `M_new`，保留日志定义 |
 | 输出日志运行状态 | owner 改为 `M_new`，generation 递增，设置 F |
 | 全部直接 child | `BaseTableIDs` 中将 `M_old` 替换为 `M_new`，保留其他 source |
-| 目标的入边基线 | `MVIEW_ID` 改键到 `M_new`，确认 build 捕获的令牌与水位 |
-| child 的消费基线 | `SOURCE_ID` 改键到 `M_new`，保留旧确认值与水位 |
-| 整体 refresh-info | 迁移目标 ID 并更新 build 成功信息与 schedule |
+| 目标的 FAST 日志基线 | `MVIEW_ID` 改键到 `M_new`，按 build 捕获的日志集合与代际重建 |
+| child 的消费基线 | 日志键与代际保持不变，不因 source ID 变化改键；child 统一水位也不变 |
+| 整体 refresh-info | 迁移目标 ID，以 `R_build` 更新统一水位、成功信息与 schedule |
 | schema diff | 发布所有被修改的 TableInfo，不能只发布新旧目标 |
 
 对象可能属于不同 schema，迁移时逐个解析所属 schema，不能把 source 和 child 一律当成
-`job.SchemaID` 下的表。改键保留基线行数量和其他入边内容，冲突或多余记录视为一致性错误。
+`job.SchemaID` 下的表。目标的新 ID 只保留 build 确认的日志集合，旧目标 ID 不遗留运行
+记录；其他 consumer 的基线保持不变。迁移冲突或目标新 ID 已有非法记录时拒绝切换。
 
 当前 [schema_version.go](../../../pkg/ddl/schema_version.go)的
 `SetSchemaDiffForMViewRefreshOutOfPlaceCutover` 以及
@@ -514,25 +592,35 @@ schema、日志状态和基线已经共同生效。恢复任务依据持久化 j
 handle 的构造要依据其实际 schema，不能照搬 refresh-info 的 `kv.IntHandle` 假设。
 
 本节列出保留 MLog ID 的迁移集合。换 ID 方案还需原子发布新 MLog 定义、绑定和 purge
-运行状态，安排旧实例的回收，并保留下游旧 `BASELINE_MLOG_ID`；不能只迁移 owner。
+运行状态，安排旧实例的回收，并保留下游旧 `MLOG_ID` 基线记录；不能只迁移 owner。
 
 ## 9 日志保留与 Purge
 
-### 9.1 从每条消费边计算保留水位
+### 9.1 结合日志基线与 MV 级水位计算保留范围
 
 当前 `calcMaterializedViewLogSafePurgeTSO` 从整体 refresh-info 取多个 MV 的最小水位，
 见 [materialized_view.go](../../../pkg/executor/materialized_view.go)。新机制改为按当前
-source 的结构 consumer 集合，读取对应的边记录。
+source 的结构 consumer 集合枚举需要保留 FAST 能力的 MV，读取其日志基线与整体
+refresh-info。不能仅查询当前 MLog 的基线记录来枚举 consumer，否则换 ID 后会漏掉
+尚未确认新日志的 MV。明确只做 COMPLETE 的 MV 不参与日志消费水位保护。
 
-purge 仍按 TSO 水位删除日志，不按行 generation 清理。逐边的成功水位是正常保留依据；
+0 占位不对应真实日志，不单独参与最小水位计算；这不表示可以忽略该 MV 对其他真实
+日志的保护。需要保留 FAST 能力或正在启用 FAST 的 consumer，即使存在占位或缺少
+当前日志记录，也必须按结构关系枚举并保护其实际 source MLog。启用 FAST 的保护
+时序见第 10.5 节。
+
+purge 仍按 TSO 水位删除日志，不按行 generation 清理。MV 级成功水位是正常保留依据；
 对于失效或未建立的基线，第一版保守使用断点水位 F。设日志状态为 `(L, g, F)`：
 
 ```text
-有效且确认 L:g 的消费边：保护水位 = 该边 LAST_SUCCESS_READ_TSO
-尚未建立或已因断点失效的消费边：保护水位 = F
+确认 L:g 且 W(M) 非 NULL、W(M) >= F 的 consumer：保护水位 = W(M)
+缺少 L 的记录、generation 未确认或不匹配、或统一水位未建立或早于 F 的 consumer：保护水位 = F
 safe_purge_tso = min(purge transaction startTS, 所有保护水位)
-没有 consumer / building consumer 时，沿用事务 startTS 上界
+没有需要保留 FAST 能力的 consumer / building consumer 时，沿用事务 startTS 上界
 ```
+
+`W(M)` 从 `mysql.tidb_mview_refresh_info.LAST_SUCCESS_READ_TSO` 读取。新 MLog
+实例同样需要定义自己的保护下界 F，不能继承旧实例的成功消费水位。
 
 在第 5.2 节的无写入区间不变量下，`commit_ts <= F` 都属于旧日志区间，可以删除。
 失效 consumer 从完整数据恢复，不再需要旧区间；保留 `commit_ts > F` 的全部新日志，
@@ -544,13 +632,15 @@ safe_purge_tso = min(purge transaction startTS, 所有保护水位)
 
 ### 9.2 Initial build 与 COMPLETE 保护
 
-initial build 在取得数据读取快照之前，先注册全部 source 的未建立基线记录，并沿用
-building DDL job 的保护。COMPLETE 从旧有效基线恢复时，旧水位仍保护构建期间的日志；
-从失效状态恢复时，F 保护整个新代际区间。成功后一次推进全部水位，失败不解除原保护。
+需要保留 FAST 能力的 initial build 在取得数据读取快照之前，先按全部当前 MLog ID
+注册 generation 为 NULL 的基线记录，并沿用 building DDL job 的保护。COMPLETE 从
+旧有效基线恢复时，旧水位仍保护构建期间的日志；从失效状态恢复时，F 保护整个新
+代际区间。成功后原子确认完整日志集合并推进统一水位，失败不解除原保护。
 
-对 public consumer，缺少应有基线行是元数据不一致，purge 失败；不能把缺行解释成没有
-消费者。对合法 building consumer，NULL 基线表示需要保护。结构引用与运行基线集合
-不一致时不能继续删除日志。
+对 public consumer，当前 MLog 缺少基线记录可能是换 ID 后尚未恢复的正常状态，按 F
+保护，不能解释成没有消费者。对合法 building consumer，NULL generation 同样表示
+需要保护。整组日志登记缺失、结构绑定损坏、owner 不一致或缺少必需的整体 refresh-info
+等一致性错误仍应停止 purge；不通过忽略对应 consumer 来继续删除日志。
 
 ### 9.3 Purge 与 generation 切换并发
 
@@ -559,9 +649,10 @@ purge 沿用自身的日志状态行锁，读取 owner、generation 和物理删
 解析保护集合，不能继续使用旧 source ID 或旧 safe-purge 计算结果。多个状态写者如需
 同时保护多个对象，仍要约定一致锁序；consumer 的快照校验不获取这些锁。
 
-刷新未提交前，旧的持久化水位或 F 继续保护日志；提交成功后才原子推进全部边水位。
-此处保留范围计算、已有 snapshot/GC 保护和换 ID 后旧物理实例的生命周期需要分别证明，
-不能用 consumer 对 purge-info 加锁代替，也不能因基线失效就忽略仍需保护的新日志。
+刷新未提交前，旧的持久化水位或 F 继续保护日志；提交成功后才以新基线和统一水位
+计算保护范围。此处保留范围计算、已有 snapshot/GC 保护和换 ID 后旧物理实例的生命周期
+需要分别证明，不能用 consumer 对 purge-info 加锁代替，也不能因基线失效就忽略
+仍需保护的新日志。
 
 现有 `LAST_PURGED_TSO` 和 hazardous purge history 检查继续生效。历史记录建议携带
 run 捕获的 generation，使旧 run 的 running / failed 记录不会错误归属到新代际。
@@ -571,10 +662,14 @@ run 捕获的 generation，使旧 run 的 running / failed 记录不会错误归
 
 ### 10.1 CREATE 与 initial build
 
-注册结构依赖时一起创建 NULL 基线记录；initial build 验证 source 令牌并成功完成后，
-确认全部入边。source 在 build 期间 OOP 时，按实际读取快照校验身份，确认的只能是
-该快照上的日志；对象或基线迁移冲突要求回滚时拒绝旧构建，不能自动确认新代际。
-create rollback / cancel 删除本 MV 的运行记录和结构反向引用，不遗留日志保护。
+每个 MV 注册结构依赖时，按当前 MLog ID 创建 NULL generation 记录，任一 source
+缺少日志时补一条 0 占位。需要保留 FAST 能力时，initial build 验证 source 令牌并成功
+完成后，确认完整日志集合及统一水位。
+source 在 build 期间 OOP 时，按实际读取快照校验身份，确认的只能是该快照上的日志；
+对象或基线迁移冲突要求回滚时拒绝旧构建，不能自动确认新代际。
+create rollback / cancel 删除本 MV 的全部运行记录和结构反向引用，包括 0 占位，
+不遗留日志保护。明确只做 COMPLETE 的 MV 也维护日志登记和整体 refresh-info，
+没有 source MLog 时可以保留占位完成全量构建，不要求先建立 FAST 基线。
 
 ### 10.2 DROP 与日志重建
 
@@ -610,6 +705,35 @@ C COMPLETE OUT OF PLACE -> C<-A 恢复，C 的输出代际变化，E<-C 失效
 失效沿发生日志断点的直接出边判断，不立即将整个后代图的日志代际都改掉。
 E 依赖 C、D 时，全部入边有效才可 FAST。它仍不能从这个判定推断 C、D 的祖先已经最新。
 
+### 10.5 未来从 COMPLETE 切换到 FAST
+
+切换默认刷新方式或启用 FAST 时，需要检查并按需更新本表。0 占位只表示缺少 source
+MLog；刷新方式配置仍由 MV 定义维护。不能只把 0 改成当前日志 ID 和 generation，
+原 MV 数据未必对应该代际，且所需日志可能已经被 purge。
+
+最直接的建立基线流程为：
+
+1. 在目标 MV 维护互斥下，确认全部 source 都已有可用 MLog；缺少时先按正常 DDL 流程
+   创建。启用 FAST 的过程不能与同一 MV 的其他维护操作交错发布状态。
+2. 在选取 COMPLETE 数据快照之前，建立可恢复的持久日志保护，使 purge 将该对象按
+   building FAST consumer 处理。未来切换 DDL job 可以承载这项保护；不能仅依赖内存
+   中的维护锁，或让 purge 在此期间继续按 COMPLETE-only 忽略该对象。
+3. 执行一次建立 FAST 基线的 COMPLETE，按实际读取快照校验全部 source ID 并捕获
+   全部日志身份与代际。在同一数据事务中提交目标数据、统一水位及完整日志基线，
+   删除 0 占位及过时的日志键。
+4. 基线就绪后再发布允许 FAST 的配置。若配置由另一个 DDL 事务发布，持久保护必须
+   覆盖基线建立到配置生效之间的窗口，随后交接为正常 FAST consumer 的保留保护。
+   完成前 FAST 不得执行；失败或崩溃由持久状态恢复或取消，不能留下已启用却无保护
+   的 FAST 状态。
+
+若此前已维护完整有效基线，且日志保留范围仍满足要求，可以在协调好 purge 保护后
+直接切换默认方式，不必重复 COMPLETE，也不必改写未变化的记录。无法证明基线有效
+时使用上述重建流程。已经成功提交的 COMPLETE 数据不因后续配置发布失败而伪装成
+回滚；配置可保持 COMPLETE，恢复或取消任务时清理临时保护。
+
+本节定义未来切换的协议，本次不新增切换语法；普通 COMPLETE 建立基线仍是数据事务，
+不为每次 COMPLETE 增加修改 `TableInfo` 的 DDL。
+
 ## 11 升级与兼容性
 
 旧版本既不检查 generation，也不维护边基线。仅创建新表不足以安全开启 parent OOP。
@@ -617,16 +741,17 @@ E 依赖 C、D 时，全部入边有效才可 FAST。它仍不能从这个判定
 
 1. 创建新表、扩展日志状态，并保持 parent OOP 的现有限制。
 2. 所有可执行 MV 维护的节点具备新协议能力，排空仍在运行的旧协议任务。
-3. 按目标 MV 的维护互斥或等价 CAS 回填边基线，随后所有刷新一起维护边记录与整体信息。
+3. 按目标 MV 的维护互斥或等价 CAS 回填 FAST 日志基线，随后按新协议维护日志身份与
+   整体统一水位。
 4. 完成元数据和基线一致性检查后，再通过集群能力门槛开放 parent OOP。
 
 当前旧格式只支持单 source：在源和 MLog 绑定确定、整体水位非 NULL、且没有发生新机制
 断点时，可以用既有水位建立 generation 1 的基线。仍需保留 purge 完整性检查，不能让
 已经丢日志的 MV 因回填恢复 FAST。整体水位为 NULL 的对象保留未建立基线状态。
 
-不能在旧节点仍会只更新整体水位时提前回填并启用边基线，否则 MV 数据已刷新而边水位
-落后，会造成 delta 重复应用。对于未来无法从旧格式证明逐 source 基线的升级，不把
-一个汇总水位直接复制成所有入边的有效基线。
+回填不复制或创建逐日志水位；只有能证明当前日志身份与既有统一水位共同构成有效
+基线时，才能确认其 generation。未来多 source 升级也必须证明完整日志集合与统一
+水位对应，不能仅凭存在一个成功水位就确认全部日志身份。
 
 滚动升级、旧协议任务排空和降级限制需要明确实现门槛。已经发生新机制断点后，禁止
 忽略新字段的旧协议节点继续执行 FAST；具体能力门槛与恢复运维流程属于评审项。
@@ -637,9 +762,9 @@ E 依赖 C、D 时，全部入边有效才可 FAST。它仍不能从这个判定
 
 | 边界 | 涉及入口 | 可评审结果 |
 | --- | --- | --- |
-| 运行 schema 与状态读取 | session bootstrap、日志状态 resolver、新边记录 helper | 逐 source 身份、基线和集合校验 |
-| 刷新数据事务 | executor refresh、`persistRefreshSuccess` | 保存最终读取 TS、无锁快照校验、数据与全体基线原子确认 |
-| OOP 结构迁移 | ddl cutover、job args、schema diff、InfoSchema | 全部入边与出边改键、输出代际推进、失败回滚 |
+| 运行 schema 与状态读取 | session bootstrap、日志状态 resolver、FAST 消费基线 helper | source 物理身份、日志基线和集合校验 |
+| 刷新数据事务 | executor refresh、`persistRefreshSuccess` | 保存最终读取 TS、无锁快照校验、数据与日志基线及统一水位原子确认 |
+| OOP 结构迁移 | ddl cutover、job args、schema diff、InfoSchema | 结构引用迁移、目标基线改键、下游基线保留、输出代际推进、失败回滚 |
 | 保留与生命周期 | purge、CREATE initial build、DROP / rollback | 新旧日志区间与 building 基线安全 |
 | 激活与兼容 | bootstrap upgrade、维护任务能力检查 | 旧水位回填、新协议激活顺序 |
 
@@ -662,9 +787,15 @@ E 依赖 C、D 时，全部入边有效才可 FAST。它仍不能从这个判定
 - 悲观锁重试后按最终读取 TS 校验，后续基线更新推进锁 TS 不改变成功水位。
 - 辅助 session 读取准确的 `generation@U`，结束后清理 snapshot 状态并归还 session 池。
 - 换 ID 时同时校验基线、实际读取和 `schema@U` 的绑定；旧 MLog 仍可读不能绕过检查。
+- COMPLETE 实际读取的 source ID 与其数据快照上的 ID 不同时回滚，不能用最新 schema
+  代替 `schema@U`。
+- source OOP 保留 MLog ID 时不修改下游基线记录；换 MLog ID 时保留旧日志键，FAST
+  拒绝缺少新日志基线的状态，COMPLETE 原子替换完整集合及统一水位。
+- purge 从结构关系识别 FAST consumer；换 ID 后缺少当前日志记录仍按 F 保护。
 - consumer 不锁上游 MLog info 行；验证多个 consumer 校验及并发 purge 没有由校验引入的
   行锁竞争。snapshot 查询仍遵守存储层正常的锁解析规则，不承诺无等待。
-- source / consumer ID 改键后正反依赖、MLog owner、边行集合与 InfoSchema 都一致。
+- source / consumer ID 改变后正反依赖、MLog owner、FAST 日志基线与 InfoSchema 都一致；
+  consumer 自己 OOP 迁移 `MVIEW_ID`，不遗留旧目标记录。
 - OOP 在每个迁移步骤后注入失败，schema、generation、基线均保持全旧或全新。
 - create / rollback / DROP DATABASE 清理运行记录，不解除其他 consumer 的保护。
 - 升级回填不会造成重复消费；旧节点及旧任务不能跨激活边界忽略边基线。
@@ -677,14 +808,22 @@ E 依赖 C、D 时，全部入边有效才可 FAST。它仍不能从这个判定
 
 至少覆盖：
 
-1. C 确认全部 source 成功时全部边一起推进；任一确认失败，数据和全部边回滚。
-2. A、B 同时 OOP，不丢失共享 child 的任一 source ID 迁移。
+1. C 确认全部 source 成功时全部日志基线与统一水位一起提交；任一确认失败全部回滚。
+2. A、B 同时 OOP，不丢失共享 child 的任一结构 source ID 迁移，不改写其日志确认值。
 3. C COMPLETE 期间 A 或 B 切换，按第 7.2 节验证切换在读取 TS 前后的身份与确认值。
 4. C、D 独立恢复同一个 source，不覆盖对方基线。
-5. A -> C 与 B -> C 的水位不同，purge 各自使用对应边的保护水位。
+5. C 的多个 source 共用 W(C)，D 可以有不同的 W(D)；各日志按 consumer 的基线
+   有效性分别使用 W(C)、W(D) 或 F 保护，不新增逐 source 水位。
 6. 日志实例替换后相同 generation 数值仍被 MLog ID 区分。
 7. source 集合变化、缺边、多余边及并发 drop 不被确认成成功基线。
 8. 全部 source 按同一计算快照校验且不获取上游状态锁；事务冲突与重试不绕过基线改键检查。
+9. 机制层构造明确只做 COMPLETE 的 consumer，验证始终有日志登记，缺少 source MLog
+   时使用 0 占位，不因其消费进度阻塞 purge，但仍执行 source ID 快照校验。不能由
+   占位或缺少已确认代际推断刷新方式配置。
+10. 多 source 中真实日志记录与单条 0 占位可以并存；任一 source 缺少日志就拒绝 FAST，
+    COMPLETE 成功建立完整基线时原子清除占位与旧日志键。
+11. COMPLETE 到 FAST 的切换覆盖日志创建、基线建立、配置发布之间的并发 purge 和
+    崩溃恢复；失败不能误启用 FAST，已有有效基线时允许复用，普通 COMPLETE 不新增 DDL。
 
 并发测试在读取 TS 确定、数据构建、后置快照校验及 cutover mutation 之间设置确定性暂停点。
 断言既包含行集，也包含基线向量、日志区间和对象引用；不以最终 SELECT 正确代替事务证明。
@@ -693,12 +832,13 @@ E 依赖 C、D 时，全部入边有效才可 FAST。它仍不能从这个判定
 
 | 决策 | 草案倾向 | 需要确认的内容 |
 | --- | --- | --- |
-| 运行状态布局 | 新增一张逐 source 基线表，复用日志 purge-info 增加代际字段 | source 运行 owner 副本、字段名及 purge/OOP 写入协调 |
+| 运行状态布局 | 新增三列的 `tidb_mview_fast_refresh_source_info`，所有 MV 登记，缺日志用 0 占位，复用日志 purge-info | source 运行 owner 副本及 purge/OOP 写入协调 |
 | 输出 MLog | 受控写入下保留物理 ID 并推进代际 | 所有 writer 的静默区间、F 与事务重试；若不能证明则重建日志 |
 | 快照校验 | 保留 `for_update_ts`，执行后校验最终快照，不锁上游状态 | generation 的辅助 session 查询、`schema@U` 绑定及实际读取 TS 捕获 |
-| 换 MLog ID 备选 | 保留逐边基线，用物理 ID 表达断点 | 新实例创建和原子切换、旧实例生命周期、所有断点均换 ID 的约束 |
+| 换 MLog ID 备选 | 下游保留旧日志键，成功 COMPLETE 原子替换集合 | 新实例创建和原子切换、旧实例生命周期、所有断点均换 ID 的约束 |
 | 保留策略 | 失效或未建立基线的边保护到 F | 日志积累成本、现有 building job 与代际 history 的衔接 |
-| 整体水位 | 当前单 source 保持原语义，正确性依据逐边水位 | future 多 source 汇总与可观测性定义 |
+| 整体水位 | 全部 source 共用整体 refresh-info 的成功逻辑水位 | 多 source 同一快照与原子提交；不提供 source 独立消费进度 |
+| 未来启用 FAST | 先验证或建立完整基线，再发布刷新方式配置 | purge 持久保护、配置发布窗口、失败恢复；不能只把占位改成当前日志 |
 | 升级激活 | 所有 writer 支持新协议并完成回填后开放 OOP | 集群能力门槛、旧任务排空、降级行为 |
 
 正确性风险集中在状态/schema 与实际计算快照不对应、后续 SQL 推进 TS 覆盖成功水位、
@@ -706,10 +846,12 @@ E 依赖 C、D 时，全部入边有效才可 FAST。它仍不能从这个判定
 错误确认新 generation，以及 purge 漏保护基线。
 这些属于实现验收条件，不能仅用设计中的字段存在来宣称解决。
 
-性能方面，边记录数量与结构边数相同，每次刷新更新自身入边，OOP 仍需要遍历实际迁移的
-上下游引用。consumer 增加的是 snapshot 状态查询或历史 InfoSchema 绑定检查，不因
-校验而串行锁住共享 source；可批量查询多个 source 状态并复用同一快照。应测量查询、
-schema 查找及切换迁移的成本；purge/OOP 写者之间的锁竞争单独评估。
+性能方面，日志记录按 MV / MLog 组合保存，每个 MV 最多增加一条 0 占位；普通 FAST
+沿用已确认代际并推进统一水位，COMPLETE 重建自身日志集合。OOP 仍需要遍历实际
+迁移的上下游结构引用，但不再因 source ID 变化迁移下游基线键。consumer 增加的是
+snapshot 状态查询或历史 InfoSchema 绑定检查，不因校验而串行锁住共享 source；可
+批量查询多个 source 状态并复用同一快照。应测量查询、schema 查找及切换迁移的成本；
+purge/OOP 写者之间的锁竞争单独评估。
 
 本次讨论最终需要确认的是完整多对多状态模型及其事务协议。普通表 TRUNCATE 不属于
 这组实现决策；它需要另行证明任意写事务与数据、日志实例切换的关系。
