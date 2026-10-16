@@ -114,6 +114,8 @@ type executorBuilder struct {
 	inSelectLockStmt              bool
 	inMViewDeltaMergeStmt         bool
 	inMViewCompleteDeltaApplyStmt bool
+	// mviewRefreshReadTS is the fixed computation snapshot, independent of write-lock TS.
+	mviewRefreshReadTS uint64
 
 	// forDataReaderBuilder indicates whether the builder is used by a dataReaderBuilder.
 	// When forDataReader is true, the builder should use the dataReaderTS as the executor read ts. This is because
@@ -1404,15 +1406,22 @@ func (b *executorBuilder) buildPurgeMaterializedViewLog(v *plannercore.PurgeMate
 }
 
 func (b *executorBuilder) buildMViewCompleteDeltaApply(v *plannercore.MViewCompleteDeltaApply) exec.Executor {
+	if v.ReadTS == 0 {
+		b.err = errors.New("MViewCompleteDeltaApply read timestamp is zero")
+		return nil
+	}
 	if v.Source == nil {
 		b.err = errors.New("MViewCompleteDeltaApply source plan is nil")
 		return nil
 	}
 
 	originInMViewCompleteDeltaApply := b.inMViewCompleteDeltaApplyStmt
+	originReadTS := b.mviewRefreshReadTS
 	b.inMViewCompleteDeltaApplyStmt = true
+	b.mviewRefreshReadTS = v.ReadTS
 	defer func() {
 		b.inMViewCompleteDeltaApplyStmt = originInMViewCompleteDeltaApply
+		b.mviewRefreshReadTS = originReadTS
 	}()
 
 	if b.err = b.updateForUpdateTS(); b.err != nil {
@@ -2585,6 +2594,9 @@ func (b *executorBuilder) getSnapshotTS() (ts uint64, err error) {
 	if b.forDataReaderBuilder {
 		return b.dataReaderTS, nil
 	}
+	if b.mviewRefreshReadTS != 0 {
+		return b.mviewRefreshReadTS, nil
+	}
 
 	txnManager := sessiontxn.GetTxnManager(b.ctx)
 	if b.shouldReadByForUpdateTS() {
@@ -2600,7 +2612,20 @@ func (b *executorBuilder) getSnapshot() (kv.Snapshot, error) {
 	var err error
 
 	txnManager := sessiontxn.GetTxnManager(b.ctx)
-	if b.shouldReadByForUpdateTS() {
+	if b.mviewRefreshReadTS != 0 {
+		readTS, readErr := b.getSnapshotTS()
+		if readErr != nil {
+			return nil, readErr
+		}
+		// Do not reuse txn.GetSnapshot(): advancing for_update_ts mutates that snapshot.
+		// MV refresh sources are physical tables, so no temporary-table interceptor is needed.
+		snapshot = b.ctx.GetStore().GetSnapshot(kv.Version{Ver: readTS})
+		vars := b.ctx.GetSessionVars()
+		snapshot.SetOption(kv.ReplicaRead, vars.GetReplicaRead())
+		snapshot.SetOption(kv.RequestSourceInternal, vars.InRestrictedSQL)
+		snapshot.SetOption(kv.RequestSourceType, vars.RequestSourceType)
+		snapshot.SetOption(kv.LoadBasedReplicaReadThreshold, vars.LoadBasedReplicaReadThreshold)
+	} else if b.shouldReadByForUpdateTS() {
 		snapshot, err = txnManager.GetSnapshotWithStmtForUpdateTS()
 	} else {
 		snapshot, err = txnManager.GetSnapshotWithStmtReadTS()

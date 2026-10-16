@@ -583,6 +583,10 @@ func (p *Delete) MemoryUsage() (sum int64) {
 type MViewDeltaMerge struct {
 	baseSchemaProducer
 
+	// ReadTS fixes the merge-source snapshot across pessimistic statement retries.
+	// Write locks still use the transaction's independently advancing for_update_ts.
+	ReadTS uint64
+
 	// Source is the merge-source physical plan. Its row layout is:
 	//  1. delta columns first
 	//  2. MV output columns after delta columns (count = MVColumnCount)
@@ -700,7 +704,7 @@ func (p *MViewDeltaMerge) MemoryUsage() (sum int64) {
 		return
 	}
 
-	sum = p.baseSchemaProducer.MemoryUsage() + size.SizeOfInterface*4 + size.SizeOfInt64*3 + size.SizeOfPointer + size.SizeOfInt*4 + size.SizeOfSlice*5
+	sum = p.baseSchemaProducer.MemoryUsage() + size.SizeOfInterface*4 + size.SizeOfInt64*3 + size.SizeOfUint64 + size.SizeOfPointer + size.SizeOfInt*4 + size.SizeOfSlice*5
 	sum += int64(cap(p.GroupKeyMVOffsets)) * size.SizeOfInt
 	sum += int64(cap(p.AggInfos)) * size.SizeOfInterface
 	sum += int64(cap(p.FullUpdateKeyOff2IdxOff)) * size.SizeOfInt
@@ -725,6 +729,9 @@ func (p *MViewDeltaMerge) MemoryUsage() (sum int64) {
 // It consumes one diff-source stream and carries explicit row-image metadata for later sink execution.
 type MViewCompleteDeltaApply struct {
 	baseSchemaProducer
+
+	// ReadTS fixes both current-MV and recomputation reads across pessimistic retries.
+	ReadTS uint64
 
 	// Source is the diff-source physical plan for COMPLETE DELTA APPLY.
 	Source base.PhysicalPlan
@@ -799,7 +806,7 @@ func (p *MViewCompleteDeltaApply) MemoryUsage() (sum int64) {
 		return
 	}
 
-	sum = p.baseSchemaProducer.MemoryUsage() + size.SizeOfInterface*2 + size.SizeOfInt64 + size.SizeOfInt*3 + size.SizeOfSlice*3
+	sum = p.baseSchemaProducer.MemoryUsage() + size.SizeOfInterface*2 + size.SizeOfInt64 + size.SizeOfUint64 + size.SizeOfInt*3 + size.SizeOfSlice*3
 	sum += int64(cap(p.GroupKeyMVOffsets)) * size.SizeOfInt
 	sum += int64(cap(p.CurrentRowInputColIDs)) * size.SizeOfInt
 	sum += int64(cap(p.RecomputedRowInputColIDs)) * size.SizeOfInt

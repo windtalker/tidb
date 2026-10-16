@@ -86,6 +86,66 @@ func TestBuildProfileRefreshMaterializedViewPlan(t *testing.T) {
 	require.Equal(t, "refresh steps", profilePlan.OutputNames()[0].ColName.L)
 }
 
+func TestBuildRefreshMVFastRejectsChangedTableIDs(t *testing.T) {
+	testBuildRefreshMVRejectsChangedTableIDs(t, ast.RefreshMaterializedViewModeFast)
+}
+
+func TestBuildRefreshMViewCompleteDeltaApplyRejectsChangedTableIDs(t *testing.T) {
+	testBuildRefreshMVRejectsChangedTableIDs(t, ast.RefreshMaterializedViewModeCompleteDeltaApply)
+}
+
+func testBuildRefreshMVRejectsChangedTableIDs(t *testing.T, mode ast.RefreshMaterializedViewMode) {
+	for _, changed := range []string{"source", "mlog", "mv"} {
+		if mode == ast.RefreshMaterializedViewModeCompleteDeltaApply && changed == "mlog" {
+			continue
+		}
+		t.Run(changed, func(t *testing.T) {
+			store, dom := testkit.CreateMockStoreAndDomain(t)
+			tk := testkit.NewTestKit(t, store)
+			tk.MustExec("use test")
+			tk.MustExec("create table t (a int not null, b int not null)")
+			tk.MustExec("create materialized view log on t (a,b)")
+			tk.MustExec("create materialized view mv (a,s,cnt) refresh fast as select a,sum(b),count(1) from t group by a")
+			tk.MustExec("begin pessimistic")
+			defer tk.MustExec("rollback")
+			is := dom.InfoSchema()
+			ctx := context.Background()
+			source, err := is.TableByName(ctx, pmodel.NewCIStr("test"), pmodel.NewCIStr("t"))
+			require.NoError(t, err)
+			log, err := is.TableByName(ctx, pmodel.NewCIStr("test"), pmodel.NewCIStr("$mlog$t"))
+			require.NoError(t, err)
+			mv, err := is.TableByName(ctx, pmodel.NewCIStr("test"), pmodel.NewCIStr("mv"))
+			require.NoError(t, err)
+			sourceInfo, logInfo, mvInfo := source.Meta().Clone(), log.Meta().Clone(), mv.Meta().Clone()
+			switch changed {
+			case "source":
+				sourceInfo.ID += 10000
+				mvInfo.MaterializedView.BaseTableIDs = []int64{sourceInfo.ID}
+				logInfo.MaterializedViewLog.BaseTableID = sourceInfo.ID
+			case "mlog":
+				logInfo.ID += 10000
+				sourceInfo.MaterializedViewBase.MLogID = logInfo.ID
+			case "mv":
+				mvInfo.ID += 10000
+			}
+			// Simulate a newer binding while retaining the real schema at start_ts.
+			newIS := infoschema.MockInfoSchema([]*model.TableInfo{sourceInfo, logInfo, mvInfo})
+			builder, _ := plannercore.NewPlanBuilder().Init(tk.Session().GetPlanCtx(), newIS, hint.NewQBHintHandler(nil))
+			stmt := &ast.RefreshMaterializedViewStmt{
+				ViewName: &ast.TableName{Schema: pmodel.NewCIStr("test"), Name: pmodel.NewCIStr("mv")},
+				Type:     ast.RefreshMaterializedViewTypeFast,
+			}
+			if mode == ast.RefreshMaterializedViewModeCompleteDeltaApply {
+				stmt.Type = ast.RefreshMaterializedViewTypeComplete
+				stmt.CompleteType = ast.RefreshMaterializedViewCompleteTypeDeltaApply
+			}
+			_, err = builder.Build(ctx, resolve.NewNodeW(&ast.RefreshMaterializedViewImplementStmt{RefreshStmt: stmt}))
+			require.ErrorContains(t, err, "identity does not match snapshot")
+			tk.MustQuery("select * from mv").Check(testkit.Rows())
+		})
+	}
+}
+
 func TestBuildRefreshMVFastPlan(t *testing.T) {
 	sctx := plannercore.MockContext()
 	// Ensure we have a non-zero StartTS; mock.Store.Begin returns nil, so create a fake txn first.
@@ -142,6 +202,7 @@ func TestBuildRefreshMVFastPlan(t *testing.T) {
 
 	is := infoschema.MockInfoSchema([]*model.TableInfo{baseTbl, mlogTbl, mvTbl})
 	domain.GetDomain(sctx).MockInfoCacheAndLoadInfoSchema(is)
+	domain.GetDomain(sctx).InfoCache().Insert(is, 1)
 
 	implementStmt := &ast.RefreshMaterializedViewImplementStmt{
 		RefreshStmt: &ast.RefreshMaterializedViewStmt{
@@ -275,6 +336,7 @@ func TestBuildRefreshMVFastPlanWithMinMaxHasFullUpdate(t *testing.T) {
 
 	is := infoschema.MockInfoSchema([]*model.TableInfo{baseTbl, mlogTbl, mvTbl})
 	domain.GetDomain(sctx).MockInfoCacheAndLoadInfoSchema(is)
+	domain.GetDomain(sctx).InfoCache().Insert(is, 1)
 
 	implementStmt := &ast.RefreshMaterializedViewImplementStmt{
 		RefreshStmt: &ast.RefreshMaterializedViewStmt{
@@ -404,8 +466,7 @@ func TestExplainRefreshMVFastPlanUsesMLogCommitTSWindowSelectivity(t *testing.T)
 	txnMgr := sessiontxn.GetTxnManager(tk.Session())
 	require.NoError(t, txnMgr.OnStmtStart(context.Background(), implementStmt))
 	defer txnMgr.OnStmtEnd()
-	retainedUpperTSO, err := txnMgr.GetStmtForUpdateTS()
-	require.NoError(t, err)
+	retainedUpperTSO := txn.StartTS()
 	expectedRows := fmt.Sprintf(
 		"%.2f",
 		10000*float64(oracle.ExtractPhysical(targetTSO)-oracle.ExtractPhysical(lastSuccessTSO))/
@@ -427,7 +488,7 @@ func TestExplainRefreshMVFastPlanUsesMLogCommitTSWindowSelectivity(t *testing.T)
 	requireMLogCommitTSSelectionEstRows(t, explain.Rows, "test.$mlog$t_mlog_commit_ts_est._tidb_commit_ts", expectedRows)
 }
 
-func TestExplainRefreshMVFastPlanUsesForUpdateTSForUnboundedRefresh(t *testing.T) {
+func TestExplainRefreshMVFastPlanUsesStartTSForUnboundedRefresh(t *testing.T) {
 	store, dom := testkit.CreateMockStoreAndDomain(t)
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
@@ -464,7 +525,7 @@ func TestExplainRefreshMVFastPlanUsesForUpdateTSForUnboundedRefresh(t *testing.T
 	require.Greater(t, retainedUpperPhysical, startPhysical)
 	expectedRows := fmt.Sprintf(
 		"%.2f",
-		10000*float64(retainedUpperPhysical-(startPhysical-5000))/float64(retainedUpperPhysical-(startPhysical-10000)),
+		10000*float64(startPhysical-(startPhysical-5000))/float64(startPhysical-(startPhysical-10000)),
 	)
 
 	builder, _ := plannercore.NewPlanBuilder().Init(tk.Session().GetPlanCtx(), dom.InfoSchema(), hint.NewQBHintHandler(nil))
@@ -592,7 +653,7 @@ func TestExplainRefreshMVFastPlanEstimatesZeroRowsForDisjointMLogCommitTSFilter(
 	)
 }
 
-func TestExplainRefreshMVFastPlanObtainsForUpdateTSWhenNotProvided(t *testing.T) {
+func TestExplainRefreshMVFastPlanDoesNotAdvanceForUpdateTS(t *testing.T) {
 	store, dom := testkit.CreateMockStoreAndDomain(t)
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
@@ -626,8 +687,8 @@ func TestExplainRefreshMVFastPlanObtainsForUpdateTSWhenNotProvided(t *testing.T)
 	builder, _ := plannercore.NewPlanBuilder().Init(tk.Session().GetPlanCtx(), dom.InfoSchema(), hint.NewQBHintHandler(nil))
 	p, err := builder.Build(context.Background(), resolve.NewNodeW(implementStmt))
 	require.NoError(t, err)
-	require.NotZero(t, tk.Session().GetSessionVars().TxnCtx.GetForUpdateTS())
-	require.NotNil(t, p)
+	require.Equal(t, txn.StartTS(), tk.Session().GetSessionVars().TxnCtx.GetForUpdateTS())
+	require.Equal(t, txn.StartTS(), p.(*plannercore.MViewDeltaMerge).ReadTS)
 }
 
 func requireMLogCommitTSSelectionEstRows(t *testing.T, rows [][]string, commitTSInfo string, estRows string) {
@@ -708,6 +769,7 @@ func TestExplainRefreshMVFastPlanTree(t *testing.T) {
 
 	is := infoschema.MockInfoSchema([]*model.TableInfo{baseTbl, mlogTbl, mvTbl})
 	domain.GetDomain(sctx).MockInfoCacheAndLoadInfoSchema(is)
+	domain.GetDomain(sctx).InfoCache().Insert(is, 1)
 
 	implementStmt := &ast.RefreshMaterializedViewImplementStmt{
 		RefreshStmt: &ast.RefreshMaterializedViewStmt{
@@ -740,7 +802,7 @@ func TestExplainRefreshMVFastPlanTree(t *testing.T) {
 		{"  ├─HashAgg(Build)", "6400.00", "root", "", "group by:test.$mlog$t.a, funcs:sum_int(Column#11)->Column#6, funcs:firstrow(test.$mlog$t.a)->test.$mlog$t.a"},
 		{"  │ └─TableReader", "6400.00", "root", "", "data:HashAgg"},
 		{"  │   └─HashAgg", "6400.00", "cop[tikv]", "", "group by:test.$mlog$t.a, funcs:sum_int(test.$mlog$t._mlog$_old_new)->Column#11"},
-		{"  │     └─Selection", "8000.00", "cop[tikv]", "", "gt(test.$mlog$t._tidb_commit_ts, 0)"},
+		{"  │     └─Selection", "8000.00", "cop[tikv]", "", "gt(test.$mlog$t._tidb_commit_ts, 0), le(test.$mlog$t._tidb_commit_ts, 1)"},
 		{"  │       └─TableFullScan", "10000.00", "cop[tikv]", "table:$mlog$t", "keep order:false, stats:pseudo"},
 		{"  └─TableReader(Probe)", "10000.00", "root", "", "data:TableFullScan"},
 		{"    └─TableFullScan", "10000.00", "cop[tikv]", "table:mv", "keep order:false, stats:pseudo"},
@@ -815,6 +877,7 @@ func TestExplainRefreshMVFastPlanTreeMinMax(t *testing.T) {
 
 	is := infoschema.MockInfoSchema([]*model.TableInfo{baseTbl, mlogTbl, mvTbl})
 	domain.GetDomain(sctx).MockInfoCacheAndLoadInfoSchema(is)
+	domain.GetDomain(sctx).InfoCache().Insert(is, 1)
 
 	implementStmt := &ast.RefreshMaterializedViewImplementStmt{
 		RefreshStmt: &ast.RefreshMaterializedViewStmt{
@@ -847,7 +910,7 @@ func TestExplainRefreshMVFastPlanTreeMinMax(t *testing.T) {
 		{"│ ├─HashAgg(Build)", "6400.00", "root", "", "group by:Column#31, funcs:sum_int(Column#22)->Column#7, funcs:max(Column#23)->Column#8, funcs:max_count(Column#24)->Column#9, funcs:max(Column#25)->Column#10, funcs:max_count(Column#26)->Column#11, funcs:min(Column#27)->Column#12, funcs:min_count(Column#28)->Column#13, funcs:min(Column#29)->Column#14, funcs:min_count(Column#30)->Column#15, funcs:firstrow(Column#31)->test.$mlog$t.a"},
 		{"│ │ └─Projection", "8000.00", "root", "", "test.$mlog$t._mlog$_old_new->Column#22, if(eq(test.$mlog$t._mlog$_old_new, 1), test.$mlog$t.b, <nil>)->Column#23, if(eq(test.$mlog$t._mlog$_old_new, 1), test.$mlog$t.b, <nil>)->Column#24, if(eq(test.$mlog$t._mlog$_old_new, -1), test.$mlog$t.b, <nil>)->Column#25, if(eq(test.$mlog$t._mlog$_old_new, -1), test.$mlog$t.b, <nil>)->Column#26, if(eq(test.$mlog$t._mlog$_old_new, 1), test.$mlog$t.b, <nil>)->Column#27, if(eq(test.$mlog$t._mlog$_old_new, 1), test.$mlog$t.b, <nil>)->Column#28, if(eq(test.$mlog$t._mlog$_old_new, -1), test.$mlog$t.b, <nil>)->Column#29, if(eq(test.$mlog$t._mlog$_old_new, -1), test.$mlog$t.b, <nil>)->Column#30, test.$mlog$t.a->Column#31"},
 		{"│ │   └─TableReader", "8000.00", "root", "", "data:Selection"},
-		{"│ │     └─Selection", "8000.00", "cop[tikv]", "", "gt(test.$mlog$t._tidb_commit_ts, 0)"},
+		{"│ │     └─Selection", "8000.00", "cop[tikv]", "", "gt(test.$mlog$t._tidb_commit_ts, 0), le(test.$mlog$t._tidb_commit_ts, 1)"},
 		{"│ │       └─TableFullScan", "10000.00", "cop[tikv]", "table:$mlog$t", "keep order:false, stats:pseudo"},
 		{"│ └─TableReader(Probe)", "10000.00", "root", "", "data:TableFullScan"},
 		{"│   └─TableFullScan", "10000.00", "cop[tikv]", "table:mv", "keep order:false, stats:pseudo"},
@@ -900,6 +963,7 @@ func TestExplainRefreshMViewCompleteDeltaPlanTree(t *testing.T) {
 
 	is := infoschema.MockInfoSchema([]*model.TableInfo{baseTbl, mvTbl})
 	domain.GetDomain(sctx).MockInfoCacheAndLoadInfoSchema(is)
+	domain.GetDomain(sctx).InfoCache().Insert(is, 1)
 
 	implementStmt := &ast.RefreshMaterializedViewImplementStmt{
 		RefreshStmt: &ast.RefreshMaterializedViewStmt{
@@ -991,6 +1055,7 @@ func TestBuildRefreshMViewCompleteDeltaApplyPlan(t *testing.T) {
 
 	is := infoschema.MockInfoSchema([]*model.TableInfo{baseTbl, mvTbl})
 	domain.GetDomain(sctx).MockInfoCacheAndLoadInfoSchema(is)
+	domain.GetDomain(sctx).InfoCache().Insert(is, 1)
 
 	implementStmt := &ast.RefreshMaterializedViewImplementStmt{
 		RefreshStmt: &ast.RefreshMaterializedViewStmt{
@@ -1068,6 +1133,7 @@ func TestBuildRefreshMViewCompleteDeltaApplyPlanWithCascadesEnabled(t *testing.T
 
 	is := infoschema.MockInfoSchema([]*model.TableInfo{baseTbl, mvTbl})
 	domain.GetDomain(sctx).MockInfoCacheAndLoadInfoSchema(is)
+	domain.GetDomain(sctx).InfoCache().Insert(is, 1)
 
 	implementStmt := &ast.RefreshMaterializedViewImplementStmt{
 		RefreshStmt: &ast.RefreshMaterializedViewStmt{
@@ -1127,6 +1193,7 @@ func TestBuildRefreshMViewCompleteDeltaApplyPlanNullableGroupKey(t *testing.T) {
 
 	is := infoschema.MockInfoSchema([]*model.TableInfo{baseTbl, mvTbl})
 	domain.GetDomain(sctx).MockInfoCacheAndLoadInfoSchema(is)
+	domain.GetDomain(sctx).InfoCache().Insert(is, 1)
 
 	implementStmt := &ast.RefreshMaterializedViewImplementStmt{
 		RefreshStmt: &ast.RefreshMaterializedViewStmt{
@@ -1224,6 +1291,7 @@ func TestBuildRefreshMVFastSumNotNullNoCountExpr(t *testing.T) {
 
 	is := infoschema.MockInfoSchema([]*model.TableInfo{baseTbl, mlogTbl, mvTbl})
 	domain.GetDomain(sctx).MockInfoCacheAndLoadInfoSchema(is)
+	domain.GetDomain(sctx).InfoCache().Insert(is, 1)
 
 	implementStmt := &ast.RefreshMaterializedViewImplementStmt{
 		RefreshStmt: &ast.RefreshMaterializedViewStmt{
@@ -1453,6 +1521,7 @@ func buildMViewResultForHandleTest(
 	sctx := plannercore.MockContext()
 	is := infoschema.MockInfoSchema([]*model.TableInfo{baseTbl, mlogTbl, mvTbl})
 	domain.GetDomain(sctx).MockInfoCacheAndLoadInfoSchema(is)
+	domain.GetDomain(sctx).InfoCache().Insert(is, 1)
 
 	res, err := mview.Build(
 		sctx.GetPlanCtx(),

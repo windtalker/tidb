@@ -56,7 +56,6 @@ import (
 	"github.com/pingcap/tidb/pkg/sessionctx"
 	"github.com/pingcap/tidb/pkg/sessionctx/stmtctx"
 	"github.com/pingcap/tidb/pkg/sessionctx/variable"
-	"github.com/pingcap/tidb/pkg/sessiontxn"
 	"github.com/pingcap/tidb/pkg/sessiontxn/staleread"
 	"github.com/pingcap/tidb/pkg/statistics"
 	statslogutil "github.com/pingcap/tidb/pkg/statistics/handle/logutil"
@@ -3967,6 +3966,11 @@ func (b *PlanBuilder) buildRefreshMaterializedViewImplement(ctx context.Context,
 		}
 		return &infoschema.SessionExtendedInfoSchema{InfoSchema: planIS}
 	}
+	refreshSnapshotIS, err := staleread.GetSessionSnapshotInfoSchema(sctx, refreshTxnStartTS)
+	if err != nil {
+		return nil, err
+	}
+	var refreshMLogID int64
 
 	optimizeSelect := func(optCtx context.Context, sel *ast.SelectStmt, planIS infoschema.InfoSchema, useInfoSchemaAsIs bool) (base.PhysicalPlan, error) {
 		planIS = ensureSessionExtendedInfoSchema(planIS)
@@ -3976,6 +3980,11 @@ func (b *PlanBuilder) buildRefreshMaterializedViewImplement(ctx context.Context,
 			preprocessOpts = append(preprocessOpts, useProvidedInfoSchemaAsIs)
 		}
 		if err := Preprocess(optCtx, sctx, nodeW, preprocessOpts...); err != nil {
+			return nil, err
+		}
+		// MDL preprocessing can rebind a name to a newer physical table. Check
+		// the resulting bindings before building any executor or writing MV data.
+		if err := validateMVRefreshTableIDs(optCtx, planIS, refreshSnapshotIS, mviewInfo, refreshMLogID, refreshTxnStartTS, !useInfoSchemaAsIs); err != nil {
 			return nil, err
 		}
 
@@ -4005,27 +4014,26 @@ func (b *PlanBuilder) buildRefreshMaterializedViewImplement(ctx context.Context,
 
 	switch mode {
 	case ast.RefreshMaterializedViewModeFast:
-		res, err := mview.Build(b.ctx, b.is, mviewInfo, mview.BuildOptions{FromTS: fromTS, ToTS: toTS}, nil)
+		// An ordinary FAST is bounded by the data transaction's start_ts. An
+		// explicit AS OF keeps its requested delta bound and MIN/MAX snapshot.
+		mergeToTS := toTS
+		if mergeToTS == 0 {
+			mergeToTS = refreshTxnStartTS
+		}
+		res, err := mview.Build(b.ctx, b.is, mviewInfo, mview.BuildOptions{FromTS: fromTS, ToTS: mergeToTS}, nil)
 		if err != nil {
 			return nil, err
 		}
+		refreshMLogID = res.MLogTableID
 
 		if res.MergeSourceSelect == nil {
 			return nil, errors.New("mview: merge source select is nil")
-		}
-		txnManager := sessiontxn.GetTxnManager(sctx)
-		retainedUpperTSO := refreshTxnStartTS
-		if txnManager.GetContextProvider() != nil {
-			retainedUpperTSO, err = txnManager.GetStmtForUpdateTS()
-			if err != nil {
-				return nil, err
-			}
 		}
 		sourcePlan, err := func() (base.PhysicalPlan, error) {
 			estimation := &planctx.MLogCommitTSEstimation{
 				MLogTableID:      res.MLogTableID,
 				RetainedLowerTSO: stmt.MLogRetainedLowerTSO,
-				RetainedUpperTSO: retainedUpperTSO,
+				RetainedUpperTSO: refreshTxnStartTS,
 			}
 			estimationCtx, ok := b.ctx.(planctx.MLogCommitTSEstimationContext)
 			if !ok {
@@ -4132,6 +4140,7 @@ func (b *PlanBuilder) buildRefreshMaterializedViewImplement(ctx context.Context,
 		}
 
 		plan := MViewDeltaMerge{
+			ReadTS:                      refreshTxnStartTS,
 			Source:                      sourcePlan,
 			FullUpdateInnerSource:       fullUpdateInnerSource,
 			FullUpdateInnerColumnCount:  fullUpdateInnerColumnCount,
@@ -4180,6 +4189,7 @@ func (b *PlanBuilder) buildRefreshMaterializedViewImplement(ctx context.Context,
 			return nil, err
 		}
 		return MViewCompleteDeltaApply{
+			ReadTS:                   refreshTxnStartTS,
 			Source:                   sourcePlan,
 			MVTableID:                mviewInfo.ID,
 			MVColumnCount:            diffRes.MVColumnCount,
@@ -4202,6 +4212,70 @@ type mvFullUpdateLookupTemplate struct {
 	KeyOff2IdxOff     []int
 	KeyResultColIdxes []int
 	OutputMVOffsets   []int
+}
+
+// validateMVRefreshTableIDs prevents reading a replacement physical table
+// with an older data timestamp. Keep normal MDL/write-schema handling; a changed
+// identity fails compilation and lets the caller start a new refresh transaction.
+func validateMVRefreshTableIDs(
+	ctx context.Context,
+	planIS, snapshotIS infoschema.InfoSchema,
+	mviewInfo *model.TableInfo,
+	mlogID int64,
+	readTS uint64,
+	checkIndexes bool,
+) error {
+	identityErr := errors.Errorf("refresh materialized view: source, materialized view log or materialized view identity does not match snapshot %d; retry the refresh", readTS)
+	mv, ok := snapshotIS.TableInfoByID(mviewInfo.ID)
+	if !ok || mv.MaterializedView == nil || !slices.Equal(mv.MaterializedView.BaseTableIDs, mviewInfo.MaterializedView.BaseTableIDs) {
+		return identityErr
+	}
+	readTables := []*model.TableInfo{mv}
+	for _, baseID := range mv.MaterializedView.BaseTableIDs {
+		baseTable, ok := snapshotIS.TableInfoByID(baseID)
+		if !ok {
+			return identityErr
+		}
+		readTables = append(readTables, baseTable)
+	}
+	// COMPLETE DELTA APPLY recomputes from sources without requiring an MLog.
+	if mlogID != 0 {
+		if len(readTables) != 2 || readTables[1].MaterializedViewBase == nil || readTables[1].MaterializedViewBase.MLogID != mlogID {
+			return identityErr
+		}
+		mlog, ok := snapshotIS.TableInfoByID(mlogID)
+		if !ok || mlog.MaterializedViewLog == nil || mlog.MaterializedViewLog.BaseTableID != readTables[1].ID {
+			return identityErr
+		}
+		readTables = append(readTables, mlog)
+	}
+	for _, snapshotTable := range readTables {
+		db, ok := infoschema.SchemaByTable(snapshotIS, snapshotTable)
+		if !ok {
+			return identityErr
+		}
+		boundTable, err := planIS.TableByName(ctx, db.Name, snapshotTable.Name)
+		if err != nil || boundTable.Meta().ID != snapshotTable.ID {
+			return identityErr
+		}
+		// An explicitly provided historical read schema already binds its indexes
+		// to that read's timestamp, which can precede the refresh start_ts.
+		if !checkIndexes {
+			continue
+		}
+		// RC MDL preprocessing can expose newly public indexes. Their entries
+		// are not necessarily readable at start_ts even when the table ID matches.
+		for _, index := range boundTable.Meta().Indices {
+			if index.State != model.StatePublic {
+				continue
+			}
+			snapshotIndex := snapshotTable.FindIndexByID(index.ID)
+			if snapshotIndex == nil || snapshotIndex.State != model.StatePublic {
+				return errors.Annotatef(identityErr, "index %s on %s.%s is not readable at the snapshot", index.Name.O, db.Name.O, snapshotTable.Name.O)
+			}
+		}
+	}
+	return nil
 }
 
 func validateMVFullUpdateSupportingIndex(

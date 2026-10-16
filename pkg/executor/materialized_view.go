@@ -4597,7 +4597,7 @@ func (e *RefreshMaterializedViewExec) executeRefreshMaterializedView(kctx contex
 	})
 	refreshStmtResult := captureMVRefreshStmtResult(sessVars)
 
-	actualRefreshReadTSO, err := getRefreshReadTSOForSuccess(sessVars)
+	actualRefreshReadTSO, err := getRefreshReadTSOForSuccess(sessVars, refreshMode)
 	if err != nil {
 		return finalizeFailure(err)
 	}
@@ -5928,10 +5928,12 @@ func drainRefreshRecordSet(kctx context.Context, rs sqlexec.RecordSet) error {
 	}
 }
 
-func getRefreshReadTSOForSuccess(sessVars *variable.SessionVars) (uint64, error) {
-	// MV refresh executes in pessimistic txn and reads data at `for_update_ts`.
-	// Persist this timestamp so refresh metadata is aligned with the data snapshot.
+func getRefreshReadTSOForSuccess(sessVars *variable.SessionVars, mode ast.RefreshMaterializedViewMode) (uint64, error) {
+	// FAST and DELTA APPLY use start_ts even when retries advance the write-lock TS.
 	refreshReadTSO := sessVars.TxnCtx.GetForUpdateTS()
+	if mode == ast.RefreshMaterializedViewModeFast || mode == ast.RefreshMaterializedViewModeCompleteDeltaApply {
+		refreshReadTSO = sessVars.TxnCtx.StartTS
+	}
 	if refreshReadTSO == 0 {
 		return 0, errors.New("refresh materialized view: invalid refresh read tso")
 	}

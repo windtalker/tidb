@@ -88,10 +88,17 @@ const (
 )
 
 func (b *executorBuilder) buildMViewDeltaMerge(v *plannercore.MViewDeltaMerge) exec.Executor {
+	if v.ReadTS == 0 {
+		b.err = errors.New("MViewDeltaMerge read timestamp is zero")
+		return nil
+	}
 	originInMViewDeltaMerge := b.inMViewDeltaMergeStmt
+	originReadTS := b.mviewRefreshReadTS
 	b.inMViewDeltaMergeStmt = true
+	b.mviewRefreshReadTS = v.ReadTS
 	defer func() {
 		b.inMViewDeltaMergeStmt = originInMViewDeltaMerge
+		b.mviewRefreshReadTS = originReadTS
 	}()
 	if b.err = b.updateForUpdateTS(); b.err != nil {
 		return nil

@@ -513,6 +513,166 @@ func requireRefreshInfoSnapshotMatchesHistAtCommitTSO(
 	)).Check(testkit.Rows(strconv.FormatUint(refreshReadTSO, 10)))
 }
 
+func TestMaterializedViewRefreshFastUsesStartTS(t *testing.T) {
+	testMaterializedViewRefreshUsesStartTS(t, "fast")
+}
+
+func TestMaterializedViewRefreshCompleteDeltaApplyUsesStartTS(t *testing.T) {
+	testMaterializedViewRefreshUsesStartTS(t, "complete delta apply")
+}
+
+func testMaterializedViewRefreshUsesStartTS(t *testing.T, refreshMode string) {
+	for _, mode := range []string{"sum", "minmax", "retry"} {
+		t.Run(mode, func(t *testing.T) {
+			store, _ := testkit.CreateMockStoreAndDomain(t)
+			tk := testkit.NewTestKit(t, store)
+			tk.MustExec("use test")
+			tk.MustExec("create table t (a int not null, b int not null, key idx_a(a))")
+			tk.MustExec("insert into t values (1,10),(1,20),(1,30)")
+			tk.MustExec("create materialized view log on t (a,b)")
+			if mode == "minmax" {
+				tk.MustExec("create materialized view mv (a,cnt,mx,mn) refresh fast as select a,count(1),max(b),min(b) from t group by a")
+			} else {
+				tk.MustExec("create materialized view mv (a,s,cnt) refresh fast as select a,sum(b),count(1) from t group by a")
+			}
+			tk.MustExec("delete from t where b=30")
+			tk.MustExec("insert into t values (2,5)")
+
+			const pauseFP = "github.com/pingcap/tidb/pkg/executor/refreshMaterializedViewAfterInsertRefreshHistRunning"
+			paused, resume := make(chan struct{}), make(chan struct{})
+			defer func() {
+				select {
+				case <-resume:
+				default:
+					close(resume)
+				}
+			}()
+			testfailpoint.EnableCall(t, pauseFP, func() {
+				close(paused)
+				<-resume
+			})
+			var retryErrors atomic.Int32
+			if mode == "retry" {
+				testfailpoint.EnableCall(t, "github.com/pingcap/tidb/pkg/executor/beforePessimisticStmtErrorForNextAction", func() { retryErrors.Add(1) })
+			}
+			done := make(chan error, 1)
+			go func() {
+				refreshTK := testkit.NewTestKit(t, store)
+				refreshTK.MustExec("use test")
+				done <- refreshTK.ExecToErr("refresh materialized view mv " + refreshMode)
+			}()
+			select {
+			case <-paused:
+			case <-time.After(10 * time.Second):
+				t.Fatal("refresh did not reach the data transaction boundary")
+			}
+			// These commits must be left for the next FAST, including MIN/MAX recomputation.
+			tk.MustExec("insert into t values (1,100),(3,7)")
+			if mode == "retry" {
+				testfailpoint.Enable(t, "github.com/pingcap/tidb/pkg/store/mockstore/unistore/tikv/pessimisticLockReturnWriteConflict", "1*return(true)")
+			}
+			close(resume)
+			select {
+			case err := <-done:
+				require.NoError(t, err)
+			case <-time.After(10 * time.Second):
+				t.Fatal("refresh did not finish")
+			}
+			require.NoError(t, failpoint.Disable(pauseFP))
+			if mode == "retry" {
+				require.Positive(t, retryErrors.Load())
+			}
+			if mode == "minmax" {
+				tk.MustQuery("select * from mv order by a").Check(testkit.Rows("1 2 20 10", "2 1 5 5"))
+			} else {
+				tk.MustQuery("select * from mv order by a").Check(testkit.Rows("1 30 2", "2 5 1"))
+			}
+			tk.MustQuery("select r.LAST_SUCCESS_READ_TSO=h.REFRESH_JOB_ID, h.REFRESH_READ_TSO=h.REFRESH_JOB_ID from mysql.tidb_mview_refresh_info r join mysql.tidb_mview_refresh_hist h on r.MVIEW_ID=h.MVIEW_ID where h.MVIEW_NAME='mv' and h.REFRESH_STATUS='success' order by h.REFRESH_JOB_ID desc limit 1").Check(testkit.Rows("1 1"))
+			tk.MustExec("refresh materialized view mv fast")
+			if mode == "minmax" {
+				tk.MustQuery("select * from mv order by a").Check(testkit.Rows("1 3 100 10", "2 1 5 5", "3 1 7 7"))
+			} else {
+				tk.MustQuery("select * from mv order by a").Check(testkit.Rows("1 130 3", "2 5 1", "3 7 1"))
+			}
+		})
+	}
+}
+
+func TestMaterializedViewRefreshFastStartTSWithIsolationLevels(t *testing.T) {
+	testMaterializedViewRefreshStartTSWithIsolationLevels(t, "fast")
+}
+
+func TestMaterializedViewRefreshCompleteDeltaApplyStartTSWithIsolationLevels(t *testing.T) {
+	testMaterializedViewRefreshStartTSWithIsolationLevels(t, "complete delta apply")
+}
+
+func testMaterializedViewRefreshStartTSWithIsolationLevels(t *testing.T, refreshMode string) {
+	for _, isolation := range []string{"REPEATABLE-READ", "READ-COMMITTED"} {
+		t.Run(isolation, func(t *testing.T) {
+			store, _ := testkit.CreateMockStoreAndDomain(t)
+			tk := testkit.NewTestKit(t, store)
+			tk.MustExec("use test")
+			tk.MustExec("create table t (a int not null, b int not null)")
+			tk.MustExec("insert into t values (1,10)")
+			tk.MustExec("create materialized view log on t (a,b)")
+			tk.MustExec("create materialized view mv (a,s,cnt) refresh fast as select a,sum(b),count(1) from t group by a")
+			tk.MustExec("insert into t values (1,20)")
+			refreshTK := testkit.NewTestKit(t, store)
+			refreshTK.MustExec("use test")
+			refreshTK.MustExec("set transaction_isolation='" + isolation + "'")
+			refreshTK.MustExec("begin pessimistic")
+			defer refreshTK.MustExec("rollback")
+			startTS := refreshTK.Session().GetSessionVars().TxnCtx.StartTS
+			// Preserve the metadata current read, which can advance the write snapshot.
+			rows := refreshTK.MustQuery("select LAST_SUCCESS_READ_TSO from mysql.tidb_mview_refresh_info where MVIEW_ID=(select tidb_table_id from information_schema.tables where table_schema='test' and table_name='mv') for update nowait").Rows()
+			lastTS, err := strconv.ParseUint(fmt.Sprint(rows[0][0]), 10, 64)
+			require.NoError(t, err)
+			tk.MustExec("insert into t values (1,100),(2,7)")
+			stmt := &ast.RefreshMaterializedViewImplementStmt{
+				RefreshStmt: &ast.RefreshMaterializedViewStmt{
+					ViewName: &ast.TableName{Schema: pmodel.NewCIStr("test"), Name: pmodel.NewCIStr("mv")},
+					Type:     ast.RefreshMaterializedViewTypeFast,
+				},
+				LastSuccessfulRefreshReadTSO: lastTS,
+			}
+			if refreshMode == "complete delta apply" {
+				stmt = buildCompleteDeltaApplyImplementStmt("test", "mv")
+			}
+			mustExecRefreshImplementStmt(t, refreshTK, stmt)
+			require.Greater(t, refreshTK.Session().GetSessionVars().TxnCtx.GetForUpdateTS(), startTS)
+			refreshTK.MustQuery("select * from mv order by a").Check(testkit.Rows("1 30 2"))
+		})
+	}
+}
+
+func TestMaterializedViewRefreshCompleteDeltaApplyRejectsNewIndexAfterStartTS(t *testing.T) {
+	store, _ := testkit.CreateMockStoreAndDomain(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("create table t (a int not null, b int not null)")
+	tk.MustExec("insert into t values (1,10)")
+	tk.MustExec("create materialized view log on t (a,b)")
+	tk.MustExec("create materialized view mv (a,s,cnt) refresh fast as select a,sum(b),count(1) from t where a=1 group by a")
+	refreshTK := testkit.NewTestKit(t, store)
+	refreshTK.MustExec("use test")
+	refreshTK.MustExec("set transaction_isolation='READ-COMMITTED'")
+	refreshTK.MustExec("begin pessimistic")
+	defer refreshTK.MustExec("rollback")
+	// RC preprocessing can expose this index, whose entries do not exist at start_ts.
+	tk.MustExec("insert into t values (1,20)")
+	tk.MustExec("alter table t add index idx_ab(a,b)")
+	ctx := kv.WithInternalSourceType(context.Background(), kv.InternalTxnMVMaintenance)
+	rs, err := refreshTK.Session().ExecuteStmt(ctx, buildCompleteDeltaApplyImplementStmt("test", "mv"))
+	if rs != nil {
+		require.NoError(t, rs.Close())
+	}
+	require.ErrorContains(t, err, "identity does not match snapshot")
+	refreshTK.MustQuery("select * from mv").Check(testkit.Rows("1 10 1"))
+	refreshTK.MustExec("rollback")
+	tk.MustExec("refresh materialized view mv complete delta apply")
+	tk.MustQuery("select * from mv").Check(testkit.Rows("1 30 2"))
+}
+
 func TestMaterializedViewRefreshCompleteBasic(t *testing.T) {
 	store, dom := testkit.CreateMockStoreAndDomain(t)
 	tk := testkit.NewTestKit(t, store)
@@ -2792,7 +2952,7 @@ UPDATE variable_value = '%[2]s', comment = '%[3]s'`, safePointName, safePointVal
 		t.Fatal("timeout waiting for refresh to reach failpoint")
 	}
 
-	// Commit new base table data after refresh txn start_ts but before refresh reads with for_update_ts.
+	// Commit new base table data after refresh start_ts; this data belongs to the next refresh.
 	tkConcurrent := testkit.NewTestKit(t, store)
 	tkConcurrent.MustExec("use test")
 	tkConcurrent.MustExec("insert into t values (2, 7)")
@@ -2806,7 +2966,7 @@ UPDATE variable_value = '%[2]s', comment = '%[3]s'`, safePointName, safePointVal
 		t.Fatal("timeout waiting for refresh to finish")
 	}
 
-	tk.MustQuery("select a, s, cnt from mv order by a").Check(testkit.Rows("1 16 3", "2 7 1"))
+	tk.MustQuery("select a, s, cnt from mv order by a").Check(testkit.Rows("1 16 3"))
 
 	tsRow := tk.MustQuery(fmt.Sprintf("select LAST_SUCCESS_READ_TSO from mysql.tidb_mview_refresh_info where MVIEW_ID = %d", mviewID)).Rows()
 	require.Len(t, tsRow, 1)
@@ -2815,7 +2975,7 @@ UPDATE variable_value = '%[2]s', comment = '%[3]s'`, safePointName, safePointVal
 	require.NotZero(t, refreshReadTSO)
 
 	tk.MustExec("set @@tidb_snapshot = '" + strconv.FormatUint(refreshReadTSO, 10) + "'")
-	tk.MustQuery("select a, sum(b), count(1) from t group by a order by a").Check(testkit.Rows("1 16 3", "2 7 1"))
+	tk.MustQuery("select a, sum(b), count(1) from t group by a order by a").Check(testkit.Rows("1 16 3"))
 	tk.MustExec("set @@tidb_snapshot = ''")
 
 	tk.MustQuery(fmt.Sprintf("select REFRESH_STATUS, REFRESH_METHOD, REFRESH_END_TIME is not null, REFRESH_READ_TSO = %d, REFRESH_FAILED_REASON is null from mysql.tidb_mview_refresh_hist where MVIEW_ID = %d order by REFRESH_JOB_ID desc limit 1", refreshReadTSO, mviewID)).
@@ -3107,7 +3267,7 @@ func TestMaterializedViewRefreshCompleteDeltaApplyImplementStmt(t *testing.T) {
 	}
 }
 
-func TestMaterializedViewRefreshCompleteDeltaApplyImplementStmtUsesForUpdateTS(t *testing.T) {
+func TestMaterializedViewRefreshCompleteDeltaApplyImplementStmtUsesStartTS(t *testing.T) {
 	store, _ := testkit.CreateMockStoreAndDomain(t)
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
@@ -3126,10 +3286,10 @@ func TestMaterializedViewRefreshCompleteDeltaApplyImplementStmtUsesForUpdateTS(t
 	tkConcurrent.MustExec("insert into t values (2, 7)")
 
 	mustExecCompleteDeltaApplyImplementStmt(t, tkRefresh, "test", "mv")
-	tkRefresh.MustQuery("select a, s, cnt from mv order by a").Check(testkit.Rows("1 15 2", "2 7 1"))
+	tkRefresh.MustQuery("select a, s, cnt from mv order by a").Check(testkit.Rows("1 15 2"))
 	tkRefresh.MustExec("commit")
 
-	tk.MustQuery("select a, s, cnt from mv order by a").Check(testkit.Rows("1 15 2", "2 7 1"))
+	tk.MustQuery("select a, s, cnt from mv order by a").Check(testkit.Rows("1 15 2"))
 }
 
 func TestMaterializedViewRefreshCompleteDeltaApplyRollbackOnError(t *testing.T) {
