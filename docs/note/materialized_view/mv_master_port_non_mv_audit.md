@@ -5,8 +5,13 @@
 Source range:
 
 ```text
-f08c648a20380ea723449c6c3eb5b171d96fd567..8d2633e8e55a6e7d09649e650df39f1c9f64a7f2
+f08c648a20380ea723449c6c3eb5b171d96fd567..fd4636bb442de52a1a5c6321f3f29092472aa6f4
 ```
+
+2026-10-17 将 source 范围扩展到最新 head `fd4636bb44`，共 115 个 commit。
+新增的 `f6de16d6f2`、`fd4636bb44` 已纳入 inventory；逐 commit 的逻辑、测试和 master
+覆盖复核见 [commit 审计](mv_master_port_commit_audit.md)，其中另列通用 prerequisite
+差异。以下既有非 MV 分类结论保留原审计状态，不视为本次已重新逐 hunk 验证。
 
 本文档的目标不是决定最终实现细节，而是先回答两个问题：
 
@@ -90,14 +95,14 @@ MV 实现或设计文档明确依赖这些能力。
 筛出名字上不带 MV 的文件：
 
 ```bash
-git diff --name-status f08c648a20380ea723449c6c3eb5b171d96fd567..8d2633e8e55a6e7d09649e650df39f1c9f64a7f2 \
+git diff --name-status f08c648a20380ea723449c6c3eb5b171d96fd567..fd4636bb442de52a1a5c6321f3f29092472aa6f4 \
   | rg -v '(materialized|Materialized|mview|MView|mv_|mlog|MLog|MLOG|tidb_mview|tidb_mlog|TIDB_MVIEW|TIDB_MLOG)'
 ```
 
 查看非 MV candidate 的 diff 概览：
 
 ```bash
-git diff --stat f08c648a20380ea723449c6c3eb5b171d96fd567..8d2633e8e55a6e7d09649e650df39f1c9f64a7f2 -- \
+git diff --stat f08c648a20380ea723449c6c3eb5b171d96fd567..fd4636bb442de52a1a5c6321f3f29092472aa6f4 -- \
   br cmd build pkg/util/topsql pkg/executor/join \
   pkg/planner/core/casetest/fulljoin \
   tests/integrationtest/t/active_active tests/integrationtest/r/active_active \
@@ -109,7 +114,7 @@ git diff --stat f08c648a20380ea723449c6c3eb5b171d96fd567..8d2633e8e55a6e7d09649e
 检查 FULL OUTER JOIN 是否被 MV 引用：
 
 ```bash
-git grep -n -i 'full outer\|fullouter\|FullOuter' 8d2633e8e5 -- \
+git grep -n -i 'full outer\|fullouter\|FullOuter' fd4636bb44 -- \
   pkg/executor pkg/planner/mview pkg/ddl pkg/sessionctx pkg/parser \
   tests/integrationtest/t/executor/mview_refresh.test docs/note/materialized_view
 ```
@@ -118,7 +123,7 @@ git grep -n -i 'full outer\|fullouter\|FullOuter' 8d2633e8e5 -- \
 
 ```bash
 git grep -n '_tidb_commit_ts\|CommitTs\|commit ts\|DecodeToChunkWithCommitTS' \
-  8d2633e8e5 -- \
+  fd4636bb44 -- \
   pkg/executor/materialized_view.go pkg/executor/mv_refresh_observability.go \
   pkg/planner/mview pkg/table/tables/mview_log.go \
   pkg/store pkg/util docs/note/materialized_view \
@@ -142,7 +147,7 @@ git grep -n "Usage of column name '_tidb_commit_ts'\|select _tidb_commit_ts" \
 
 ```bash
 git grep -n 'OnExecutionBegin\|OnExecutionFinished\|NetworkInBytes\|NetworkOutBytes' \
-  8d2633e8e5 -- \
+  fd4636bb44 -- \
   pkg/server pkg/session pkg/executor pkg/util/topsql pkg/mvservice docs/note/materialized_view
 ```
 
@@ -167,3 +172,5 @@ git grep -n 'ExprType_SumInt\|ExprType_MaxCount\|ExprType_MinCount' origin/maste
 | 2026-07-22 | 对最新 `origin/master` 确认 `_tidb_commit_ts` 状态 | `master` 已有底层 commitTS 下传和隐藏列建模，但普通 SQL 直接引用仍被 preprocess 禁止；MV port 需要单独处理内部 SQL 使用 `_tidb_commit_ts` 的可引用策略 |
 | 2026-07-22 | 对最新 `origin/master` 确认新 aggregate 状态 | `SUM_INT`、`MAX_COUNT`、`MIN_COUNT` 已有 parser / expression / executor / tipb pushdown / checker 支持；fast refresh 后续只适配，不重复 port 这些通用 aggregate |
 | 2026-09-09 | 更新最终 source range 并复核 prerequisite 状态 | source range 更新到 `8d2633e8e5`；FULL OUTER JOIN parser/planner/executor/MPP 及 `tipb.JoinType_TypeFullOuterJoin` 已确认合入 `master`，不再作为待 port 的独立 prerequisite；PR1/PR2 已完成，PR3 #70941 已创建 |
+| 2026-10-17 | 更新 source range 和审计命令 | head 更新为 `fd4636bb44`，共 115 个 commit；新增 `f6de16d6f2`、`fd4636bb44` 的 prerequisite 分类和 master 覆盖状态待复核，保留既有审计结论 |
+| 2026-10-17 | 关联最新逐 commit 复核 | `mv_master_port_commit_audit.md` 已按 `origin/master` 的 `f40ad1d845` 更新逻辑和测试状态；通用 pushdown/MPP 差异单列，是否纳入 MV prerequisite 仍按实际依赖决定 |

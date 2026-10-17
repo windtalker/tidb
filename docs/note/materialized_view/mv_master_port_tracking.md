@@ -17,26 +17,26 @@ source commit 的新增或修正只用于更新最终 diff 边界，不直接对
 
 ```text
 base commit: f08c648a20380ea723449c6c3eb5b171d96fd567
-head commit: 8d2633e8e55a6e7d09649e650df39f1c9f64a7f2
+head commit: fd4636bb442de52a1a5c6321f3f29092472aa6f4
 
 source range:
-  f08c648a20380ea723449c6c3eb5b171d96fd567..8d2633e8e55a6e7d09649e650df39f1c9f64a7f2
+  f08c648a20380ea723449c6c3eb5b171d96fd567..fd4636bb442de52a1a5c6321f3f29092472aa6f4
 ```
 
-当前 source diff 规模：
+截至 2026-10-17，该范围包含 **115 个 source commit**。当前 source diff 规模：
 
 ```text
-500 files changed, 97356 insertions(+), 25104 deletions(-)
+509 files changed, 99759 insertions(+), 25157 deletions(-)
 ```
 
 后续 inventory 和 review 都以固定 commit range 为准：
 
 ```bash
-git diff --name-status f08c648a20380ea723449c6c3eb5b171d96fd567..8d2633e8e55a6e7d09649e650df39f1c9f64a7f2
-git diff --stat f08c648a20380ea723449c6c3eb5b171d96fd567..8d2633e8e55a6e7d09649e650df39f1c9f64a7f2
+git diff --name-status f08c648a20380ea723449c6c3eb5b171d96fd567..fd4636bb442de52a1a5c6321f3f29092472aa6f4
+git diff --stat f08c648a20380ea723449c6c3eb5b171d96fd567..fd4636bb442de52a1a5c6321f3f29092472aa6f4
 ```
 
-### 新增 source commits
+### 早期新增 source commits（截至 `8d2633e8e5`）
 
 相对原 tracking 文档的 head `6910cef840612ee85e171adb19d3e427697a65da`，新增以下 7 个 commit。
 它们已经纳入上面的最终 source range，但 port 时仍然必须按最终 diff 的语义边界拆分。
@@ -53,6 +53,20 @@ git diff --stat f08c648a20380ea723449c6c3eb5b171d96fd567..8d2633e8e55a6e7d09649e
 
 其中 `f5dfdf58b9c98b21e8f384e40c11ff77cacd7222` 已经在原 tracking head 之后的历史中完成 bootstrap version 合并，
 本次 source boundary 更新也明确把这个 bootstrap 合并纳入 PR1 的最终 port 范围。
+
+### 2026-10-17 source 范围扩展
+
+相对上一版 head `8d2633e8e5`，新增以下两个 commit。它们已纳入本次 source
+范围和统计；下表仅记录语义和初步归属。逐项 master 逻辑和测试复核已记录在
+[commit 审计](mv_master_port_commit_audit.md)，以其中固定的 `origin/master` 快照为准。
+
+| Commit | 最终改动 | 主要 port 归属 |
+| --- | --- | --- |
+| `f6de16d6f2` | 回灌 parser/DDL 修复、schedule SQL mode/UTC 求值、refresh 除法精度、shadow cleanup、out-of-place cutover 依赖/原子性、infoschema v2 和相关测试 | 按 hunk 归 PR2a、PR2b-create/drop/alter、PR4/PR5/PR7 及其 prerequisite；不能整体判断已 port |
+| `fd4636bb44` | 修复 MV/MLog DDL 内部 SQL 失败后的整事务回滚、schema-version 失败重试、重开事务后的 job metadata 并发检查和 infoschema v2 affected-table 保留；补充 DDL 回归测试 | PR2b-create/drop/alter 及共享 DDL/infoschema prerequisite |
+
+本文件中的既有 slice 进度保留原记录；最新逐 commit 逻辑和测试状态以 commit 审计
+为准，不能将这里的历史进度直接当作最新 master 覆盖结论。
 
 ## PR 拆分规则
 
@@ -186,3 +200,5 @@ purge 侧 observability。
 | 2026-08-29 | `cp_mv_for_master_base` | 更新 source boundary，纳入删除未使用 refresh method 的提交 | head 更新为 `8d2633e8e5`；最终 source diff 为 500 files changed、97356 insertions、25104 deletions，删除逻辑按 AST/Restore 归 PR2a，按 DDL metadata builder 归 PR2b |
 | 2026-09-08 | `cp_mv_for_master_base` | 更新 PR2 的最终 diff 拆分和完成状态 | PR2 拆分为 `PR2a`、`PR2b-create`、`PR2b-drop`、`PR2b-alter`；#70744、#70789、#70874 已合入 `master`，`mv_pr2b_alter_for_master` 已完成 port 并推送，待提 PR |
 | 2026-09-09 | `cp_mv_for_master_base` | 更新 PR1、PR2 和 PR3 的 port 进度 | #70599、#70694、#70744、#70789、#70874、#70927 已合入 `master`；#70941 已创建并等待合入，PR3 已完成 MLog DML 实现、完整测试和 worker 侧 MLog metadata 重查 hardening；下一步为 PR4 MLog purge |
+| 2026-10-17 | `cp_mv_for_master_base` | 更新 source boundary，纳入最新两个修复 commit | head 从 `8d2633e8e5` 更新为 `fd4636bb44`，新增 `f6de16d6f2`、`fd4636bb44`；范围共 115 个 commit，最终 source diff 为 509 files changed、99759 insertions、25157 deletions；master 覆盖状态待后续复核 |
+| 2026-10-17 | `cp_mv_for_master_base` | 完成逐 commit 的 master 逻辑和测试静态复核 | 115 个 commit 的复核结果已更新到 `mv_master_port_commit_audit.md`，目标固定为 `origin/master` 的 `f40ad1d845`；未计入尚未合入的工作分支 |
