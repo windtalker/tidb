@@ -87,7 +87,7 @@ func (b *executorBuilder) buildMViewCompleteDeltaApply(v *plannercore.MViewCompl
 		b.err = errors.Errorf("MViewCompleteDeltaApply target public column count %d != plan MV column count %d", len(target.Cols()), v.MVColumnCount)
 		return nil
 	}
-	for i := 0; i < v.CurrentHandleCols.NumCols(); i++ {
+	for i := range v.CurrentHandleCols.NumCols() {
 		idx := v.CurrentHandleCols.GetCol(i).Index
 		if idx < 0 || idx >= len(sourceTypes) {
 			b.err = errors.Errorf("MViewCompleteDeltaApply handle col index %d out of source range [0,%d)", idx, len(sourceTypes))
@@ -148,7 +148,7 @@ func buildMViewCompleteDeltaWritableInputColIDs(target table.Table, rowInputColI
 	return ids, nil
 }
 
-func buildMViewCompleteDeltaCompareMappings(target table.Table, groupKeyOffsets, currentIDs, recomputedIDs []int) ([]int, []int, []int, error) {
+func buildMViewCompleteDeltaCompareMappings(target table.Table, groupKeyOffsets, currentIDs, recomputedIDs []int) (compareWritableIdxes, currentCompareInputColIDs, recomputedCompareInputColIDs []int, err error) {
 	if target == nil || len(currentIDs) != len(recomputedIDs) {
 		return nil, nil, nil, errors.New("MViewCompleteDeltaApply writable input mapping length mismatch")
 	}

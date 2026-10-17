@@ -33,5 +33,4 @@ func InitMVMetrics() {
 			Help:      "Bucketed histogram of the interval between two successful MV service refreshes, excluding the current refresh duration.",
 			Buckets:   prometheus.ExponentialBuckets(1, 2, 25), // 1s ~ 194d
 		})
-
 }

@@ -54,6 +54,42 @@ func TestMergeRuntimeStats(t *testing.T) {
 	require.Contains(t, stats.String(), "active:2")
 }
 
+func TestEncodeChunkKeyRows(t *testing.T) {
+	keyTypes := []*types.FieldType{types.NewFieldType(mysql.TypeLonglong), types.NewFieldType(mysql.TypeVarchar)}
+	keyTypes[1].SetCollate("utf8mb4_bin")
+	rows := [][]any{
+		{1, "same"}, {2, "same"}, {nil, "same"},
+		{1, nil}, {2, nil}, {nil, nil}, {1, ""}, {1, "same"},
+	}
+	chk := chunk.NewChunkWithCapacity(keyTypes, len(rows))
+	for _, row := range rows {
+		datums := types.MakeDatums(row...)
+		for colIdx := range datums {
+			chk.AppendDatum(colIdx, &datums[colIdx])
+		}
+	}
+	typeCtx := mock.NewContext().GetSessionVars().StmtCtx.TypeCtx()
+	keys, nulls, err := encodeChunkKeyRows(typeCtx, chk, []int{0, 1}, keyTypes, []int{0, 1, 2, 3, 4, 5, 6, 7}, nil, nil)
+	require.NoError(t, err)
+	require.Equal(t, keys[0], keys[7])
+	want := make([]string, len(keys))
+	seen := make(map[string]bool)
+	for i, key := range keys {
+		want[i] = string(key)
+		if i < len(rows)-1 {
+			require.NotEmpty(t, key)
+			require.False(t, seen[want[i]], "duplicate key for row %v", rows[i])
+			seen[want[i]] = true
+		}
+	}
+	usedRows := []int{7, 3, 1, 4}
+	keys, _, err = encodeChunkKeyRows(typeCtx, chk, []int{0, 1}, keyTypes, usedRows, nulls, keys)
+	require.NoError(t, err)
+	for i, rowIdx := range usedRows {
+		require.Equal(t, want[rowIdx], string(keys[i]))
+	}
+}
+
 type mockSource struct {
 	exec.BaseExecutor
 	chunks []*chunk.Chunk

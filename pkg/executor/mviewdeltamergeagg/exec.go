@@ -465,7 +465,7 @@ func (e *Exec) runMergePipeline(ctx context.Context) (*mergeRuntimeStats, error)
 	freeInputCh := make(chan *chunk.Chunk, inputBufSize)
 	resultCh := make(chan *ChunkResult, workerCnt)
 
-	for i := 0; i < inputBufSize; i++ {
+	for range inputBufSize {
 		freeInputCh <- exec.NewFirstChunk(e.Children(0))
 	}
 
@@ -476,7 +476,7 @@ func (e *Exec) runMergePipeline(ctx context.Context) (*mergeRuntimeStats, error)
 
 	workerWG := sync.WaitGroup{}
 	workerWG.Add(workerCnt)
-	for i := 0; i < workerCnt; i++ {
+	for i := range workerCnt {
 		workerIdx := i
 		g.Go(func() error {
 			defer workerWG.Done()
@@ -1433,20 +1433,29 @@ func encodeChunkKeyRows(
 		physicalRowNulls = physicalRowNulls[:rowCnt]
 	}
 
+	serializedKeys := make([][]byte, len(usedRows))
+	serializedLens := make([]int, len(usedRows))
+	var serializedKeysBuffer []byte
 	for keyPos, keyColIdx := range keyColIdxes {
 		col := chk.Column(keyColIdx)
+		for _, physicalRow := range usedRows {
+			physicalRowNulls[physicalRow] = col.IsNull(physicalRow)
+		}
+		clear(serializedLens)
+		var err error
+		// SerializeKeys replaces its output slices during preallocation. Keep
+		// the accumulated key and its per-column NULL markers in a separate buffer.
+		serializedKeysBuffer, err = codec.SerializeKeys(typeCtx, chk, []*types.FieldType{keyTypes[keyPos]}, []int{keyColIdx}, usedRows, nil, physicalRowNulls, []codec.SerializeMode{codec.KeepVarColumnLength}, serializedKeys, serializedLens, serializedKeysBuffer)
+		if err != nil {
+			return nil, physicalRowNulls, err
+		}
 		for logicalPos, physicalRow := range usedRows {
-			isNull := col.IsNull(physicalRow)
-			physicalRowNulls[physicalRow] = isNull
-			if isNull {
+			if physicalRowNulls[physicalRow] {
 				keyBuf[logicalPos] = append(keyBuf[logicalPos], 0)
 			} else {
 				keyBuf[logicalPos] = append(keyBuf[logicalPos], 1)
 			}
-		}
-		serializedLens := make([]int, len(usedRows))
-		if _, err := codec.SerializeKeys(typeCtx, chk, []*types.FieldType{keyTypes[keyPos]}, []int{keyColIdx}, usedRows, nil, physicalRowNulls, []codec.SerializeMode{codec.KeepVarColumnLength}, keyBuf, serializedLens, nil); err != nil {
-			return nil, physicalRowNulls, err
+			keyBuf[logicalPos] = append(keyBuf[logicalPos], serializedKeys[logicalPos]...)
 		}
 	}
 	return keyBuf, physicalRowNulls, nil

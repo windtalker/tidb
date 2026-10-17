@@ -536,6 +536,23 @@ WHERE MLOG_ID = ?
 	require.Equal(t, "cancelled manually by "+requester, fmt.Sprint(reasonRows[0][0]))
 }
 
+func TestCancelMaterializedViewRefreshJobRequest(t *testing.T) {
+	store, dom := testkit.CreateMockStoreAndDomain(t)
+	tk := newMViewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("create table t_cancel_refresh (a int not null, b int not null)")
+	tk.MustExec("create materialized view log on t_cancel_refresh (a, b)")
+	tk.MustExec("create materialized view mv_cancel_refresh (a, s, cnt) as select a, sum(b), count(*) from t_cancel_refresh group by a")
+	mv, err := dom.InfoSchema().TableByName(context.Background(), ast.NewCIStr("test"), ast.NewCIStr("mv_cancel_refresh"))
+	require.NoError(t, err)
+	tk.MustExec(fmt.Sprintf("insert into mysql.tidb_mview_refresh_hist (REFRESH_JOB_ID, MVIEW_ID, REFRESH_METHOD, REFRESH_STATUS) values (1, %d, 'fast manual', 'running')", mv.Meta().ID))
+
+	tk.MustExec("cancel materialized view refresh job 1")
+	tk.MustQuery("select CANCEL_REQUEST_TIME is not null from mysql.tidb_mview_refresh_hist where REFRESH_JOB_ID = 1").Check(testkit.Rows("1"))
+	require.ErrorContains(t, tk.ExecToErr("cancel materialized view refresh job 1"), "cannot cancel materialized view refresh job 1")
+	require.ErrorContains(t, tk.ExecToErr("cancel materialized view refresh job 2"), "cannot cancel materialized view refresh job 2")
+}
+
 func TestCancelMaterializedViewLogPurgeJob(t *testing.T) {
 	store, dom := testkit.CreateMockStoreAndDomain(t)
 	tk := newMViewTestKit(t, store)

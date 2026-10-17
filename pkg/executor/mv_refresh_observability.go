@@ -476,7 +476,7 @@ func (e *RefreshMaterializedViewDryRunExec) loadFastRefreshImplementOptionsForDr
 	return opts, nil
 }
 
-func (e *RefreshMaterializedViewDryRunExec) buildCompleteRefreshPlanRows(ctx context.Context) ([][]string, [][]string, error) {
+func (e *RefreshMaterializedViewDryRunExec) buildCompleteRefreshPlanRows(ctx context.Context) (deletePlanRows, insertPlanRows [][]string, err error) {
 	if e.stmt == nil {
 		return nil, nil, errors.New("dry run refresh materialized view: missing statement")
 	}
@@ -630,7 +630,7 @@ func (e *RefreshMaterializedViewDryRunExec) renderPlanRowsForInternalSQL(ctx con
 	result := make([][]string, len(rows))
 	for i, row := range rows {
 		rowStr := make([]string, row.Len())
-		for j := 0; j < row.Len(); j++ {
+		for j := range row.Len() {
 			if row.IsNull(j) {
 				rowStr[j] = "<nil>"
 				continue
