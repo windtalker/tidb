@@ -174,6 +174,10 @@ type stmtRecord struct {
 	stmtCtx *stmtctx.StatementContext
 }
 
+const internalAdvisoryLockOwnerIDBase = uint64(1) << 32
+
+var internalAdvisoryLockOwnerIDAlloc atomic.Uint64
+
 // StmtHistory holds all histories of statements in a txn.
 type StmtHistory struct {
 	history []*stmtRecord
@@ -255,6 +259,8 @@ type session struct {
 
 	// Contains a list of sessions used to collect advisory locks.
 	advisoryLocks map[string]*advisoryLock
+	// advisoryLockOwnerID caches a stable non-zero owner ID for advisory locking.
+	advisoryLockOwnerID atomic.Uint64
 
 	extensions *extension.SessionExtensions
 
@@ -2082,7 +2088,7 @@ func (s *session) GetAdvisoryLock(lockName string, timeout int64) error {
 	if err != nil {
 		return err
 	}
-	lock := &advisoryLock{session: se, ctx: context.TODO(), owner: s.ShowProcess().ID, clean: clean}
+	lock := &advisoryLock{session: se, ctx: context.TODO(), owner: s.getAdvisoryLockOwner(), clean: clean}
 	err = lock.GetLock(lockName, timeout)
 	if err != nil {
 		return err
@@ -2103,7 +2109,7 @@ func (s *session) IsUsedAdvisoryLock(lockName string) uint64 {
 	if err != nil {
 		return 0
 	}
-	lock := &advisoryLock{session: se, ctx: context.TODO(), owner: s.ShowProcess().ID, clean: clean}
+	lock := &advisoryLock{session: se, ctx: context.TODO(), owner: 0, clean: clean}
 	err = lock.IsUsedLock(lockName)
 	if err != nil {
 		// TODO: Return actual owner pid
@@ -2111,6 +2117,26 @@ func (s *session) IsUsedAdvisoryLock(lockName string) uint64 {
 		return 1
 	}
 	return 0
+}
+
+func (s *session) getAdvisoryLockOwner() uint64 {
+	if ownerID := s.advisoryLockOwnerID.Load(); ownerID != 0 {
+		return ownerID
+	}
+	ownerID := uint64(0)
+	if processInfo := s.ShowProcess(); processInfo != nil {
+		ownerID = processInfo.ID
+	}
+	if ownerID == 0 {
+		// Use an internal namespace that cannot collide with real connection IDs:
+		// it is always even and larger than uint32, while real 64-bit connection IDs
+		// are odd and real 32-bit connection IDs fit in uint32.
+		ownerID = internalAdvisoryLockOwnerIDBase + (internalAdvisoryLockOwnerIDAlloc.Add(1) << 1)
+	}
+	if s.advisoryLockOwnerID.CompareAndSwap(0, ownerID) {
+		return ownerID
+	}
+	return s.advisoryLockOwnerID.Load()
 }
 
 // ReleaseAdvisoryLock releases an advisory locks held by the session.
@@ -3523,6 +3549,7 @@ func (s *session) Close() {
 		}
 	}
 	s.ReleaseAllAdvisoryLocks()
+	s.advisoryLockOwnerID.Store(0)
 	if s.statsCollector != nil {
 		s.statsCollector.Delete()
 	}
@@ -5030,6 +5057,32 @@ func attachStatsCollector(s *session, dom *domain.Domain) *session {
 	}
 
 	return s
+}
+
+// AttachStatsCollectorForInternalSession lazily attaches the same collectors used by
+// regular sessions for a specific internal session when the caller knows it will touch
+// user tables. This intentionally keeps index usage collection enabled as well when
+// tidb_enable_collect_execution_info is on, because internal maintenance SQL should be
+// reflected in usage accounting just like foreground SQL.
+// It returns a restore function that detaches only the collectors attached by this call.
+func (s *session) AttachStatsCollectorForInternalSession() func() {
+	dom, ok := s.dom.(*domain.Domain)
+	if !ok || dom == nil {
+		return func() {}
+	}
+	hadStatsCollector := s.statsCollector != nil
+	hadIdxUsageCollector := s.idxUsageCollector != nil
+	attachStatsCollector(s, dom)
+	return func() {
+		if !hadStatsCollector && s.statsCollector != nil {
+			s.statsCollector.Delete()
+			s.statsCollector = nil
+		}
+		if !hadIdxUsageCollector && s.idxUsageCollector != nil {
+			s.idxUsageCollector.Flush()
+			s.idxUsageCollector = nil
+		}
+	}
 }
 
 // detachStatsCollector removes the stats collector in the session

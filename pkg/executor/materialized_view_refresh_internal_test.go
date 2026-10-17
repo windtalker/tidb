@@ -57,6 +57,7 @@ func TestBuildMVRefreshOutOfPlaceShadowTableInfoSetsSource(t *testing.T) {
 
 func TestInitRefreshMaterializedViewSessionAppliesDefinitionDivPrecisionIncrement(t *testing.T) {
 	sessVars := variable.NewSessionVars(nil)
+	require.False(t, sessVars.EnableMView)
 	sessVars.DivPrecisionIncrement = 2
 	sessVars.TimeZone = time.UTC
 	sessVars.StmtCtx.SetTimeZone(time.UTC)
@@ -66,8 +67,10 @@ func TestInitRefreshMaterializedViewSessionAppliesDefinitionDivPrecisionIncremen
 		DefinitionTimeZone:              model.TimeZoneLocation{Name: "UTC"},
 	})
 	require.NoError(t, err)
+	require.True(t, sessVars.EnableMView)
 	require.Equal(t, 9, sessVars.DivPrecisionIncrement)
 
 	restore()
+	require.False(t, sessVars.EnableMView)
 	require.Equal(t, 2, sessVars.DivPrecisionIncrement)
 }

@@ -1462,6 +1462,10 @@ func initRefreshMaterializedViewSession(
 		return nil, errors.Annotate(err, "refresh materialized view: invalid definition timezone")
 	}
 
+	origEnableMView := sessVars.EnableMView
+	if err := sessVars.SetSystemVar(vardef.TiDBMViewEnable, "on"); err != nil {
+		return nil, errors.Annotate(err, "refresh materialized view: failed to enable materialized view support")
+	}
 	origSQLMode := sessVars.SQLMode
 	origDivPrecisionIncrement := sessVars.DivPrecisionIncrement
 	origTimeZone := sessVars.TimeZone
@@ -1480,6 +1484,9 @@ func initRefreshMaterializedViewSession(
 	sessVars.StmtCtx.SetErrLevels(expression.MaterializedScheduleErrLevelsWithSQLMode(sessVars.SQLMode))
 
 	return func() {
+		if err := sessVars.SetSystemVar(vardef.TiDBMViewEnable, variable.BoolToOnOff(origEnableMView)); err != nil {
+			logutil.BgLogger().Warn("refresh materialized view: failed to restore materialized view enablement", zap.Error(err))
+		}
 		sessVars.SQLMode = origSQLMode
 		sessVars.DivPrecisionIncrement = origDivPrecisionIncrement
 		sessVars.InMViewMaintenance = origMViewMaintenance
