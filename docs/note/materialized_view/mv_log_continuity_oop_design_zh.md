@@ -132,7 +132,7 @@ owner，因此无需在消费基线中重复保存 source ID。同一 source 在
 对一条结构边 `S -> M`，设普通 FAST 实际计算快照为 `U`，定义：
 
 ```text
-At(S, U) = (source_id, mlog_id, generation, generation_start_tso) @ U
+At(S, U) = (source_id, mlog_id, generation) @ U
 Used(M, S) = 本次计划实际读取的 source / MLog 物理身份
 W(M) = mysql.tidb_mview_refresh_info 中的 LAST_SUCCESS_READ_TSO
 RequiredLogs(M, U) = M 在 schema@U 上全部结构 source 对应的 MLog ID 集合
@@ -145,7 +145,6 @@ Valid(M, S, U) =
     AND W(M) 非 NULL
     AND 键 (M, At(S, U).mlog_id) 下存在非 NULL 的 generation 基线
     AND Baseline(M, At(S, U).mlog_id) == At(S, U).generation
-    AND W(M) >= At(S, U).generation_start_tso
     AND 日志保留与 purge 完整性检查通过
 
 CanFast(M, U) = M 的定义允许 FAST
@@ -252,22 +251,19 @@ source MLog，不表示刷新方式为 COMPLETE；没有占位也不自动赋予
 
 ### 4.3 扩展 MLog 运行状态
 
-草案建议先复用 `mysql.tidb_mlog_purge_info`，增加以下字段，仅新增第 4.2 节的一张表：
+复用 `mysql.tidb_mlog_purge_info`，只新增 `LOG_GENERATION` 一列，类型为
+`BIGINT UNSIGNED NOT NULL DEFAULT 1`。本机制仅新增第 4.2 节的一张表。
 
-| 新字段 | 用途 |
-| --- | --- |
-| `SOURCE_ID` | 当前 owner 身份的运行副本；必须与 MLog 的 `BaseTableID` 一致 |
-| `LOG_GENERATION` | 当前日志代际，初始化为 1；断点时单调递增 |
-| `GENERATION_START_TSO` | 当前代际的日志区间下界；初始兼容值为 0 |
+`LOG_GENERATION` 表示当前日志代际，初始化为 1，发生连续性断点时单调递增；溢出时
+拒绝切换，不回绕。MLog owner 和 source 绑定继续由同一快照上的 `TableInfo` 提供，
+不在 purge-info 中保存 owner 副本，也不持久化代际起始 TSO。
 
-这些字段统一用于普通表和 MV 的 MLog，不按 source 类型另设代际模型。本次定义的代际
+该字段统一用于普通表和 MV 的 MLog，不按 source 类型另设代际模型。本次定义的代际
 推进操作是 MV OOP；普通表当前支持的操作不会触发其 MLog 的代际推进。
 
-`SOURCE_ID` 的副本用于拒绝 schema cache 与日志运行状态不属于同一次切换的组合，
-不能用它覆盖 `TableInfo` 的结构定义。generation 溢出时拒绝切换，不回绕。
-
 `LAST_PURGED_TSO` 继续记录实际物理日志删除边界，不用它冒充 generation，也不在 OOP
-时盲目清零。两者分别表示日志断点与日志保留范围。
+时盲目清零。两者分别表示日志断点与日志保留范围。purge 仍由 consumer 的统一成功
+水位约束，代际失效不取消该 consumer 的日志保护，详见第 9 节。
 
 consumer refresh 通过辅助内部 session 做 snapshot 查询，不对这行执行 `FOR UPDATE`
 或条件写来阻止 generation 推进。purge 与 OOP 修改自身日志状态时仍需事务协调；这类
@@ -279,7 +275,7 @@ consumer refresh 通过辅助内部 session 做 snapshot 查询，不对这行�
 `mysql.tidb_mview_refresh_info` 继续承担目标 MV 的刷新行锁、调度、整体成功时间与水位。
 `LAST_SUCCESS_READ_TSO` 是该 MV 全部 source 共用的成功逻辑水位；普通刷新使用实际
 计算 TS，bounded FAST 保持既有指定上界语义。FAST 从此水位开始消费各个 MLog，
-purge 结合此水位与对应日志基线的有效性计算保护范围。
+purge 直接依据此水位计算保留范围，日志基线失效的 consumer 仍保留旧水位保护。
 
 水位、目标数据及全部日志身份与代际确认在同一事务提交。日志身份没有变化的普通 FAST
 只需保留原基线并推进统一水位，无需重复写入相同的 generation。
@@ -298,33 +294,30 @@ purge schedule，迁移其 owner 并推进 generation。保留 MLog 物理 ID �
 旧日志可以继续物理存在，但不得被已确认新代际的 consumer 当成新的 delta。无需为每个
 MLog 数据行新增 generation 字段，前提是第 5.2 节的生产端区间不变量成立。
 
-### 5.2 切换区间下界
+### 5.2 切换时序与日志连续性
 
 设：
 
 - `R_build`：shadow build 实际读取上游数据的 TSO。
-- `F`：实际执行 cutover 事务的 start TSO，候选来源为当前 worker 的事务 startTS。
 - `C`：cutover commit TSO，用于描述时序，不要求预先知道其数值。
 
 目标 MV 维护排他权已等待旧 refresh 数据事务结束，且期间没有对 serving MV 及其自身
-MLog 的写入，所以该 MLog 的旧日志记录 commit TSO 均小于 `F`。这一条件不限制上游
-普通表及其 MLog 的并发写入。切换后恢复的目标 MV 写者产生的日志 commit TSO 大于
-`C`，也大于 `F`。在 cutover 同事务设置：
+MLog 的写入，所以旧日志记录的 commit TSO 均早于 `C`。切换后恢复的目标 MV 写者
+使用新 source 身份，产生的日志 commit TSO 晚于 `C`。这一条件不限制上游普通表及其
+MLog 的并发写入。cutover 同事务更新结构绑定并设置：
 
 ```text
 LOG_GENERATION := old_generation + 1
-GENERATION_START_TSO := F
-SOURCE_ID := new_mv_id
 ```
 
-因此当前代际的 delta 只来自 `commit_ts > F` 的区间。generation 不匹配的 consumer
-先 COMPLETE，不读取旧日志来跨过断点。确认新代际的基线必须读取该代际对应的 source
-数据快照，因此其水位不早于切换提交。实现可以在计算结束后按实际快照查询代际，
-无需先读取最新 generation 再申请数据 TS；旧快照只能确认旧代际。
+generation 不匹配的 consumer 先 COMPLETE，不读取旧日志来跨过断点。COMPLETE 按
+实际读取 TS `U` 校验 source 物理身份并确认 `generation@U`；确认新代际意味着读到了
+切换后的 source，水位不早于 `C`。后续 FAST 从该水位消费日志，旧日志不会落入其
+消费区间，因此无需给日志数据行增加 generation，也无需保存代际起始 TSO。
 
-`R_build` 更新目标 MV 的上游消费基线，`F` 划分目标 MV 自己的输出日志。这两个时间
-不能互换。也不能仅用 `W(M) >= F` 判定恢复成功：child 可以在 `F` 之后、`C` 之前
-读到旧 MV，仍须用身份与 generation 验证它实际读取的基线。
+实现可以在计算结束后按实际快照查询代际，无需先读取最新 generation 再申请数据 TS；
+旧快照只能确认旧代际。`R_build` 更新目标 MV 的上游消费基线，目标自身输出日志的
+代际在 cutover 提交时生效，不能用 `R_build` 代替这次输出切换的时点。
 
 如果无法证明旧写者已经结束，或者 worker 事务重试时不能维持上述区间，保留 MLog ID
 的方案就不成立；应改用新 MLog 实例，不能以推进 generation 掩盖日志混用。
@@ -397,8 +390,10 @@ schema 编译。新 MLog 的创建、purge 状态与保留水位、原子切换�
 编译，也不静默把已计算结果解释为另一组 source / MLog。
 
 不换 MLog ID 时，从池中借用独立内部 session，按 `U` snapshot 查询日志运行状态，
-比较 generation、owner 和绑定。已有 `ExecRestrictedSQL` 支持
-`sqlexec.ExecOptionUseSessionPool` 与 `sqlexec.ExecOptionWithSnapshot(U)`，见
+取得 `generation@U`。owner 与 source / MLog 绑定由同一 `U` 的 snapshot InfoSchema
+解析，并与实际计划的物理身份核对；不依赖 purge-info 的 owner 副本。已有
+`ExecRestrictedSQL` 支持 `sqlexec.ExecOptionUseSessionPool` 与
+`sqlexec.ExecOptionWithSnapshot(U)`，见
 [restricted_sql_executor.go](../../../pkg/util/sqlexec/restricted_sql_executor.go)和
 [session.go](../../../pkg/session/session.go)。该查询不加行锁，不改变刷新 session 的
 读取状态；查询失败或状态缺失时原刷新事务回滚，不能跳过校验。
@@ -539,10 +534,11 @@ consumer 自己 OOP 会迁移其 `MVIEW_ID`。针对旧目标的请求必须通�
 更新、影响行数及事务冲突检查拒绝旧目标写入，不能用 UPSERT 重新创建旧目标的记录，也
 不能把旧 build 的结果确认成新 source 身份。
 
-跨节点 schema cache 暂未收敛时，运行 owner 与缓存的 MLog owner 不一致，应重读或返回
-可重试错误。比对时须使用同一快照，不能将最新 schema 与历史 generation 拼接。旧 MV
-的锁释放前后、新 ID 上的写入入口以及 schema 同步需要一起验证。MDL/schema 检查保护
-普通对象访问，日志连续性仍由快照上的代际或 MLog ID 比较确认。
+跨节点 schema cache 暂未收敛时，实际计划的 source / MLog 身份与 `schema@U` 的绑定
+不一致，应返回可重试错误。owner 取自该快照的 `TableInfo`，不能将最新 schema 与
+历史 generation 拼接。旧 MV 的锁释放前后、新 ID 上的写入入口以及 schema 同步需要
+一起验证。MDL/schema 检查保护普通对象访问，日志连续性仍由快照上的代际或 MLog ID
+比较确认。
 
 ### 7.6 事务重试与崩溃
 
@@ -550,9 +546,10 @@ consumer 自己 OOP 会迁移其 `MVIEW_ID`。针对旧目标的请求必须通�
 做权威校验，不能复用失败尝试的状态或混用不同尝试的计算结果；后置校验不必为每个失败
 尝试额外查询 generation。后续状态更新即使推进锁 TS，也不改变已保存的计算水位。
 
-DDL 事务重试重新校验自身输出的 owner、generation、revision、迁移基线及写集合，
-并用实际重试事务计算 F。上游代际晚于 `R_build` 的变化不单独要求丢弃旧 build；对象
-绑定或基线改键不允许使用旧结果时才回滚重建。上游确认值始终来自原 build 快照。
+DDL 事务重试重新读取结构绑定，校验自身输出的 generation、对象 revision、迁移基线
+及写集合，并维持目标写入的排他交接。上游代际晚于 `R_build` 的变化不单独要求丢弃旧
+build；对象绑定或基线改键不允许使用旧结果时才回滚重建。上游确认值始终来自原 build
+快照。
 重复处理已经完成的 cutover 不能再次递增 generation。
 
 崩溃在 cutover commit 之前时全部迁移回滚；commit 之后即使历史记录尚未 finalise，
@@ -570,7 +567,7 @@ schema、日志状态和基线已经共同生效。恢复任务依据持久化 j
 | 全部上游 source | 反向 `MViewIDs` 中将 `M_old` 替换为 `M_new` |
 | 目标的 `MaterializedViewBase` | 将自身 MLog ID 与下游 `MViewIDs` 迁至新 MV |
 | 输出 MLog 的 `TableInfo` | `BaseTableID` 从 `M_old` 改为 `M_new`，保留日志定义 |
-| 输出日志运行状态 | owner 改为 `M_new`，generation 递增，设置 F |
+| 输出日志运行状态 | 仅 generation 递增，owner 已由 MLog 的 `TableInfo.BaseTableID` 表示 |
 | 全部直接 child | `BaseTableIDs` 中将 `M_old` 替换为 `M_new`，保留其他 source |
 | 目标的 FAST 日志基线 | `MVIEW_ID` 改键到 `M_new`，按 build 捕获的日志集合与代际重建 |
 | child 的消费基线 | 日志键与代际保持不变，不因 source ID 变化改键；child 统一水位也不变 |
@@ -592,14 +589,14 @@ schema、日志状态和基线已经共同生效。恢复任务依据持久化 j
 handle 的构造要依据其实际 schema，不能照搬 refresh-info 的 `kv.IntHandle` 假设。
 
 本节列出保留 MLog ID 的迁移集合。换 ID 方案还需原子发布新 MLog 定义、绑定和 purge
-运行状态，安排旧实例的回收，并保留下游旧 `MLOG_ID` 基线记录；不能只迁移 owner。
+运行状态，安排旧实例的回收，并保留下游旧 `MLOG_ID` 基线记录；不能只修改结构引用。
 
 ## 9 日志保留与 Purge
 
-### 9.1 结合日志基线与 MV 级水位计算保留范围
+### 9.1 继续使用 MV 级成功水位计算保留范围
 
 当前 `calcMaterializedViewLogSafePurgeTSO` 从整体 refresh-info 取多个 MV 的最小水位，
-见 [materialized_view.go](../../../pkg/executor/materialized_view.go)。新机制改为按当前
+见 [materialized_view.go](../../../pkg/executor/materialized_view.go)。本机制继续按当前
 source 的结构 consumer 集合枚举需要保留 FAST 能力的 MV，读取其日志基线与整体
 refresh-info。不能仅查询当前 MLog 的基线记录来枚举 consumer，否则换 ID 后会漏掉
 尚未确认新日志的 MV。明确只做 COMPLETE 的 MV 不参与日志消费水位保护。
@@ -609,54 +606,58 @@ refresh-info。不能仅查询当前 MLog 的基线记录来枚举 consumer，�
 当前日志记录，也必须按结构关系枚举并保护其实际 source MLog。启用 FAST 的保护
 时序见第 10.5 节。
 
-purge 仍按 TSO 水位删除日志，不按行 generation 清理。MV 级成功水位是正常保留依据；
-对于失效或未建立的基线，第一版保守使用断点水位 F。设日志状态为 `(L, g, F)`：
+purge 继续按 TSO 水位删除日志，不按行 generation 清理，也不依据代际是否有效选择
+另一种保留边界。设 `W(M)` 为 consumer 的整体成功水位：
 
 ```text
-确认 L:g 且 W(M) 非 NULL、W(M) >= F 的 consumer：保护水位 = W(M)
-缺少 L 的记录、generation 未确认或不匹配、或统一水位未建立或早于 F 的 consumer：保护水位 = F
+W(M) 非 NULL：保护水位 = W(M)
+W(M) 为 NULL：保护水位 = 0
 safe_purge_tso = min(purge transaction startTS, 所有保护水位)
 没有需要保留 FAST 能力的 consumer / building consumer 时，沿用事务 startTS 上界
 ```
 
-`W(M)` 从 `mysql.tidb_mview_refresh_info.LAST_SUCCESS_READ_TSO` 读取。新 MLog
-实例同样需要定义自己的保护下界 F，不能继承旧实例的成功消费水位。
+`W(M)` 从 `mysql.tidb_mview_refresh_info.LAST_SUCCESS_READ_TSO` 读取。generation
+不匹配、尚未确认当前日志或 MLog 换 ID 都不取消该 consumer 的保护，仍使用其已有
+水位；未建立水位时沿用当前 NULL 按 0 处理的保守规则。代际只决定 FAST 能否执行，
+不把旧水位自动推进到切换时点。
 
-在第 5.2 节的无写入区间不变量下，`commit_ts <= F` 都属于旧日志区间，可以删除。
-失效 consumer 从完整数据恢复，不再需要旧区间；保留 `commit_ts > F` 的全部新日志，
-则覆盖它未来 COMPLETE 快照之后的变化。
+换 MLog ID 后，同样从新日志的结构 consumer 集合读取各 MV 的已有水位来保护日志；
+这只是保留约束，不表示这些 MV 已经确认新日志实例。COMPLETE 成功后才原子确认新
+日志基线并推进水位。
 
-这会让迟迟不恢复的 consumer 阻止新代际日志继续回收，是第一版明确接受的保留成本。
-更细的进行中基线保护可以降低该成本，但需要另外设计持久化保护水位及失败清理，不能
-简单忽略失效 consumer 来提高 purge 上界。
+该规则保留旧水位之后的日志，也就保留了后续 COMPLETE 数据快照之后的变化，无需
+持久化代际起始 TSO。代价是失效 consumer 恢复前，可能额外保留旧水位到切换之间
+已无用途的日志；迟迟不恢复的 consumer 也会继续阻止 purge 推进。第一版接受这些
+保留成本，不通过忽略失效 consumer 或优化旧代际日志回收来提高 purge 上界。
 
 ### 9.2 Initial build 与 COMPLETE 保护
 
 需要保留 FAST 能力的 initial build 在取得数据读取快照之前，先按全部当前 MLog ID
 注册 generation 为 NULL 的基线记录，并沿用 building DDL job 的保护。COMPLETE 从
-旧有效基线恢复时，旧水位仍保护构建期间的日志；从失效状态恢复时，F 保护整个新
-代际区间。成功后原子确认完整日志集合并推进统一水位，失败不解除原保护。
+有效或失效状态恢复时，旧的成功水位始终保护构建期间的日志；尚无水位时按 0 保护。
+保护必须在选取数据快照之前生效。成功后原子确认完整日志集合并推进统一水位，失败
+不解除原保护。
 
-对 public consumer，当前 MLog 缺少基线记录可能是换 ID 后尚未恢复的正常状态，按 F
-保护，不能解释成没有消费者。对合法 building consumer，NULL generation 同样表示
-需要保护。整组日志登记缺失、结构绑定损坏、owner 不一致或缺少必需的整体 refresh-info
-等一致性错误仍应停止 purge；不通过忽略对应 consumer 来继续删除日志。
+对 public consumer，当前 MLog 缺少基线记录可能是换 ID 后尚未恢复的正常状态，仍按
+其已有水位保护，不能解释成没有消费者。合法 building consumer 的 NULL generation
+不影响这项保护。整组日志登记缺失、结构绑定损坏、owner 不一致或缺少必需的整体
+refresh-info 等一致性错误仍应停止 purge；不通过忽略对应 consumer 来继续删除日志。
 
 ### 9.3 Purge 与 generation 切换并发
 
-purge 沿用自身的日志状态行锁，读取 owner、generation 和物理删除水位，并与 cutover
-对该状态的写入建立事务顺序。generation 或 owner 变化后，旧 purge run 停止并重新
-解析保护集合，不能继续使用旧 source ID 或旧 safe-purge 计算结果。多个状态写者如需
-同时保护多个对象，仍要约定一致锁序；consumer 的快照校验不获取这些锁。
+purge 沿用自身的日志状态行锁，读取 generation 和物理删除水位，并与 cutover 更新
+generation 建立事务顺序。owner 与依赖集合从对应快照的结构元数据解析。generation
+或结构绑定变化后，旧 purge run 停止并重新解析保护集合，不能继续使用旧 source ID
+或旧 safe-purge 计算结果。多个状态写者如需同时保护多个对象，仍要约定一致锁序；
+consumer 的快照校验不获取这些锁。
 
-刷新未提交前，旧的持久化水位或 F 继续保护日志；提交成功后才以新基线和统一水位
-计算保护范围。此处保留范围计算、已有 snapshot/GC 保护和换 ID 后旧物理实例的生命周期
-需要分别证明，不能用 consumer 对 purge-info 加锁代替，也不能因基线失效就忽略
-仍需保护的新日志。
+刷新未提交前，旧的持久化水位继续保护日志；提交成功后才使用新的统一水位。日志
+保留范围、已有 snapshot/GC 保护和换 ID 后旧物理实例的生命周期需要分别证明，不能
+用 consumer 对 purge-info 加锁代替，也不能因基线失效就忽略仍需保护的日志。
 
-现有 `LAST_PURGED_TSO` 和 hazardous purge history 检查继续生效。历史记录建议携带
-run 捕获的 generation，使旧 run 的 running / failed 记录不会错误归属到新代际。
-物理删除水位的单调性仍需保留，不能因为开始新代际而否认已经发生的删除。
+现有 `LAST_PURGED_TSO`、purge cutoff 单调性与 hazardous purge history 检查继续
+生效，仍按 MLog ID 与 TSO 判断已经发生或可能发生的删除。不因代际变化清零物理
+删除水位，也不绕过旧 run 的 running / failed 记录；本次不要求 history 新增代际字段。
 
 ## 10 生命周期与用户行为
 
@@ -765,7 +766,7 @@ MLog；刷新方式配置仍由 MV 定义维护。不能只把 0 改成当前日
 | 运行 schema 与状态读取 | session bootstrap、日志状态 resolver、FAST 消费基线 helper | source 物理身份、日志基线和集合校验 |
 | 刷新数据事务 | executor refresh、`persistRefreshSuccess` | 保存最终读取 TS、无锁快照校验、数据与日志基线及统一水位原子确认 |
 | OOP 结构迁移 | ddl cutover、job args、schema diff、InfoSchema | 结构引用迁移、目标基线改键、下游基线保留、输出代际推进、失败回滚 |
-| 保留与生命周期 | purge、CREATE initial build、DROP / rollback | 新旧日志区间与 building 基线安全 |
+| 保留与生命周期 | purge、CREATE initial build、DROP / rollback | 旧水位与 building 日志保护安全 |
 | 激活与兼容 | bootstrap upgrade、维护任务能力检查 | 旧水位回填、新协议激活顺序 |
 
 新增接口之前先验证实际读取 TS 的捕获、辅助 session 的 snapshot 查询、历史 InfoSchema
@@ -778,7 +779,7 @@ MLog；刷新方式配置仍由 MV 定义维护。不能只把 0 改成当前日
 - parent OOP 后 child FAST 报断点错误，child COMPLETE 后 FAST 恢复。
 - 同一 source 的两个 child 先后恢复，确认其中一个不会恢复另一个。
 - parent 多次 OOP，child 只确认实际读取的代际；OOP no-op 也产生断点。
-- parent OOP 前后的 I/U/D 均进入正确日志区间，旧日志不会在恢复后重复应用。
+- parent OOP 前后的 I/U/D 按受控写入顺序提交，旧日志不会在恢复后重复应用。
 - 中间层 DELTA APPLY 与 OOP 对下游连续性具有第 10.4 节的不同效果。
 - FAST no-op / bounded FAST 不能绕过失效检查；purge hazard 检查仍有效。
 - OOP 在最终计算 TS 之前生效时，FAST 后置校验失败并回滚数据及自身 MLog 写入。
@@ -791,7 +792,10 @@ MLog；刷新方式配置仍由 MV 定义维护。不能只把 0 改成当前日
   代替 `schema@U`。
 - source OOP 保留 MLog ID 时不修改下游基线记录；换 MLog ID 时保留旧日志键，FAST
   拒绝缺少新日志基线的状态，COMPLETE 原子替换完整集合及统一水位。
-- purge 从结构关系识别 FAST consumer；换 ID 后缺少当前日志记录仍按 F 保护。
+- purge 从结构关系识别 FAST consumer；代际失效或换 ID 后缺少当前日志记录时，仍使用
+  consumer 的旧成功水位保护。水位为 NULL 时按 0 处理，不因失效跳过 consumer。
+- COMPLETE 成功前不推进 purge 保护水位，失败保留原保护；不重置既有物理删除水位，
+  不要求 purge-info 保存 owner 或代际起始 TSO。
 - consumer 不锁上游 MLog info 行；验证多个 consumer 校验及并发 purge 没有由校验引入的
   行锁竞争。snapshot 查询仍遵守存储层正常的锁解析规则，不承诺无等待。
 - source / consumer ID 改变后正反依赖、MLog owner、FAST 日志基线与 InfoSchema 都一致；
@@ -812,8 +816,8 @@ MLog；刷新方式配置仍由 MV 定义维护。不能只把 0 改成当前日
 2. A、B 同时 OOP，不丢失共享 child 的任一结构 source ID 迁移，不改写其日志确认值。
 3. C COMPLETE 期间 A 或 B 切换，按第 7.2 节验证切换在读取 TS 前后的身份与确认值。
 4. C、D 独立恢复同一个 source，不覆盖对方基线。
-5. C 的多个 source 共用 W(C)，D 可以有不同的 W(D)；各日志按 consumer 的基线
-   有效性分别使用 W(C)、W(D) 或 F 保护，不新增逐 source 水位。
+5. C 的多个 source 共用 W(C)，D 可以有不同的 W(D)；各日志对每个 consumer 都使用
+   相应的成功水位保护，无论基线是否失效。NULL 水位按 0 处理，不新增逐 source 水位。
 6. 日志实例替换后相同 generation 数值仍被 MLog ID 区分。
 7. source 集合变化、缺边、多余边及并发 drop 不被确认成成功基线。
 8. 全部 source 按同一计算快照校验且不获取上游状态锁；事务冲突与重试不绕过基线改键检查。
@@ -832,11 +836,11 @@ MLog；刷新方式配置仍由 MV 定义维护。不能只把 0 改成当前日
 
 | 决策 | 草案倾向 | 需要确认的内容 |
 | --- | --- | --- |
-| 运行状态布局 | 新增三列的 `tidb_mview_fast_refresh_source_info`，所有 MV 登记，缺日志用 0 占位，复用日志 purge-info | source 运行 owner 副本及 purge/OOP 写入协调 |
-| 输出 MLog | 受控写入下保留物理 ID 并推进代际 | 所有 writer 的静默区间、F 与事务重试；若不能证明则重建日志 |
+| 运行状态布局 | 新增三列的 `tidb_mview_fast_refresh_source_info`，所有 MV 登记，缺日志用 0 占位；purge-info 仅增加 `LOG_GENERATION` | 同一快照上的结构绑定校验及 purge/OOP 写入协调 |
+| 输出 MLog | 受控写入下保留物理 ID 并推进代际 | 旧写者结束、切换前后写入顺序与事务重试；若不能证明则重建日志 |
 | 快照校验 | 保留 `for_update_ts`，执行后校验最终快照，不锁上游状态 | generation 的辅助 session 查询、`schema@U` 绑定及实际读取 TS 捕获 |
 | 换 MLog ID 备选 | 下游保留旧日志键，成功 COMPLETE 原子替换集合 | 新实例创建和原子切换、旧实例生命周期、所有断点均换 ID 的约束 |
-| 保留策略 | 失效或未建立基线的边保护到 F | 日志积累成本、现有 building job 与代际 history 的衔接 |
+| 保留策略 | 所有 FAST consumer 沿用整体成功水位，失效仍保留旧水位，NULL 按 0 处理 | 多保留旧日志的成本、building 保护与现有 purge history 的衔接 |
 | 整体水位 | 全部 source 共用整体 refresh-info 的成功逻辑水位 | 多 source 同一快照与原子提交；不提供 source 独立消费进度 |
 | 未来启用 FAST | 先验证或建立完整基线，再发布刷新方式配置 | purge 持久保护、配置发布窗口、失败恢复；不能只把占位改成当前日志 |
 | 升级激活 | 所有 writer 支持新协议并完成回填后开放 OOP | 集群能力门槛、旧任务排空、降级行为 |
