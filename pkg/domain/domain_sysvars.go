@@ -42,6 +42,18 @@ func (do *Domain) initDomainSysVars() {
 	setGlobalResourceControlFunc := do.setGlobalResourceControl
 	variable.SetGlobalResourceControl.Store(&setGlobalResourceControlFunc)
 	variable.SetLowResolutionTSOUpdateInterval = do.setLowResolutionTSOUpdateInterval
+	setMVServiceTaskMaxConcurrencyFunc := do.setMVServiceTaskMaxConcurrency
+	variable.SetMVServiceTaskMaxConcurrency.Store(&setMVServiceTaskMaxConcurrencyFunc)
+	setMVServiceRefreshTaskConcurrencyRatioFunc := do.setMVServiceRefreshTaskConcurrencyRatio
+	variable.SetMVServiceRefreshTaskConcurrencyRatio.Store(&setMVServiceRefreshTaskConcurrencyRatioFunc)
+	setMVServiceTaskThresholdCPUFunc := do.setMVServiceTaskThresholdCPU
+	variable.SetMVServiceTaskThresholdCPU.Store(&setMVServiceTaskThresholdCPUFunc)
+	setMVServiceTaskThresholdMemoryFunc := do.setMVServiceTaskThresholdMemory
+	variable.SetMVServiceTaskThresholdMemory.Store(&setMVServiceTaskThresholdMemoryFunc)
+	setMVServiceMViewRefreshHistRetentionFunc := do.setMVServiceMViewRefreshHistRetention
+	variable.SetMVServiceMViewRefreshHistRetention.Store(&setMVServiceMViewRefreshHistRetentionFunc)
+	setMVServiceMLogPurgeHistRetentionFunc := do.setMVServiceMLogPurgeHistRetention
+	variable.SetMVServiceMLogPurgeHistRetention.Store(&setMVServiceMLogPurgeHistRetentionFunc)
 
 	variable.ChangeSchemaCacheSize = do.changeSchemaCacheSize
 }
@@ -115,6 +127,52 @@ func (*Domain) setGlobalResourceControl(enable bool) {
 
 func (do *Domain) setLowResolutionTSOUpdateInterval(interval time.Duration) error {
 	return do.store.GetOracle().SetLowResolutionTimestampUpdateInterval(interval)
+}
+
+func (do *Domain) setMVServiceTaskMaxConcurrency(maxConcurrency int) {
+	if do.GetMVService() == nil {
+		return
+	}
+	do.mvService.SetTaskMaxConcurrency(maxConcurrency)
+}
+
+func (do *Domain) setMVServiceRefreshTaskConcurrencyRatio(ratio float64) {
+	if do.GetMVService() == nil {
+		return
+	}
+	do.mvService.SetRefreshTaskConcurrencyRatio(ratio)
+}
+
+func (do *Domain) setMVServiceTaskThresholdCPU(threshold float64) {
+	if do.GetMVService() == nil {
+		return
+	}
+	cfg := do.mvService.GetTaskBackpressureConfig()
+	cfg.CPUThreshold = threshold
+	_ = do.mvService.SetTaskBackpressureConfig(cfg)
+}
+
+func (do *Domain) setMVServiceTaskThresholdMemory(threshold float64) {
+	if do.GetMVService() == nil {
+		return
+	}
+	cfg := do.mvService.GetTaskBackpressureConfig()
+	cfg.MemThreshold = threshold
+	_ = do.mvService.SetTaskBackpressureConfig(cfg)
+}
+
+func (do *Domain) setMVServiceMViewRefreshHistRetention(retention time.Duration) {
+	if do.GetMVService() == nil {
+		return
+	}
+	_ = do.mvService.SetMViewRefreshHistRetention(retention)
+}
+
+func (do *Domain) setMVServiceMLogPurgeHistRetention(retention time.Duration) {
+	if do.GetMVService() == nil {
+		return
+	}
+	_ = do.mvService.SetMLogPurgeHistRetention(retention)
 }
 
 // updatePDClient is used to set the dynamic option into the PD client.

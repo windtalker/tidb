@@ -58,6 +58,7 @@ import (
 	toTSO                "TO TSO"
 	memberof             "MEMBER OF"
 	optionallyEnclosedBy "OPTIONALLY ENCLOSED BY"
+	fullJoinType         "FULL OUTER JOIN"
 
 	/*yy:token "_%c"    */
 	underscoreCS "UNDERSCORE_CHARSET"
@@ -317,11 +318,13 @@ import (
 	after                 "AFTER"
 	against               "AGAINST"
 	ago                   "AGO"
+	alert                 "ALERT"
 	algorithm             "ALGORITHM"
 	always                "ALWAYS"
 	any                   "ANY"
 	apply                 "APPLY"
 	ascii                 "ASCII"
+	async                 "ASYNC"
 	attribute             "ATTRIBUTE"
 	attributes            "ATTRIBUTES"
 	autoIdCache           "AUTO_ID_CACHE"
@@ -371,6 +374,8 @@ import (
 	commit                "COMMIT"
 	committed             "COMMITTED"
 	compact               "COMPACT"
+	compare               "COMPARE"
+	complete              "COMPLETE"
 	compressed            "COMPRESSED"
 	compression           "COMPRESSION"
 	compressionLevel      "COMPRESSION_LEVEL"
@@ -399,6 +404,7 @@ import (
 	declare               "DECLARE"
 	definer               "DEFINER"
 	delayKeyWrite         "DELAY_KEY_WRITE"
+	delta                 "DELTA"
 	digest                "DIGEST"
 	directory             "DIRECTORY"
 	disable               "DISABLE"
@@ -431,6 +437,7 @@ import (
 	expire                "EXPIRE"
 	extended              "EXTENDED"
 	failedLoginAttempts   "FAILED_LOGIN_ATTEMPTS"
+	fast                  "FAST"
 	faultsSym             "FAULTS"
 	fields                "FIELDS"
 	file                  "FILE"
@@ -455,6 +462,7 @@ import (
 	hypo                  "HYPO"
 	identified            "IDENTIFIED"
 	ignoreStats           "IGNORE_STATS"
+	immediate             "IMMEDIATE"
 	importKwd             "IMPORT"
 	imports               "IMPORTS"
 	increment             "INCREMENT"
@@ -484,6 +492,7 @@ import (
 	locked                "LOCKED"
 	logs                  "LOGS"
 	master                "MASTER"
+	materialized          "MATERIALIZED"
 	maxConnectionsPerHour "MAX_CONNECTIONS_PER_HOUR"
 	max_idxnum            "MAX_IDXNUM"
 	max_minutes           "MAX_MINUTES"
@@ -528,7 +537,9 @@ import (
 	only                  "ONLY"
 	onDuplicate           "ON_DUPLICATE"
 	open                  "OPEN"
+	operate               "OPERATE"
 	optional              "OPTIONAL"
+	output                "OUTPUT"
 	packKeys              "PACK_KEYS"
 	pageSym               "PAGE"
 	parser                "PARSER"
@@ -565,6 +576,7 @@ import (
 	recommend             "RECOMMEND"
 	recover               "RECOVER"
 	redundant             "REDUNDANT"
+	refresh               "REFRESH"
 	reload                "RELOAD"
 	remove                "REMOVE"
 	reorganize            "REORGANIZE"
@@ -684,6 +696,7 @@ import (
 	variables             "VARIABLES"
 	vectorType            "VECTOR"
 	view                  "VIEW"
+	views                 "VIEWS"
 	visible               "VISIBLE"
 	wait                  "WAIT"
 	waitTiflashReady      "WAIT_TIFLASH_READY"
@@ -756,6 +769,7 @@ import (
 	next_row_id           "NEXT_ROW_ID"
 	now                   "NOW"
 	optRuleBlacklist      "OPT_RULE_BLACKLIST"
+	place                 "PLACE"
 	placement             "PLACEMENT"
 	planCache             "PLAN_CACHE"
 	plan                  "PLAN"
@@ -838,7 +852,9 @@ import (
 	builtinExtract
 	builtinGroupConcat
 	builtinMax
+	builtinMaxCount
 	builtinMin
+	builtinMinCount
 	builtinNow
 	builtinPosition
 	builtins                   "BUILTINS"
@@ -846,6 +862,7 @@ import (
 	builtinStddevSamp
 	builtinSubstring
 	builtinSum
+	builtinSumInt
 	builtinSysDate
 	builtinTranslate
 	builtinTrim
@@ -960,140 +977,150 @@ import (
 	ProcedureCall                   "Procedure call with Identifier or identifier"
 
 %type	<statement>
-	AdminStmt                  "Check table statement or show ddl statement"
-	AlterDatabaseStmt          "Alter database statement"
-	AlterTableStmt             "Alter table statement"
-	AlterUserStmt              "Alter user statement"
-	AlterInstanceStmt          "Alter instance statement"
-	AlterRangeStmt             "Alter data range configuration statement"
-	AlterPolicyStmt            "Alter Placement Policy statement"
-	AlterResourceGroupStmt     "Alter Resource Group statement"
-	AlterSequenceStmt          "Alter sequence statement"
-	AnalyzeTableStmt           "Analyze table statement"
-	BeginTransactionStmt       "BEGIN TRANSACTION statement"
-	BinlogStmt                 "Binlog base64 statement"
-	BRIEStmt                   "BACKUP or RESTORE statement"
-	CalibrateResourceStmt      "CALIBRATE RESOURCE statement"
-	CancelDistributionJobStmt  "CANCEL DISTRIBUTION JOB statement"
-	CommitStmt                 "COMMIT statement"
-	CreateTableStmt            "CREATE TABLE statement"
-	CreateViewStmt             "CREATE VIEW  statement"
-	CreateUserStmt             "CREATE User statement"
-	CreateRoleStmt             "CREATE Role statement"
-	CreateDatabaseStmt         "Create Database Statement"
-	CreateIndexStmt            "CREATE INDEX statement"
-	CreateBindingStmt          "CREATE BINDING statement"
-	CreatePolicyStmt           "CREATE PLACEMENT POLICY statement"
-	CreateProcedureStmt        "CREATE PROCEDURE statement"
-	AddQueryWatchStmt          "ADD QUERY WATCH statement"
-	CreateResourceGroupStmt    "CREATE RESOURCE GROUP statement"
-	CreateSequenceStmt         "CREATE SEQUENCE statement"
-	CreateStatisticsStmt       "CREATE STATISTICS statement"
-	DoStmt                     "Do statement"
-	DropDatabaseStmt           "DROP DATABASE statement"
-	DropIndexStmt              "DROP INDEX statement"
-	DropProcedureStmt          "DROP PROCEDURE statement"
-	DropQueryWatchStmt         "DROP QUERY WATCH statement"
-	DropResourceGroupStmt      "DROP RESOURCE GROUP statement"
-	DropStatisticsStmt         "DROP STATISTICS statement"
-	DropStatsStmt              "DROP STATS statement"
-	DropTableStmt              "DROP TABLE statement"
-	DropSequenceStmt           "DROP SEQUENCE statement"
-	DropUserStmt               "DROP USER"
-	DropRoleStmt               "DROP ROLE"
-	DropViewStmt               "DROP VIEW statement"
-	DropBindingStmt            "DROP BINDING  statement"
-	DropPolicyStmt             "DROP PLACEMENT POLICY statement"
-	DeallocateStmt             "Deallocate prepared statement"
-	DeleteFromStmt             "DELETE FROM statement"
-	DeleteWithoutUsingStmt     "Normal DELETE statement"
-	DeleteWithUsingStmt        "DELETE USING statement"
-	DistributeTableStmt        "Distribute table statement"
-	EmptyStmt                  "empty statement"
-	ExecuteStmt                "Execute statement"
-	ExplainStmt                "EXPLAIN statement"
-	ExplainableStmt            "explainable statement"
-	FlushStmt                  "Flush statement"
-	FlashbackTableStmt         "Flashback table statement"
-	FlashbackToTimestampStmt   "Flashback cluster statement"
-	FlashbackDatabaseStmt      "Flashback Database statement"
-	GrantStmt                  "Grant statement"
-	GrantProxyStmt             "Grant proxy statement"
-	GrantRoleStmt              "Grant role statement"
-	InsertIntoStmt             "INSERT INTO statement"
-	CallStmt                   "CALL statement"
-	ImportIntoStmt             "IMPORT INTO statement"
-	ImportFromSelectStmt       "SELECT statement of IMPORT INTO"
-	KillStmt                   "Kill statement"
-	LoadDataStmt               "Load data statement"
-	LoadStatsStmt              "Load statistic statement"
-	LockStatsStmt              "Lock statistic statement"
-	UnlockStatsStmt            "Unlock statistic statement"
-	LockTablesStmt             "Lock tables statement"
-	NonTransactionalDMLStmt    "Non-transactional DML statement"
-	OptimizeTableStmt          "OPTIMIZE statement"
-	PlanReplayerStmt           "Plan replayer statement"
-	PreparedStmt               "PreparedStmt"
-	ProcedureProcStmt          "The entrance of procedure statements which contains all kinds of statements in procedure"
-	ProcedureStatementStmt     "The normal statements in procedure, such as dml, select, set ..."
-	SelectStmt                 "SELECT statement"
-	SelectStmtWithClause       "common table expression SELECT statement"
-	RenameTableStmt            "rename table statement"
-	RenameUserStmt             "rename user statement"
-	ReplaceIntoStmt            "REPLACE INTO statement"
-	RecoverTableStmt           "recover table statement"
-	RevokeStmt                 "Revoke statement"
-	RevokeRoleStmt             "Revoke role statement"
-	RollbackStmt               "ROLLBACK statement"
-	ReleaseSavepointStmt       "RELEASE SAVEPOINT statement"
-	SavepointStmt              "SAVEPOINT statement"
-	SplitRegionStmt            "Split index region statement"
-	SetStmt                    "Set variable statement"
-	SetBindingStmt             "Set binding statement"
-	SetRoleStmt                "Set active role statement"
-	SetDefaultRoleStmt         "Set default statement for some user"
-	ShowStmt                   "Show engines/databases/tables/user/columns/warnings/status statement"
-	Statement                  "statement"
-	TraceStmt                  "TRACE statement"
-	TraceableStmt              "traceable statement"
-	TruncateTableStmt          "TRUNCATE TABLE statement"
-	UnlockTablesStmt           "Unlock tables statement"
-	UpdateStmt                 "UPDATE statement"
-	SetOprStmt                 "Union/Except/Intersect select statement"
-	SetOprStmtWithLimitOrderBy "Union/Except/Intersect select statement with limit and order by"
-	SetOprStmtWoutLimitOrderBy "Union/Except/Intersect select statement without limit and order by"
-	UseStmt                    "USE statement"
-	ShutdownStmt               "SHUTDOWN statement"
-	RestartStmt                "RESTART statement"
-	RecommendIndexStmt         "RECOMMEND INDEX statement"
-	CreateViewSelectOpt        "Select/Union/Except/Intersect statement in CREATE VIEW ... AS SELECT"
-	BindableStmt               "Statement that can be created binding on"
-	UpdateStmtNoWith           "Update statement without CTE clause"
-	HelpStmt                   "HELP statement"
-	ShardableStmt              "Shardable statement that can be used in non-transactional DMLs"
-	CancelImportStmt           "CANCEL IMPORT JOB statement"
-	ProcedureUnlabeledBlock    "The statement block without label in procedure"
-	ProcedureBlockContent      "The statement block in procedure expressed with 'Begin ... End'"
-	SimpleWhenThen             "Procedure case when then"
-	SearchWhenThen             "Procedure search when then"
-	ProcedureIfstmt            "The if statement in procedure, expressed by if ... elseif .. else ... end if"
-	procedurceElseIfs          "The else block in procedure, expressed by elseif or else or nil"
-	ProcedureIf                "The if block in procedure, expressed by expr then statement procedurceElseIfs"
-	ProcedureUnlabelLoopBlock  "The loop block without label in procedure "
-	ProcedureUnlabelLoopStmt   "The loop statement in procedure, expressed by repeat/do while/loop"
-	ProcedureCaseStmt          "Case statement in procedure, expressed by `case ... when.. then ..`"
-	ProcedureSimpleCase        "The simpe case statement in procedure, expressed by `case expr when expr then statement ... end case`"
-	ProcedureSearchedCase      "The searched case statement in procedure, expressed by `case when expr then statement ... end case`"
-	ProcedureCursorSelectStmt  "The select stmt can used in procedure cursor."
-	ProcedureOpenCur           "The open cursor statement in procedure, expressed by `open ...`"
-	ProcedureCloseCur          "The close cursor statement in procedure, expressed by `close ...`"
-	ProcedureFetchInto         "The fetch into statement in procedure, expressed by `fetch ... into ...`"
-	ProcedureHcond             "The handler value statement in procedure, expressed by condition_value"
-	ProcedurceCond             "The handler code statement in procedure, expressed by code error num or `sqlstate ...`"
-	ProcedureLabeledBlock      "The statement block with label in procedure"
-	ProcedurelabeledLoopStmt   "The loop block with label in procedure"
-	ProcedureIterate           "The iterate statement in procedure, expressed by `iterate ...`"
-	ProcedureLeave             "The leave statement in procedure, expressed by `leave ...`"
+	AdminStmt                     "Check table statement or show ddl statement"
+	AlterDatabaseStmt             "Alter database statement"
+	AlterTableStmt                "Alter table statement"
+	AlterUserStmt                 "Alter user statement"
+	AlterInstanceStmt             "Alter instance statement"
+	AlterRangeStmt                "Alter data range configuration statement"
+	AlterPolicyStmt               "Alter Placement Policy statement"
+	AlterResourceGroupStmt        "Alter Resource Group statement"
+	AlterSequenceStmt             "Alter sequence statement"
+	AnalyzeTableStmt              "Analyze table statement"
+	BeginTransactionStmt          "BEGIN TRANSACTION statement"
+	BinlogStmt                    "Binlog base64 statement"
+	BRIEStmt                      "BACKUP or RESTORE statement"
+	CalibrateResourceStmt         "CALIBRATE RESOURCE statement"
+	CancelMaterializedViewJobStmt "CANCEL MATERIALIZED VIEW ... JOB statement"
+	CancelDistributionJobStmt     "CANCEL DISTRIBUTION JOB statement"
+	CommitStmt                    "COMMIT statement"
+	CompareMaterializedViewStmt   "COMPARE MATERIALIZED VIEW statement"
+	CreateTableStmt               "CREATE TABLE statement"
+	CreateViewStmt                "CREATE VIEW  statement"
+	CreateMaterializedViewStmt    "CREATE MATERIALIZED VIEW statement"
+	CreateMaterializedViewLogStmt "CREATE MATERIALIZED VIEW LOG statement"
+	AlterMaterializedViewStmt     "ALTER MATERIALIZED VIEW statement"
+	AlterMaterializedViewLogStmt  "ALTER MATERIALIZED VIEW LOG statement"
+	DropMaterializedViewStmt      "DROP MATERIALIZED VIEW statement"
+	DropMaterializedViewLogStmt   "DROP MATERIALIZED VIEW LOG statement"
+	PurgeMaterializedViewLogStmt  "PURGE MATERIALIZED VIEW LOG statement"
+	RefreshMaterializedViewStmt   "REFRESH MATERIALIZED VIEW statement"
+	CreateUserStmt                "CREATE User statement"
+	CreateRoleStmt                "CREATE Role statement"
+	CreateDatabaseStmt            "Create Database Statement"
+	CreateIndexStmt               "CREATE INDEX statement"
+	CreateBindingStmt             "CREATE BINDING statement"
+	CreatePolicyStmt              "CREATE PLACEMENT POLICY statement"
+	CreateProcedureStmt           "CREATE PROCEDURE statement"
+	AddQueryWatchStmt             "ADD QUERY WATCH statement"
+	CreateResourceGroupStmt       "CREATE RESOURCE GROUP statement"
+	CreateSequenceStmt            "CREATE SEQUENCE statement"
+	CreateStatisticsStmt          "CREATE STATISTICS statement"
+	DoStmt                        "Do statement"
+	DropDatabaseStmt              "DROP DATABASE statement"
+	DropIndexStmt                 "DROP INDEX statement"
+	DropProcedureStmt             "DROP PROCEDURE statement"
+	DropQueryWatchStmt            "DROP QUERY WATCH statement"
+	DropResourceGroupStmt         "DROP RESOURCE GROUP statement"
+	DropStatisticsStmt            "DROP STATISTICS statement"
+	DropStatsStmt                 "DROP STATS statement"
+	DropTableStmt                 "DROP TABLE statement"
+	DropSequenceStmt              "DROP SEQUENCE statement"
+	DropUserStmt                  "DROP USER"
+	DropRoleStmt                  "DROP ROLE"
+	DropViewStmt                  "DROP VIEW statement"
+	DropBindingStmt               "DROP BINDING  statement"
+	DropPolicyStmt                "DROP PLACEMENT POLICY statement"
+	DeallocateStmt                "Deallocate prepared statement"
+	DeleteFromStmt                "DELETE FROM statement"
+	DeleteWithoutUsingStmt        "Normal DELETE statement"
+	DeleteWithUsingStmt           "DELETE USING statement"
+	DistributeTableStmt           "Distribute table statement"
+	EmptyStmt                     "empty statement"
+	ExecuteStmt                   "Execute statement"
+	ExplainStmt                   "EXPLAIN statement"
+	ExplainableStmt               "explainable statement"
+	FlushStmt                     "Flush statement"
+	FlashbackTableStmt            "Flashback table statement"
+	FlashbackToTimestampStmt      "Flashback cluster statement"
+	FlashbackDatabaseStmt         "Flashback Database statement"
+	GrantStmt                     "Grant statement"
+	GrantProxyStmt                "Grant proxy statement"
+	GrantRoleStmt                 "Grant role statement"
+	InsertIntoStmt                "INSERT INTO statement"
+	CallStmt                      "CALL statement"
+	ImportIntoStmt                "IMPORT INTO statement"
+	ImportFromSelectStmt          "SELECT statement of IMPORT INTO"
+	KillStmt                      "Kill statement"
+	LoadDataStmt                  "Load data statement"
+	LoadStatsStmt                 "Load statistic statement"
+	LockStatsStmt                 "Lock statistic statement"
+	UnlockStatsStmt               "Unlock statistic statement"
+	LockTablesStmt                "Lock tables statement"
+	NonTransactionalDMLStmt       "Non-transactional DML statement"
+	OptimizeTableStmt             "OPTIMIZE statement"
+	PlanReplayerStmt              "Plan replayer statement"
+	PreparedStmt                  "PreparedStmt"
+	ProcedureProcStmt             "The entrance of procedure statements which contains all kinds of statements in procedure"
+	ProcedureStatementStmt        "The normal statements in procedure, such as dml, select, set ..."
+	SelectStmt                    "SELECT statement"
+	SelectStmtWithClause          "common table expression SELECT statement"
+	RenameTableStmt               "rename table statement"
+	RenameUserStmt                "rename user statement"
+	ReplaceIntoStmt               "REPLACE INTO statement"
+	RecoverTableStmt              "recover table statement"
+	RevokeStmt                    "Revoke statement"
+	RevokeRoleStmt                "Revoke role statement"
+	RollbackStmt                  "ROLLBACK statement"
+	ReleaseSavepointStmt          "RELEASE SAVEPOINT statement"
+	SavepointStmt                 "SAVEPOINT statement"
+	SplitRegionStmt               "Split index region statement"
+	SetStmt                       "Set variable statement"
+	SetBindingStmt                "Set binding statement"
+	SetRoleStmt                   "Set active role statement"
+	SetDefaultRoleStmt            "Set default statement for some user"
+	ShowStmt                      "Show engines/databases/tables/user/columns/warnings/status statement"
+	Statement                     "statement"
+	TraceStmt                     "TRACE statement"
+	TraceableStmt                 "traceable statement"
+	TruncateTableStmt             "TRUNCATE TABLE statement"
+	UnlockTablesStmt              "Unlock tables statement"
+	UpdateStmt                    "UPDATE statement"
+	SetOprStmt                    "Union/Except/Intersect select statement"
+	SetOprStmtWithLimitOrderBy    "Union/Except/Intersect select statement with limit and order by"
+	SetOprStmtWoutLimitOrderBy    "Union/Except/Intersect select statement without limit and order by"
+	UseStmt                       "USE statement"
+	ShutdownStmt                  "SHUTDOWN statement"
+	RestartStmt                   "RESTART statement"
+	RecommendIndexStmt            "RECOMMEND INDEX statement"
+	CreateViewSelectOpt           "Select/Union/Except/Intersect statement in CREATE VIEW ... AS SELECT"
+	BindableStmt                  "Statement that can be created binding on"
+	UpdateStmtNoWith              "Update statement without CTE clause"
+	HelpStmt                      "HELP statement"
+	ShardableStmt                 "Shardable statement that can be used in non-transactional DMLs"
+	CancelImportStmt              "CANCEL IMPORT JOB statement"
+	ProcedureUnlabeledBlock       "The statement block without label in procedure"
+	ProcedureBlockContent         "The statement block in procedure expressed with 'Begin ... End'"
+	SimpleWhenThen                "Procedure case when then"
+	SearchWhenThen                "Procedure search when then"
+	ProcedureIfstmt               "The if statement in procedure, expressed by if ... elseif .. else ... end if"
+	procedurceElseIfs             "The else block in procedure, expressed by elseif or else or nil"
+	ProcedureIf                   "The if block in procedure, expressed by expr then statement procedurceElseIfs"
+	ProcedureUnlabelLoopBlock     "The loop block without label in procedure "
+	ProcedureUnlabelLoopStmt      "The loop statement in procedure, expressed by repeat/do while/loop"
+	ProcedureCaseStmt             "Case statement in procedure, expressed by `case ... when.. then ..`"
+	ProcedureSimpleCase           "The simpe case statement in procedure, expressed by `case expr when expr then statement ... end case`"
+	ProcedureSearchedCase         "The searched case statement in procedure, expressed by `case when expr then statement ... end case`"
+	ProcedureCursorSelectStmt     "The select stmt can used in procedure cursor."
+	ProcedureOpenCur              "The open cursor statement in procedure, expressed by `open ...`"
+	ProcedureCloseCur             "The close cursor statement in procedure, expressed by `close ...`"
+	ProcedureFetchInto            "The fetch into statement in procedure, expressed by `fetch ... into ...`"
+	ProcedureHcond                "The handler value statement in procedure, expressed by condition_value"
+	ProcedurceCond                "The handler code statement in procedure, expressed by code error num or `sqlstate ...`"
+	ProcedureLabeledBlock         "The statement block with label in procedure"
+	ProcedurelabeledLoopStmt      "The loop block with label in procedure"
+	ProcedureIterate              "The iterate statement in procedure, expressed by `iterate ...`"
+	ProcedureLeave                "The leave statement in procedure, expressed by `leave ...`"
 
 %type	<item>
 	AdminShowSlow                          "Admin Show Slow statement"
@@ -1406,6 +1433,32 @@ import (
 	ViewDefiner                            "view definer"
 	ViewName                               "view name"
 	ViewFieldList                          "create view statement field list"
+	MViewTableOptionListOpt                "materialized view table options"
+	MViewTableOptionList                   "materialized view table option list"
+	MViewTableOption                       "materialized view table option"
+	MViewRefreshClause                     "materialized view refresh clause"
+	MViewRefreshOnClauseOpt                "materialized view refresh ON clause"
+	MViewStartWithOrNextOpt                "materialized view START WITH/NEXT option list"
+	MViewStartWithOrNext                   "materialized view START WITH/NEXT option"
+	MViewRefreshClauseOpt                  "optional materialized view refresh clause"
+	MViewAttributesOpt                     "optional materialized view attributes"
+	MLogCreateOptionListOpt                "materialized view log create options"
+	MLogCreateOptionList                   "materialized view log create option list"
+	MLogCreateOption                       "materialized view log create option"
+	MLogPurgeClauseOpt                     "materialized view log optional PURGE clause"
+	MLogPurgeClause                        "materialized view log PURGE clause"
+	AlterMLogPurgeClause                   "ALTER materialized view log PURGE clause"
+	MLogAccumulationAlertClauseOpt         "materialized view log optional ALERT ROWS clause"
+	MLogAccumulationAlertClause            "materialized view log ALERT ROWS clause"
+	MLogStartWithOpt                       "materialized view log START WITH option"
+	AlterMaterializedViewAction            "ALTER MATERIALIZED VIEW action"
+	AlterMaterializedViewActionList        "ALTER MATERIALIZED VIEW action list"
+	AlterMaterializedViewLogAction         "ALTER MATERIALIZED VIEW LOG action"
+	AlterMaterializedViewLogActionList     "ALTER MATERIALIZED VIEW LOG action list"
+	RefreshWithAsyncModeOpt                "REFRESH MATERIALIZED VIEW WITH ASYNC MODE option"
+	RefreshMaterializedViewObserveOpt      "REFRESH MATERIALIZED VIEW DRY RUN/WITH PROFILE option"
+	RefreshCompleteMode                    "REFRESH MATERIALIZED VIEW COMPLETE mode option"
+	CompareMaterializedViewOutputOpt       "COMPARE MATERIALIZED VIEW OUTPUT INTO TABLE option"
 	ViewSQLSecurity                        "view sql security"
 	WhereClause                            "WHERE clause"
 	WhereClauseOptional                    "Optional WHERE clause"
@@ -1659,7 +1712,7 @@ import (
 %right '('
 %left ')'
 %precedence higherThanParenthese
-%left join straightJoin inner cross left right full natural
+%left join straightJoin inner cross left right full fullJoinType natural
 %precedence lowerThanOn
 %precedence on using
 %right assignmentEq
@@ -5210,6 +5263,476 @@ ViewCheckOption:
 		$$ = model.CheckOptionLocal
 	}
 
+CreateMaterializedViewStmt:
+	"CREATE" "MATERIALIZED" "VIEW" TableName '(' ColumnList ')' MViewTableOptionListOpt MViewRefreshClauseOpt MViewAttributesOpt "AS" CreateViewSelectOpt
+	{
+		opts := $8.(*mviewCreateOptions)
+		x := &ast.CreateMaterializedViewStmt{
+			ViewName:   $4.(*ast.TableName),
+			Cols:       $6.([]model.CIStr),
+			Comment:    opts.comment,
+			Refresh:    $9.(*ast.MViewRefreshClause),
+			Attributes: $10.(string),
+			Options:    opts.options,
+			Select:     $12.(ast.StmtNode).(ast.ResultSetNode),
+		}
+		$$ = x
+	}
+
+MViewTableOptionListOpt:
+	/* EMPTY */
+	{
+		$$ = &mviewCreateOptions{}
+	}
+|	MViewTableOptionList
+	{
+		$$ = $1
+	}
+
+MViewTableOptionList:
+	MViewTableOption
+	{
+		$$ = $1
+	}
+|	MViewTableOptionList MViewTableOption
+	{
+		opts := $1.(*mviewCreateOptions)
+		opt := $2.(*mviewCreateOptions)
+		if opt.hasComment {
+			if opts.hasComment {
+				yylex.AppendError(yylex.Errorf("Duplicate COMMENT specified in CREATE MATERIALIZED VIEW"))
+			}
+			opts.hasComment = true
+			opts.comment = opt.comment
+		}
+		if opt.hasShardRowIDBits {
+			if opts.hasShardRowIDBits {
+				yylex.AppendError(yylex.Errorf("Duplicate SHARD_ROW_ID_BITS specified in CREATE MATERIALIZED VIEW"))
+			}
+			opts.hasShardRowIDBits = true
+		}
+		if opt.hasPreSplitRegion {
+			if opts.hasPreSplitRegion {
+				yylex.AppendError(yylex.Errorf("Duplicate PRE_SPLIT_REGIONS specified in CREATE MATERIALIZED VIEW"))
+			}
+			opts.hasPreSplitRegion = true
+		}
+		opts.options = append(opts.options, opt.options...)
+		$$ = opts
+	}
+
+MViewTableOption:
+	"COMMENT" "=" stringLit
+	{
+		$$ = &mviewCreateOptions{hasComment: true, comment: $3}
+	}
+|	"SHARD_ROW_ID_BITS" EqOpt LengthNum
+	{
+		$$ = &mviewCreateOptions{
+			hasShardRowIDBits: true,
+			options: []*ast.TableOption{{
+				Tp:        ast.TableOptionShardRowID,
+				UintValue: $3.(uint64),
+			}},
+		}
+	}
+|	"PRE_SPLIT_REGIONS" EqOpt LengthNum
+	{
+		$$ = &mviewCreateOptions{
+			hasPreSplitRegion: true,
+			options: []*ast.TableOption{{
+				Tp:        ast.TableOptionPreSplitRegion,
+				UintValue: $3.(uint64),
+			}},
+		}
+	}
+
+MViewRefreshClauseOpt:
+	/* EMPTY */
+	{
+		$$ = (*ast.MViewRefreshClause)(nil)
+	}
+|	MViewRefreshClause
+	{
+		$$ = $1
+	}
+
+MViewAttributesOpt:
+	/* EMPTY */
+	{
+		$$ = ""
+	}
+|	"ATTRIBUTES" EqOpt stringLit
+	{
+		$$ = $3
+	}
+
+MViewRefreshClause:
+	"REFRESH" "FAST" MViewRefreshOnClauseOpt
+	{
+		x := $3.(*ast.MViewRefreshClause)
+		x.Method = ast.MViewRefreshMethodFast
+		$$ = x
+	}
+
+MViewRefreshOnClauseOpt:
+	/* EMPTY */
+	{
+		$$ = &ast.MViewRefreshClause{}
+	}
+|	MViewStartWithOrNext
+	{
+		$$ = $1
+	}
+
+MViewStartWithOrNextOpt:
+	/* EMPTY */
+	{
+		// NOTE: don't use typed-nil here, otherwise `$3 != nil` checks may be wrong (Go interface nil gotcha).
+		$$ = nil
+	}
+|	MViewStartWithOrNext
+	{
+		$$ = $1
+	}
+
+MViewStartWithOrNext:
+	"START" "WITH" Expression "NEXT" Expression
+	{
+		$$ = &ast.MViewRefreshClause{StartWith: $3.(ast.ExprNode), Next: $5.(ast.ExprNode)}
+	}
+|	"NEXT" Expression
+	{
+		$$ = &ast.MViewRefreshClause{Next: $2.(ast.ExprNode)}
+	}
+
+CreateMaterializedViewLogStmt:
+	"CREATE" "MATERIALIZED" "VIEW" "LOG" "ON" TableName '(' ColumnList ')' MLogCreateOptionListOpt MLogPurgeClauseOpt MLogAccumulationAlertClauseOpt
+	{
+		opts := $10.(*mlogCreateOptions)
+		x := &ast.CreateMaterializedViewLogStmt{
+			Table:             $6.(*ast.TableName),
+			Cols:              $8.([]model.CIStr),
+			Options:           opts.options,
+			Purge:             $11.(*ast.MLogPurgeClause),
+			AccumulationAlert: $12.(*ast.MLogAccumulationAlertClause),
+		}
+		$$ = x
+	}
+
+MLogCreateOptionListOpt:
+	/* EMPTY */
+	{
+		$$ = &mlogCreateOptions{}
+	}
+|	MLogCreateOptionList
+	{
+		$$ = $1
+	}
+
+MLogCreateOptionList:
+	MLogCreateOption
+	{
+		$$ = $1
+	}
+|	MLogCreateOptionList MLogCreateOption
+	{
+		opts := $1.(*mlogCreateOptions)
+		opt := $2.(*mlogCreateOptions)
+		if opt.hasShardRowIDBits {
+			if opts.hasShardRowIDBits {
+				yylex.AppendError(yylex.Errorf("Duplicate SHARD_ROW_ID_BITS specified in CREATE MATERIALIZED VIEW LOG"))
+			}
+			opts.hasShardRowIDBits = true
+		}
+		if opt.hasPreSplitRegion {
+			if opts.hasPreSplitRegion {
+				yylex.AppendError(yylex.Errorf("Duplicate PRE_SPLIT_REGIONS specified in CREATE MATERIALIZED VIEW LOG"))
+			}
+			opts.hasPreSplitRegion = true
+		}
+		opts.options = append(opts.options, opt.options...)
+		$$ = opts
+	}
+
+MLogCreateOption:
+	"SHARD_ROW_ID_BITS" EqOpt LengthNum
+	{
+		$$ = &mlogCreateOptions{
+			hasShardRowIDBits: true,
+			options: []*ast.TableOption{{
+				Tp:        ast.TableOptionShardRowID,
+				UintValue: $3.(uint64),
+			}},
+		}
+	}
+|	"PRE_SPLIT_REGIONS" EqOpt LengthNum
+	{
+		$$ = &mlogCreateOptions{
+			hasPreSplitRegion: true,
+			options: []*ast.TableOption{{
+				Tp:        ast.TableOptionPreSplitRegion,
+				UintValue: $3.(uint64),
+			}},
+		}
+	}
+
+MLogPurgeClauseOpt:
+	/* EMPTY */
+	{
+		$$ = (*ast.MLogPurgeClause)(nil)
+	}
+|	MLogPurgeClause
+	{
+		$$ = $1
+	}
+
+MLogPurgeClause:
+	"PURGE" "IMMEDIATE"
+	{
+		$$ = &ast.MLogPurgeClause{Immediate: true}
+	}
+|	"PURGE" MLogStartWithOpt "NEXT" Expression
+	{
+		var startWith ast.ExprNode
+		if $2 != nil {
+			startWith = $2.(ast.ExprNode)
+		}
+		$$ = &ast.MLogPurgeClause{Immediate: false, StartWith: startWith, Next: $4}
+	}
+
+MLogAccumulationAlertClauseOpt:
+	/* EMPTY */
+	{
+		$$ = (*ast.MLogAccumulationAlertClause)(nil)
+	}
+|	MLogAccumulationAlertClause
+	{
+		$$ = $1
+	}
+
+MLogAccumulationAlertClause:
+	"ALERT" "ROWS" SignedNum
+	{
+		$$ = &ast.MLogAccumulationAlertClause{Rows: $3.(int64)}
+	}
+
+MLogStartWithOpt:
+	/* EMPTY */
+	{
+		$$ = nil
+	}
+|	"START" "WITH" Expression
+	{
+		$$ = $3
+	}
+
+AlterMaterializedViewStmt:
+	"ALTER" "MATERIALIZED" "VIEW" TableName AlterMaterializedViewActionList
+	{
+		x := &ast.AlterMaterializedViewStmt{
+			ViewName: $4.(*ast.TableName),
+			Actions:  $5.([]*ast.AlterMaterializedViewAction),
+		}
+		$$ = x
+	}
+
+AlterMaterializedViewActionList:
+	AlterMaterializedViewAction
+	{
+		$$ = []*ast.AlterMaterializedViewAction{$1.(*ast.AlterMaterializedViewAction)}
+	}
+|	AlterMaterializedViewActionList ',' AlterMaterializedViewAction
+	{
+		$$ = append($1.([]*ast.AlterMaterializedViewAction), $3.(*ast.AlterMaterializedViewAction))
+	}
+
+AlterMaterializedViewAction:
+	"COMMENT" "=" stringLit
+	{
+		$$ = &ast.AlterMaterializedViewAction{Tp: ast.AlterMaterializedViewActionComment, Comment: $3}
+	}
+|	"REFRESH" MViewStartWithOrNextOpt
+	{
+		refresh := &ast.MViewRefreshClause{Method: ast.MViewRefreshMethodFast}
+		if $2 != nil {
+			schedule := $2.(*ast.MViewRefreshClause)
+			refresh.StartWith = schedule.StartWith
+			refresh.Next = schedule.Next
+		}
+		$$ = &ast.AlterMaterializedViewAction{Tp: ast.AlterMaterializedViewActionRefresh, Refresh: refresh}
+	}
+|	"ATTRIBUTES" EqOpt stringLit
+	{
+		$$ = &ast.AlterMaterializedViewAction{Tp: ast.AlterMaterializedViewActionAttributes, Attributes: $3}
+	}
+
+AlterMaterializedViewLogStmt:
+	"ALTER" "MATERIALIZED" "VIEW" "LOG" "ON" TableName AlterMaterializedViewLogActionList
+	{
+		x := &ast.AlterMaterializedViewLogStmt{
+			Table:   $6.(*ast.TableName),
+			Actions: $7.([]*ast.AlterMaterializedViewLogAction),
+		}
+		$$ = x
+	}
+
+AlterMaterializedViewLogActionList:
+	AlterMaterializedViewLogAction
+	{
+		$$ = []*ast.AlterMaterializedViewLogAction{$1.(*ast.AlterMaterializedViewLogAction)}
+	}
+|	AlterMaterializedViewLogActionList ',' AlterMaterializedViewLogAction
+	{
+		$$ = append($1.([]*ast.AlterMaterializedViewLogAction), $3.(*ast.AlterMaterializedViewLogAction))
+	}
+
+AlterMaterializedViewLogAction:
+	AlterMLogPurgeClause
+	{
+		$$ = &ast.AlterMaterializedViewLogAction{Tp: ast.AlterMaterializedViewLogActionPurge, Purge: $1.(*ast.MLogPurgeClause)}
+	}
+|	"ADD" ColumnKeywordOpt '(' ColumnList ')'
+	{
+		$$ = &ast.AlterMaterializedViewLogAction{Tp: ast.AlterMaterializedViewLogActionAddColumn, Cols: $4.([]model.CIStr)}
+	}
+
+AlterMLogPurgeClause:
+	MLogPurgeClause
+	{
+		$$ = $1
+	}
+|	"PURGE"
+	{
+		$$ = &ast.MLogPurgeClause{}
+	}
+
+DropMaterializedViewStmt:
+	"DROP" "MATERIALIZED" "VIEW" TableName
+	{
+		$$ = &ast.DropMaterializedViewStmt{ViewName: $4.(*ast.TableName)}
+	}
+|	"DROP" "MATERIALIZED" "VIEW" "IF" "EXISTS" TableName
+	{
+		$$ = &ast.DropMaterializedViewStmt{IfExists: true, ViewName: $6.(*ast.TableName)}
+	}
+
+DropMaterializedViewLogStmt:
+	"DROP" "MATERIALIZED" "VIEW" "LOG" IfExists "ON" TableName
+	{
+		$$ = &ast.DropMaterializedViewLogStmt{IfExists: $5.(bool), Table: $7.(*ast.TableName)}
+	}
+
+PurgeMaterializedViewLogStmt:
+	"PURGE" "MATERIALIZED" "VIEW" "LOG" "ON" TableName
+	{
+		$$ = &ast.PurgeMaterializedViewLogStmt{Table: $6.(*ast.TableName)}
+	}
+
+CancelMaterializedViewJobStmt:
+	"CANCEL" "MATERIALIZED" "VIEW" "REFRESH" "JOB" Int64Num
+	{
+		$$ = &ast.CancelMaterializedViewJobStmt{
+			Tp:    ast.CancelMaterializedViewJobTypeRefresh,
+			JobID: $6.(int64),
+		}
+	}
+|	"CANCEL" "MATERIALIZED" "VIEW" "LOG" "PURGE" "JOB" Int64Num
+	{
+		$$ = &ast.CancelMaterializedViewJobStmt{
+			Tp:    ast.CancelMaterializedViewJobTypeLogPurge,
+			JobID: $7.(int64),
+		}
+	}
+
+CompareMaterializedViewStmt:
+	"COMPARE" "MATERIALIZED" "VIEW" TableName AsOfClause CompareMaterializedViewOutputOpt
+	{
+		$$ = &ast.CompareMaterializedViewStmt{
+			ViewName:    $4.(*ast.TableName),
+			AsOf:        $5.(*ast.AsOfClause),
+			OutputTable: $6.(*ast.TableName),
+		}
+	}
+
+CompareMaterializedViewOutputOpt:
+	%prec empty
+	{
+		$$ = (*ast.TableName)(nil)
+	}
+|	"OUTPUT" "INTO" "TABLE" TableName
+	{
+		$$ = $4.(*ast.TableName)
+	}
+
+RefreshMaterializedViewStmt:
+	"REFRESH" "MATERIALIZED" "VIEW" TableName RefreshWithAsyncModeOpt "COMPLETE" RefreshCompleteMode RefreshMaterializedViewObserveOpt
+	{
+		completeType := $7.(ast.RefreshMaterializedViewCompleteType)
+		observeType := $8.(ast.RefreshMaterializedViewObserveType)
+		$$ = &ast.RefreshMaterializedViewStmt{
+			ViewName:      $4.(*ast.TableName),
+			WithAsyncMode: $5.(bool),
+			Type:          ast.RefreshMaterializedViewTypeComplete,
+			CompleteType:  completeType,
+			ObserveType:   observeType,
+		}
+	}
+|	"REFRESH" "MATERIALIZED" "VIEW" TableName RefreshWithAsyncModeOpt "FAST" AsOfClauseOpt RefreshMaterializedViewObserveOpt
+	{
+		var asOf *ast.AsOfClause
+		if $7 != nil {
+			asOf = $7.(*ast.AsOfClause)
+		}
+		observeType := $8.(ast.RefreshMaterializedViewObserveType)
+		$$ = &ast.RefreshMaterializedViewStmt{
+			ViewName:      $4.(*ast.TableName),
+			WithAsyncMode: $5.(bool),
+			Type:          ast.RefreshMaterializedViewTypeFast,
+			CompleteType:  ast.RefreshMaterializedViewCompleteTypeInPlace,
+			AsOf:          asOf,
+			ObserveType:   observeType,
+		}
+	}
+
+RefreshMaterializedViewObserveOpt:
+	/* EMPTY */
+	{
+		$$ = ast.RefreshMaterializedViewObserveNone
+	}
+|	"DRY" "RUN"
+	{
+		$$ = ast.RefreshMaterializedViewObserveDryRun
+	}
+|	"WITH" "PROFILE"
+	{
+		$$ = ast.RefreshMaterializedViewObserveProfile
+	}
+
+RefreshWithAsyncModeOpt:
+	/* EMPTY */
+	{
+		$$ = false
+	}
+|	"WITH" "ASYNC" "MODE"
+	{
+		$$ = true
+	}
+
+RefreshCompleteMode:
+	"IN" "PLACE"
+	{
+		$$ = ast.RefreshMaterializedViewCompleteTypeInPlace
+	}
+|	"OUT" "OF" "PLACE"
+	{
+		$$ = ast.RefreshMaterializedViewCompleteTypeOutOfPlace
+	}
+|	"DELTA" "APPLY"
+	{
+		$$ = ast.RefreshMaterializedViewCompleteTypeDeltaApply
+	}
+
 /******************************************************************
  * Do statement
  * See https://dev.mysql.com/doc/refman/5.7/en/do.html
@@ -6781,6 +7304,7 @@ UnReservedKeyword:
 |	"ADVISE"
 |	"ASCII"
 |	"APPLY"
+|	"DELTA"
 |	"ATTRIBUTE"
 |	"ATTRIBUTES"
 |	"BINDING_CACHE"
@@ -6811,6 +7335,8 @@ UnReservedKeyword:
 |	"SAN"
 |	"COMMIT"
 |	"COMPACT"
+|	"COMPARE"
+|	"COMPLETE"
 |	"COMPRESSED"
 |	"CONSISTENCY"
 |	"CONSISTENT"
@@ -6855,6 +7381,8 @@ UnReservedKeyword:
 |	"NAMES"
 |	"NVARCHAR"
 |	"OFFSET"
+|	"OPERATE"
+|	"OUTPUT"
 |	"PACK_KEYS"
 |	"PARSER"
 |	"PASSWORD" %prec lowerThanEq
@@ -6904,6 +7432,7 @@ UnReservedKeyword:
 |	"WEEK"
 |	"WEIGHT_STRING"
 |	"ANY"
+|	"ASYNC"
 |	"SOME"
 |	"USER"
 |	"IDENTIFIED"
@@ -6915,6 +7444,10 @@ UnReservedKeyword:
 |	"COMPRESSION"
 |	"KEY_BLOCK_SIZE"
 |	"MASTER"
+|	"MATERIALIZED"
+|	"FAST"
+|	"IMMEDIATE"
+|	"REFRESH"
 |	"MAX_ROWS"
 |	"MIN_ROWS"
 |	"NATIONAL"
@@ -6949,6 +7482,7 @@ UnReservedKeyword:
 |	"BINLOG"
 |	"FUNCTION"
 |	"VIEW"
+|	"VIEWS"
 |	"BINDING"
 |	"BINDINGS"
 |	"MODIFY"
@@ -7090,6 +7624,7 @@ UnReservedKeyword:
 |	"LASTVAL"
 |	"SETVAL"
 |	"AGO"
+|	"ALERT"
 |	"BACKUP"
 |	"BACKUPS"
 |	"CONCURRENCY"
@@ -7240,6 +7775,7 @@ NotKeywordToken:
 |	"RECENT"
 |	"REPLAYER"
 |	"RUNNING"
+|	"PLACE"
 |	"PLACEMENT"
 |	"PLAN"
 |	"PLAN_CACHE"
@@ -8572,6 +9108,22 @@ SumExpr:
 			$$ = &ast.AggregateFuncExpr{F: $1, Args: []ast.ExprNode{$4}, Distinct: $3.(bool)}
 		}
 	}
+|	builtinMaxCount '(' Expression ')' OptWindowingClause
+	{
+		if $5 != nil {
+			$$ = &ast.WindowFuncExpr{Name: $1, Args: []ast.ExprNode{$3}, Spec: *($5.(*ast.WindowSpec))}
+		} else {
+			$$ = &ast.AggregateFuncExpr{F: $1, Args: []ast.ExprNode{$3}}
+		}
+	}
+|	builtinMaxCount '(' "ALL" Expression ')' OptWindowingClause
+	{
+		if $6 != nil {
+			$$ = &ast.WindowFuncExpr{Name: $1, Args: []ast.ExprNode{$4}, Spec: *($6.(*ast.WindowSpec))}
+		} else {
+			$$ = &ast.AggregateFuncExpr{F: $1, Args: []ast.ExprNode{$4}}
+		}
+	}
 |	builtinMin '(' BuggyDefaultFalseDistinctOpt Expression ')' OptWindowingClause
 	{
 		if $6 != nil {
@@ -8580,7 +9132,31 @@ SumExpr:
 			$$ = &ast.AggregateFuncExpr{F: $1, Args: []ast.ExprNode{$4}, Distinct: $3.(bool)}
 		}
 	}
+|	builtinMinCount '(' Expression ')' OptWindowingClause
+	{
+		if $5 != nil {
+			$$ = &ast.WindowFuncExpr{Name: $1, Args: []ast.ExprNode{$3}, Spec: *($5.(*ast.WindowSpec))}
+		} else {
+			$$ = &ast.AggregateFuncExpr{F: $1, Args: []ast.ExprNode{$3}}
+		}
+	}
+|	builtinMinCount '(' "ALL" Expression ')' OptWindowingClause
+	{
+		if $6 != nil {
+			$$ = &ast.WindowFuncExpr{Name: $1, Args: []ast.ExprNode{$4}, Spec: *($6.(*ast.WindowSpec))}
+		} else {
+			$$ = &ast.AggregateFuncExpr{F: $1, Args: []ast.ExprNode{$4}}
+		}
+	}
 |	builtinSum '(' BuggyDefaultFalseDistinctOpt Expression ')' OptWindowingClause
+	{
+		if $6 != nil {
+			$$ = &ast.WindowFuncExpr{Name: $1, Args: []ast.ExprNode{$4}, Distinct: $3.(bool), Spec: *($6.(*ast.WindowSpec))}
+		} else {
+			$$ = &ast.AggregateFuncExpr{F: $1, Args: []ast.ExprNode{$4}, Distinct: $3.(bool)}
+		}
+	}
+|	builtinSumInt '(' BuggyDefaultFalseDistinctOpt Expression ')' OptWindowingClause
 	{
 		if $6 != nil {
 			$$ = &ast.WindowFuncExpr{Name: $1, Args: []ast.ExprNode{$4}, Distinct: $3.(bool), Spec: *($6.(*ast.WindowSpec))}
@@ -10090,6 +10666,10 @@ JoinType:
 	{
 		$$ = ast.RightJoin
 	}
+|	fullJoinType
+	{
+		$$ = ast.FullJoin
+	}
 
 OuterOpt:
 	{}
@@ -11523,6 +12103,54 @@ ShowStmt:
 		}
 		$$ = stmt
 	}
+|	"SHOW" "MATERIALIZED" "VIEWS" ShowDatabaseNameOpt ShowLikeOrWhereOpt
+	{
+		stmt := &ast.ShowStmt{Tp: ast.ShowMaterializedViews}
+		stmt.DBName = $4
+		if $5 != nil {
+			if x, ok := $5.(*ast.PatternLikeOrIlikeExpr); ok && x.Expr == nil {
+				stmt.Pattern = x
+			} else {
+				stmt.Where = $5.(ast.ExprNode)
+			}
+		}
+		$$ = stmt
+	}
+|	"SHOW" "MATERIALIZED" "VIEW" "LOGS" ShowDatabaseNameOpt ShowLikeOrWhereOpt
+	{
+		stmt := &ast.ShowStmt{Tp: ast.ShowMaterializedViewLogs}
+		stmt.DBName = $5
+		if $6 != nil {
+			if x, ok := $6.(*ast.PatternLikeOrIlikeExpr); ok && x.Expr == nil {
+				stmt.Pattern = x
+			} else {
+				stmt.Where = $6.(ast.ExprNode)
+			}
+		}
+		$$ = stmt
+	}
+|	"SHOW" "MATERIALIZED" "VIEW" TableName identifier
+	{
+		if !strings.EqualFold($5, "remain_logs") {
+			yylex.AppendError(yylex.Errorf("syntax error: expected REMAIN_LOGS"))
+			return 1
+		}
+		$$ = &ast.ShowStmt{
+			Tp:    ast.ShowMaterializedViewRemainLogs,
+			Table: $4.(*ast.TableName),
+		}
+	}
+|	"SHOW" "MATERIALIZED" "VIEW" "LOG" "ON" TableName identifier
+	{
+		if !strings.EqualFold($7, "wait_purge") {
+			yylex.AppendError(yylex.Errorf("syntax error: expected WAIT_PURGE"))
+			return 1
+		}
+		$$ = &ast.ShowStmt{
+			Tp:    ast.ShowMaterializedViewLogWaitPurge,
+			Table: $6.(*ast.TableName),
+		}
+	}
 |	"SHOW" "CREATE" "TABLE" TableName
 	{
 		$$ = &ast.ShowStmt{
@@ -11535,6 +12163,20 @@ ShowStmt:
 		$$ = &ast.ShowStmt{
 			Tp:    ast.ShowCreateView,
 			Table: $4.(*ast.TableName),
+		}
+	}
+|	"SHOW" "CREATE" "MATERIALIZED" "VIEW" TableName
+	{
+		$$ = &ast.ShowStmt{
+			Tp:    ast.ShowCreateMaterializedView,
+			Table: $5.(*ast.TableName),
+		}
+	}
+|	"SHOW" "CREATE" "MATERIALIZED" "VIEW" "LOG" "ON" TableName
+	{
+		$$ = &ast.ShowStmt{
+			Tp:    ast.ShowCreateMaterializedViewLog,
+			Table: $7.(*ast.TableName),
 		}
 	}
 |	"SHOW" "CREATE" "DATABASE" IfNotExists DBName
@@ -12265,6 +12907,8 @@ Statement:
 |	AdminStmt
 |	AlterDatabaseStmt
 |	AlterTableStmt
+|	AlterMaterializedViewStmt
+|	AlterMaterializedViewLogStmt
 |	AlterUserStmt
 |	AlterInstanceStmt
 |	AlterRangeStmt
@@ -12281,11 +12925,15 @@ Statement:
 |	ExecuteStmt
 |	ExplainStmt
 |	CalibrateResourceStmt
+|	CancelMaterializedViewJobStmt
 |	CancelDistributionJobStmt
+|	CompareMaterializedViewStmt
 |	CreateDatabaseStmt
 |	CreateIndexStmt
 |	CreateTableStmt
 |	CreateViewStmt
+|	CreateMaterializedViewStmt
+|	CreateMaterializedViewLogStmt
 |	CreateUserStmt
 |	CreateRoleStmt
 |	CreateBindingStmt
@@ -12297,6 +12945,8 @@ Statement:
 |	CreateStatisticsStmt
 |	DistributeTableStmt
 |	DoStmt
+|	PurgeMaterializedViewLogStmt
+|	RefreshMaterializedViewStmt
 |	DropDatabaseStmt
 |	DropIndexStmt
 |	DropTableStmt
@@ -12304,6 +12954,8 @@ Statement:
 |	DropPolicyStmt
 |	DropSequenceStmt
 |	DropViewStmt
+|	DropMaterializedViewStmt
+|	DropMaterializedViewLogStmt
 |	DropUserStmt
 |	DropResourceGroupStmt
 |	DropQueryWatchStmt
@@ -14671,6 +15323,10 @@ PrivType:
 |	"SHOW" "VIEW"
 	{
 		$$ = mysql.ShowViewPriv
+	}
+|	"OPERATE" "VIEW"
+	{
+		$$ = mysql.OperateViewPriv
 	}
 |	"CREATE" "ROLE"
 	{

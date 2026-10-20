@@ -40,12 +40,17 @@ var BDRActionMap = map[DDLBDRType][]ActionType{
 	SafeDDL: {
 		ActionCreateSchema,
 		ActionCreateTable,
+		ActionCreateMaterializedViewLog,
+		ActionCreateMaterializedView,
 		ActionAddColumn, // add a new column to table if it’s nullable or with default value.
 		ActionAddIndex,  //add non-unique index
 		ActionDropIndex,
 		ActionModifyColumn, // add or update comments for column, change default values of one particular column
 		ActionSetDefaultValue,
 		ActionModifyTableComment,
+		ActionAlterMaterializedViewRefresh,
+		ActionAlterMaterializedViewAttributes,
+		ActionAlterMaterializedViewLogPurge,
 		ActionRenameIndex,
 		ActionAddTablePartition,
 		ActionDropPrimaryKey,
@@ -59,6 +64,9 @@ var BDRActionMap = map[DDLBDRType][]ActionType{
 	UnsafeDDL: {
 		ActionDropSchema,
 		ActionDropTable,
+		ActionDropMaterializedView,
+		ActionDropMaterializedViewLog,
+		ActionDropMaterializedViewShadow,
 		ActionDropColumn,
 		ActionAddForeignKey,
 		ActionDropForeignKey,
@@ -102,6 +110,8 @@ var BDRActionMap = map[DDLBDRType][]ActionType{
 		ActionAlterTablePartitioning,
 		ActionRemovePartitioning,
 		ActionAddVectorIndex,
+		ActionMViewRefreshOutOfPlaceCutover,
+		ActionCreateMaterializedViewShadow,
 	},
 	UnmanagementDDL: {
 		ActionCreatePlacementPolicy,

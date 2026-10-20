@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"math"
 	"math/bits"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -572,6 +573,21 @@ func (b *PlanBuilder) buildJoin(ctx context.Context, joinNode *ast.Join) (base.L
 		return nil, err
 	}
 
+	// Current FULL OUTER JOIN limitations:
+	// 1) NATURAL/USING/full-join-without-ON are still out of scope.
+	// 2) FULL OUTER JOIN is enabled in volcano path only.
+	if joinNode.Tp == ast.FullJoin {
+		if !b.ctx.GetSessionVars().EnableFullOuterJoin {
+			return nil, plannererrors.ErrNotSupportedYet.GenWithStackByArgs("FULL OUTER JOIN")
+		}
+		if b.ctx.GetSessionVars().GetEnableCascadesPlanner() {
+			return nil, plannererrors.ErrNotSupportedYet.GenWithStackByArgs("FULL OUTER JOIN with cascades planner")
+		}
+		if joinNode.NaturalJoin || joinNode.Using != nil || joinNode.On == nil {
+			return nil, plannererrors.ErrNotSupportedYet.GenWithStackByArgs("FULL OUTER JOIN")
+		}
+	}
+
 	// The recursive part in CTE must not be on the right side of a LEFT JOIN.
 	if lc, ok := rightPlan.(*logicalop.LogicalCTETable); ok && joinNode.Tp == ast.LeftJoin {
 		return nil, plannererrors.ErrCTERecursiveForbiddenJoinOrder.GenWithStackByArgs(lc.Name)
@@ -600,6 +616,13 @@ func (b *PlanBuilder) buildJoin(ctx context.Context, joinNode *ast.Join) (base.L
 		b.optFlag = b.optFlag | rule.FlagEliminateOuterJoin
 		joinPlan.JoinType = logicalop.RightOuterJoin
 		util.ResetNotNullFlag(joinPlan.Schema(), 0, leftPlan.Schema().Len())
+	case ast.FullJoin:
+		// The rule EliminateOuterJoin does nothing with the full outer join, but a full outer join may be
+		// optimized to a one-sided outer join by null-reject checking. So we add the rule flag here for the
+		// potential optimization.
+		b.optFlag = b.optFlag | rule.FlagEliminateOuterJoin
+		joinPlan.JoinType = logicalop.FullOuterJoin
+		util.ResetNotNullFlag(joinPlan.Schema(), 0, joinPlan.Schema().Len())
 	default:
 		joinPlan.JoinType = logicalop.InnerJoin
 	}
@@ -634,6 +657,8 @@ func (b *PlanBuilder) buildJoin(ctx context.Context, joinNode *ast.Join) (base.L
 	// Clear NotNull flag for the inner side schema if it's an outer join.
 	if joinNode.Tp == ast.LeftJoin || joinNode.Tp == ast.RightJoin {
 		util.ResetNotNullFlag(joinPlan.FullSchema, lFullSchema.Len(), joinPlan.FullSchema.Len())
+	} else if joinNode.Tp == ast.FullJoin {
+		util.ResetNotNullFlag(joinPlan.FullSchema, 0, joinPlan.FullSchema.Len())
 	}
 
 	// Merge sub-plan's FullNames into this join plan, similar to the FullSchema logic above.
@@ -747,6 +772,9 @@ func (b *PlanBuilder) coalesceCommonColumns(p *logicalop.LogicalJoin, leftPlan, 
 		util.ResetNotNullFlag(rsc, 0, rsc.Len())
 	} else if joinTp == ast.RightJoin {
 		util.ResetNotNullFlag(lsc, 0, lsc.Len())
+	} else if joinTp == ast.FullJoin {
+		util.ResetNotNullFlag(lsc, 0, lsc.Len())
+		util.ResetNotNullFlag(rsc, 0, rsc.Len())
 	}
 	lColumns, rColumns := lsc.Columns, rsc.Columns
 	lNames, rNames := leftPlan.OutputNames().Shallow(), rightPlan.OutputNames().Shallow()
@@ -789,8 +817,10 @@ func (b *PlanBuilder) coalesceCommonColumns(p *logicalop.LogicalJoin, leftPlan, 
 		lNameMap := make(map[string]int, len(lNames))
 		rNameMap := make(map[string]int, len(rNames))
 		for _, name := range lNames {
-			// Natural join should ignore _tidb_rowid
-			if name.ColName.L == "_tidb_rowid" {
+			// Natural join should ignore _tidb_rowid and _tidb_commit_ts
+			if name.ColName.L == model.ExtraHandleName.L ||
+				name.ColName.L == model.ExtraCommitTSName.L ||
+				name.ColName.L == model.ExtraPhysTblIDName.L {
 				continue
 			}
 			// record left map
@@ -801,8 +831,10 @@ func (b *PlanBuilder) coalesceCommonColumns(p *logicalop.LogicalJoin, leftPlan, 
 			}
 		}
 		for _, name := range rNames {
-			// Natural join should ignore _tidb_rowid
-			if name.ColName.L == "_tidb_rowid" {
+			// Natural join should ignore _tidb_rowid and _tidb_commit_ts
+			if name.ColName.L == model.ExtraHandleName.L ||
+				name.ColName.L == model.ExtraCommitTSName.L ||
+				name.ColName.L == model.ExtraPhysTblIDName.L {
 				continue
 			}
 			// record right map
@@ -830,8 +862,10 @@ func (b *PlanBuilder) coalesceCommonColumns(p *logicalop.LogicalJoin, leftPlan, 
 	// Find out all the common columns and put them ahead.
 	commonLen := 0
 	for i, lName := range lNames {
-		// Natural join should ignore _tidb_rowid
-		if lName.ColName.L == "_tidb_rowid" {
+		// Natural join should ignore _tidb_rowid and _tidb_commit_ts
+		if lName.ColName.L == model.ExtraHandleName.L ||
+			lName.ColName.L == model.ExtraCommitTSName.L ||
+			lName.ColName.L == model.ExtraPhysTblIDName.L {
 			continue
 		}
 		for j := commonLen; j < len(rNames); j++ {
@@ -3572,7 +3606,7 @@ func unfoldWildStar(field *ast.SelectField, outputName types.NameSlice, column [
 		}
 		if (dbName.L == "" || dbName.L == name.DBName.L) &&
 			(tblName.L == "" || tblName.L == name.TblName.L) &&
-			col.ID != model.ExtraHandleID && col.ID != model.ExtraPhysTblID {
+			col.ID != model.ExtraHandleID && col.ID != model.ExtraPhysTblID && col.ID != model.ExtraCommitTSID {
 			colName := &ast.ColumnNameExpr{
 				Name: &ast.ColumnName{
 					Schema: name.DBName,
@@ -4424,9 +4458,11 @@ func (b *PlanBuilder) buildDataSource(ctx context.Context, tn *ast.TableName, as
 		return nil, err
 	}
 
-	tbl, err = tryLockMDLAndUpdateSchemaIfNecessary(ctx, b.ctx, dbName, tbl, b.is)
-	if err != nil {
-		return nil, err
+	if !b.useInfoSchemaAsIs {
+		tbl, err = tryLockMDLAndUpdateSchemaIfNecessary(ctx, b.ctx, dbName, tbl, b.is)
+		if err != nil {
+			return nil, err
+		}
 	}
 	tableInfo := tbl.Meta()
 
@@ -4450,6 +4486,9 @@ func (b *PlanBuilder) buildDataSource(ctx context.Context, tn *ast.TableName, as
 	tblName := *asName
 	if tblName.L == "" {
 		tblName = tn.Name
+	}
+	if err := CheckMViewReadable(sessionVars, tableInfo, tblName.O); err != nil {
+		return nil, err
 	}
 
 	if tableInfo.GetPartitionInfo() != nil {
@@ -4701,6 +4740,17 @@ func (b *PlanBuilder) buildDataSource(ctx context.Context, tn *ast.TableName, as
 			ds.TblCols = append(ds.TblCols, extraCol)
 		}
 	}
+	// Append extra commit ts column to the schema.
+	commitTSCol := ds.NewExtraCommitTSSchemaCol()
+	ds.Columns = append(ds.Columns, model.NewExtraCommitTSColInfo())
+	schema.Append(commitTSCol)
+	names = append(names, &types.FieldName{
+		DBName:      dbName,
+		TblName:     tableInfo.Name,
+		ColName:     model.ExtraCommitTSName,
+		OrigColName: model.ExtraCommitTSName,
+	})
+	ds.TblCols = append(ds.TblCols, commitTSCol)
 	ds.HandleCols = handleCols
 	ds.UnMutableHandleCols = handleCols
 	handleMap := make(map[int64][]util.HandleCols)
@@ -4915,6 +4965,12 @@ func (b *PlanBuilder) buildMemTable(_ context.Context, dbName pmodel.CIStr, tabl
 			p.Extractor = NewInfoSchemaIndexesExtractor()
 		case infoschema.TableViews:
 			p.Extractor = NewInfoSchemaViewsExtractor()
+		case infoschema.TableTiDBMViews:
+			p.Extractor = NewInfoSchemaTiDBMViewsExtractor()
+		case infoschema.TableTiDBMLogs:
+			p.Extractor = NewInfoSchemaTiDBMLogsExtractor()
+		case infoschema.TableTiDBTableMViewDependencies:
+			p.Extractor = NewInfoSchemaTiDBTableMViewDependenciesExtractor()
 		case infoschema.TableKeyColumn:
 			p.Extractor = NewInfoSchemaKeyColumnUsageExtractor()
 		case infoschema.TableConstraints:
@@ -5340,15 +5396,6 @@ func pruneAndBuildColPositionInfoForDelete(
 	tblID2Table map[int64]table.Table,
 	hasFK bool,
 ) (TblColPosInfoSlice, *bitset.BitSet, error) {
-	var nonPruned *bitset.BitSet
-	// If there is foreign key, we can't prune the columns.
-	// Use a very relax check for foreign key cascades and checks.
-	// If there's one table containing foreign keys, all of the tables would not do pruning.
-	// It should be strict in the future or just support pruning column when there is foreign key.
-	if !hasFK {
-		nonPruned = bitset.New(uint(len(names)))
-		nonPruned.SetAll()
-	}
 	cols2PosInfos := make(TblColPosInfoSlice, 0, len(tblID2Handle))
 	for tid, handleCols := range tblID2Handle {
 		for _, handleCol := range handleCols {
@@ -5362,22 +5409,47 @@ func pruneAndBuildColPositionInfoForDelete(
 	// Sort by start position. To do the later column pruning.
 	// TODO: `sort`` package has a rather worse performance. We should replace it with the new `slice` package.
 	sort.Sort(cols2PosInfos)
-	prunedColCnt := 0
+	nonPruned := bitset.New(uint(len(names)))
+	nonPruned.SetAll()
+	// Always prune the `_tidb_commit_ts` column.
+	for i, name := range names {
+		if name.ColName.L == model.ExtraCommitTSName.L {
+			nonPruned.Clear(uint(i))
+			continue
+		}
+	}
+	// prunedColCnt records how many columns in `names` have been pruned before the current table (before the current
+	// TblColPosInfo.Start). To avoid repeatedly counting the pruned columns, we use nextCheckIdx to record
+	// the next position to check.
+	var prunedColCnt, nextCheckIdx int
 	var err error
 	for i := range cols2PosInfos {
 		cols2PosInfo := &cols2PosInfos[i]
+		for j := nextCheckIdx; j < cols2PosInfo.Start; j++ {
+			if !nonPruned.Test(uint(j)) {
+				prunedColCnt++
+			}
+		}
+		nextCheckIdx = cols2PosInfo.Start
+
 		tbl := tblID2Table[cols2PosInfo.TblID]
 		tblInfo := tbl.Meta()
 		// If it's partitioned table, or has foreign keys, or is point get plan, we can't prune the columns, currently.
 		// nonPrunedSet will be nil if it's a point get or has foreign keys.
-		if tblInfo.GetPartitionInfo() != nil || hasFK || nonPruned == nil {
-			err = buildSingleTableColPosInfoForDelete(tbl, cols2PosInfo)
+		// If there is foreign key, we can't prune the columns.
+		// Use a very relax check for foreign key cascades and checks.
+		// If there's one table containing foreign keys, all of the tables would not do pruning.
+		// It should be strict in the future or just support pruning column when there is foreign key.
+		// For base tables with mlog, disable delete column pruning to keep RemoveRecord row layout stable.
+		hasMLog := tblInfo.MaterializedViewBase != nil && tblInfo.MaterializedViewBase.MLogID != 0
+		if tblInfo.GetPartitionInfo() != nil || hasFK || nonPruned == nil || hasMLog {
+			err = buildSingleTableColPosInfoForDelete(tbl, cols2PosInfo, prunedColCnt)
 			if err != nil {
 				return nil, nil, err
 			}
 			continue
 		}
-		prunedColCnt, err = pruneAndBuildSingleTableColPosInfoForDelete(tbl, tblInfo.Name.O, names, cols2PosInfo, prunedColCnt, nonPruned)
+		err = pruneAndBuildSingleTableColPosInfoForDelete(tbl, tblInfo.Name.O, names, cols2PosInfo, prunedColCnt, nonPruned)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -5402,12 +5474,13 @@ func initColPosInfo(tid int64, names []*types.FieldName, handleCol util.HandleCo
 
 // buildSingleTableColPosInfoForDelete builds columns mapping for delete without pruning any columns.
 // It's temp code path for partition table, foreign key and point get plan.
-func buildSingleTableColPosInfoForDelete(
-	tbl table.Table,
-	colPosInfo *TblColPosInfo,
-) error {
+func buildSingleTableColPosInfoForDelete(tbl table.Table, colPosInfo *TblColPosInfo, prePrunedCount int) error {
 	tblLen := len(tbl.DeletableCols())
+	colPosInfo.Start -= prePrunedCount
 	colPosInfo.End = colPosInfo.Start + tblLen
+	for i := 0; i < colPosInfo.HandleCols.NumCols(); i++ {
+		colPosInfo.HandleCols.GetCol(i).Index -= prePrunedCount
+	}
 	return nil
 }
 
@@ -5420,7 +5493,7 @@ func pruneAndBuildSingleTableColPosInfoForDelete(
 	colPosInfo *TblColPosInfo,
 	prePrunedCount int,
 	nonPrunedSet *bitset.BitSet,
-) (int, error) {
+) error {
 	// Columns can be seen by DELETE are the deletable columns.
 	deletableCols := t.DeletableCols()
 	deletableIdxs := t.DeletableIndices()
@@ -5441,7 +5514,7 @@ func pruneAndBuildSingleTableColPosInfoForDelete(
 	for _, idx := range deletableIdxs {
 		for _, col := range idx.Meta().Columns {
 			if col.Offset+originalStart >= len(names) || deletableCols[col.Offset].Name.L != names[col.Offset+originalStart].ColName.L {
-				return 0, plannererrors.ErrDeleteNotFoundColumn.GenWithStackByArgs(col.Name.O, tableName)
+				return plannererrors.ErrDeleteNotFoundColumn.GenWithStackByArgs(col.Name.O, tableName)
 			}
 			fixedPos[col.Offset] = 0
 		}
@@ -5489,7 +5562,7 @@ func pruneAndBuildSingleTableColPosInfoForDelete(
 	colPosInfo.End = colPosInfo.Start + tblLen - pruned
 	colPosInfo.IndexesRowLayout = indexColMap
 
-	return prePrunedCount + pruned, nil
+	return nil
 }
 
 func (b *PlanBuilder) buildUpdate(ctx context.Context, update *ast.UpdateStmt) (base.Plan, error) {
@@ -5573,6 +5646,13 @@ func (b *PlanBuilder) buildUpdate(ctx context.Context, update *ast.UpdateStmt) (
 	proj.SetOutputNames(make(types.NameSlice, len(p.OutputNames())))
 	copy(proj.OutputNames(), p.OutputNames())
 	copy(proj.Schema().Columns, p.Schema().Columns[:oldSchemaLen])
+	for i := len(proj.OutputNames()) - 1; i >= 0; i-- {
+		if proj.OutputNames()[i].ColName.L == model.ExtraCommitTSName.L {
+			proj.SetOutputNames(slices.Delete(proj.OutputNames(), i, i+1))
+			proj.Schema().Columns = slices.Delete(proj.Schema().Columns, i, i+1)
+			proj.Exprs = slices.Delete(proj.Exprs, i, i+1)
+		}
+	}
 	proj.SetChildren(p)
 	p = proj
 
@@ -5711,6 +5791,7 @@ func (b *PlanBuilder) buildUpdateLists(ctx context.Context, tableList []*ast.Tab
 		cacheColumnsIdx = true
 		columnsIdx = make(map[*ast.ColumnName]int, len(list))
 	}
+	sessionVars := b.ctx.GetSessionVars()
 	for _, assign := range list {
 		idx, err := expression.FindFieldName(p.OutputNames(), assign.Column)
 		if err != nil {
@@ -5729,6 +5810,9 @@ func (b *PlanBuilder) buildUpdateLists(ctx context.Context, tableList []*ast.Tab
 			if (tl.Schema.L == "" || tl.Schema.L == name.DBName.L) && (tl.Name.L == name.TblName.L) {
 				if isCTE(tlW) || tlW.TableInfo.IsView() || tlW.TableInfo.IsSequence() {
 					return nil, nil, false, plannererrors.ErrNonUpdatableTable.GenWithStackByArgs(name.TblName.O, "UPDATE")
+				}
+				if err := CheckMViewUpdatable(sessionVars, tlW.TableInfo, name.TblName.O, "UPDATE"); err != nil {
+					return nil, nil, false, err
 				}
 				foundListItem = true
 			}
@@ -6023,6 +6107,9 @@ func (b *PlanBuilder) buildDelete(ctx context.Context, ds *ast.DeleteStmt) (base
 				DBInfo:    tnW.DBInfo,
 			})
 			tableInfo := tnW.TableInfo
+			if err := CheckMViewUpdatable(sessionVars, tableInfo, tn.Name.O, "DELETE"); err != nil {
+				return nil, err
+			}
 			if tableInfo.IsView() {
 				return nil, errors.Errorf("delete view %s is not supported now", tn.Name.O)
 			}
@@ -6048,6 +6135,9 @@ func (b *PlanBuilder) buildDelete(ctx context.Context, ds *ast.DeleteStmt) (base
 			}
 			if tblW.TableInfo.IsSequence() {
 				return nil, errors.Errorf("delete sequence %s is not supported now", v.Name.O)
+			}
+			if err := CheckMViewUpdatable(sessionVars, tblW.TableInfo, v.Name.O, "DELETE"); err != nil {
+				return nil, err
 			}
 			dbName := v.Schema.L
 			if dbName == "" {
