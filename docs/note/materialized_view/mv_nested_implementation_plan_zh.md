@@ -25,6 +25,10 @@ metadata 字段仍名为 `BaseTableIDs` / `BaseTableID`，实现中不再把该�
 尤其是不提供自动 refresh 调度、级联 refresh、optimizer rewrite，以及 COMPLETE OUT OF PLACE
 的依赖 metadata / MLog 迁移。
 
+本计划的 PR-1 至 PR-4 是 OOP 扩展的前置依赖。后续 OOP 的独立四 PR 拆分、合入顺序
+及实现进度记录在[日志连续性与 OOP 设计](mv_log_continuity_oop_design_zh.md)第 12.4 节，
+与本文的基础能力拆分分开维护。
+
 ## 1. 目标与完成定义
 
 交付最小端到端闭环：

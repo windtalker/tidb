@@ -1,8 +1,8 @@
 # 物化视图日志连续性与 OOP 刷新设计
 
-**状态：设计确定，待实现**
+**状态：设计确定，分 PR 实现中**
 **日期：2026-10-13**
-**更新日期：2026-10-19**
+**更新日期：2026-10-21**
 **适用分支：`nested_mv`**
 
 本设计支持已有自身 MLog 或下游 MV 的物化视图执行 `COMPLETE OUT OF PLACE`。
@@ -115,7 +115,8 @@ source 指普通物理表或 ready MV。边 `S -> M` 表示 M 的定义直接读
 6. COMPLETE 根据实际计算快照建立消费基线；所有 COMPLETE 都检查 source 物理身份，
    包括未来明确只做 COMPLETE 的 MV。
 7. parent OOP 保留下游已确认的日志 ID 和成功水位。下游成功 COMPLETE 后才更新其基线。
-8. 每个新建 MV 在注册结构依赖时登记输入日志。升级遗留 MV 按第 11 节初始化。
+8. 每个新建 MV 在 initial build 成功后，与成功水位、`InitBuildReady` 一起登记输入日志。
+   升级遗留 MV 按第 11 节初始化。
    整组基线替换原子提交，旧输出 MLog 的回收保留下游持有的旧身份记录。
 9. 目标维护排他权保证同一 MV 写入串行。consumer 按实际快照校验上游身份；
    对象引用与运行记录仍受正常 DDL、schema 和事务冲突检查保护。
@@ -207,8 +208,10 @@ CREATE TABLE mysql.tidb_mview_fast_refresh_source_info (
 未来多 source 时，正 ID 与占位可以并存。占位表示日志集合不完整，具体缺少日志的
 source 仍从结构元数据解析。占位不对应真实 MLog，也不单独参与 purge 水位计算。
 
-initial build 前登记已知日志 ID，MV 级水位为 NULL；构建成功时与数据一起确认完整
-日志集合及水位。已有成功水位的 MV，其记录表示上次成功构建对应的输入身份。
+CREATE phase 1 注册结构依赖并初始化 refresh-info，成功水位为 NULL，不写入本表。
+phase 2 在 initial build 成功后，于同一个 DDL step 事务中登记完整日志集合、
+更新成功水位并设置 `InitBuildReady`。building 期间的日志保护由结构依赖和 DDL job 提供。
+已有成功水位的 MV，其记录表示上次成功构建对应的输入身份。
 补建日志后，由成功 COMPLETE 更新整组记录并清除占位。
 
 source OOP 时，下游的旧日志记录和统一水位保持不变。consumer 自己 OOP 时，
@@ -537,10 +540,16 @@ build 确认的输入身份以及恢复所需的期望值。
 [infoschema/builder.go](../../../pkg/infoschema/builder.go)的 apply 路径覆盖全部 affected objects。
 [delete_range.go](../../../pkg/ddl/delete_range.go)将旧输出 MLog 纳入原有 OOP 回收对象集合。
 
-运行记录写入沿用 [table.go](../../../pkg/ddl/table.go)中
-`migrateMViewRefreshInfoForOutOfPlaceCutover` 的原则：通过 table API 写入同一个
-DDL 事务，保证任何迁移失败都回滚全部状态。联合主键的 handle 按新表实际 schema
-构造。新 MLog 的创建和 purge-info 初始化也遵守同一原子性要求。
+`tidb_mview_fast_refresh_source_info` 的读取、插入、删除和迁移均使用 SQL。
+OOP 的 refresh-info 迁移也使用 SQL，与 source-info 及结构元数据写入同一个
+DDL session 的 cutover 事务。执行 SQL 前设置 `mustRollbackTxnOnError`。
+新 MLog 元数据的创建和 purge-info 初始化也属于同一个 cutover 事务。
+
+内部 SQL 的 `StmtCommit` 可能把修改移入事务缓冲区，后续 `w.sess.Reset()`
+只执行 statement rollback，不能清除这些修改。迁移失败或 job 进入 Cancelled 状态时，
+worker 必须回滚当前 DDL step 的整个事务；即使取消路径未返回 `runJobErr`，也要执行回滚。
+随后开启新事务，重新检查 job 是否被并发修改，再保存内存中的错误或取消状态。
+这不会撤销此前 step 已提交的修改；shadow 仍由既有 OOP 清理流程显式删除。
 
 ## 9 日志保留与 Purge
 
@@ -573,9 +582,10 @@ COMPLETE 成功后才原子更新基线和水位。
 
 ### 9.2 Initial build 与 COMPLETE 保护
 
-initial build 在选择数据快照之前注册输入日志与结构依赖，
-并沿用 building DDL job 的日志保护。整体成功水位尚为 NULL 时按 0 保护。
-构建成功后一起提交结果、完整日志集合与统一水位。
+initial build 在选择数据快照之前注册结构依赖，并沿用 building DDL job 的日志保护。
+整体成功水位尚为 NULL 时按 0 保护，不依赖 source-info 已存在。
+构建成功后，在 CREATE phase 2 同一事务中提交完整日志集合、统一成功水位和
+`InitBuildReady`，再交接为普通 consumer 的水位保护。
 
 COMPLETE 从有效或失效状态恢复时，旧的持久化成功水位始终保护构建期间的当前日志。
 刷新失败保留原保护，成功提交后再采用新水位。基线替换的中间状态不对 purge 可见。
@@ -603,11 +613,17 @@ consumer 的历史 schema 校验不获取上游 purge-info 行锁。
 
 ### 10.1 CREATE 与 initial build
 
-每个新建 MV 在注册结构依赖的同一个 DDL 事务中，按当前完整输入日志集合登记记录。
-任一 source 缺少 MLog 时，额外登记一个 0 占位。该登记与 source、MLog 的正反向
-依赖一起生效，所有新建 nested MV 都满足这一要求。
+CREATE 的登记分为两个阶段：
 
-initial build 校验实际 source 身份，成功时原子提交完整基线与统一水位。
+1. phase 1 注册 source、MLog 的正反向结构依赖，沿用现有 refresh-info 初始化流程，
+   成功水位为 NULL；此时不写 source-info。
+2. phase 2 完成 initial build 并校验实际 source 身份后，按 build 确认的完整输入日志
+   集合登记 source-info。任一 source 缺少 MLog 时，额外登记一个 0 占位。
+   完整集合、成功水位和 `InitBuildReady` 在同一个 DDL step 事务中提交。
+
+phase 2 对 source-info 使用 SQL，执行前设置 `mustRollbackTxnOnError`，
+确保后续错误能撤销 SQL 已移入事务缓冲区的修改。初始数据构建沿用现有 build
+事务与失败清理流程，不把物理数据构建合并进这个 DDL 事务。
 source 在 build 期间 OOP 时，按实际计算快照检查；计划仍绑定旧物理对象而读取 TS
 已越过切回时点，就回滚重试。读取快照之后的切换按第 7 节处理。
 
@@ -711,8 +727,9 @@ bootstrap 和 upgrade 通过现有可重入建表流程创建
 
 ### 11.3 新建 nested MV 的登记
 
-新版本创建 MV 时，在结构依赖注册事务中直接登记全部日志记录。
-因此发布前没有尚待回填的历史 nested MV，发布后每个新建 child 都已登记。
+新版本创建 MV 时，按第 10.1 节在 phase 2 成功提交完整日志集合、成功水位和
+`InitBuildReady`。因此发布前没有尚待回填的历史 nested MV，发布后每个完成创建的
+ready child 都已登记；building child 继续由结构依赖与 DDL job 提供保护。
 
 parent OOP 保留下游基线即可，切回事务只迁移结构依赖和目标自身运行记录。
 nested MV 缺失整组登记属于元数据一致性错误，不能根据切回后的当前日志 ID
@@ -735,7 +752,7 @@ bootstrap 完成只表示系统表 schema 就绪，不能证明执行中的维�
 | 刷新数据事务 | executor refresh、成功状态持久化 | 保存最终读取 TS，数据、输出日志、输入基线和水位原子提交 |
 | OOP 配套日志 | job args、cutover、schema diff、InfoSchema | 新日志创建、旧新身份原子发布、依赖迁移及崩溃恢复 |
 | 物理回收 | delete-range、purge、旧任务收尾 | 旧日志安全 GC，下游旧身份继续保留 |
-| 生命周期与升级 | CREATE、DROP、rollback、前置初始化 | 新建即登记，旧普通表 MV 按需初始化，building 日志保护持续有效 |
+| 生命周期与升级 | CREATE、DROP、rollback、前置初始化 | CREATE phase 2 成功时登记，旧普通表 MV 按需初始化，building 日志保护持续有效 |
 
 实际接口和 mutation 应符合现有事务边界，尤其检查最终读取 TS 的捕获、
 历史 schema 解析、联合主键操作和 cutover staging 原子性。
@@ -787,6 +804,84 @@ bootstrap 完成只表示系统表 schema 就绪，不能证明执行中的维�
 
 并发测试在实际 TS 确定、数据构建、历史绑定校验和 cutover mutation 之间设置确定性暂停点。
 断言同时包含结果行集、日志集合、水位、物理对象与结构引用。
+
+### 12.4 OOP 开发 PR 拆分
+
+本轮 OOP 扩展分为四个 PR，全部以 nested MV 基础功能的 `nested-mv-pr4` 为前置依赖。
+实际起步分支为 `nested-mv-pr4-fast-refresh`，基线提交为 `1c3cb1ac87b5`。
+这四个 PR 与[原 nested MV 实施计划](mv_nested_implementation_plan_zh.md)中的
+PR-1 至 PR-4 分开编号，本文以下使用 OOP PR-1 至 OOP PR-4。
+
+开发和合入顺序为：
+
+```text
+nested-mv-pr4 -> OOP PR-1 -> OOP PR-2 -> OOP PR-3 -> OOP PR-4
+```
+
+首个 PR 从上述基线拉分支，后续 PR 以前一 PR 的最终代码为基础，
+按此顺序合入 `feature/release-8.5-materialized-view`。
+拆分按实现依赖和审阅边界组织，中间状态不单独发布。各 PR 保持可编译并有针对性测试；
+只有身份校验、日志保护和 cutover 迁移全部具备后，才放开带自身 MLog 或 child 的 MV OOP。
+运行记录和接口按完整日志集合设计，不把当前单 source SQL 限制固化为单条记录的协议。
+
+#### OOP PR-1：消费基线系统表与生命周期
+
+- bootstrap / upgrade 只创建两列系统表，不扫描回填历史 MV；BR 将其作为集群本地运行记录处理。
+- source-info 的读、写、删除和迁移统一走 SQL；提供整组日志集合操作。
+- CREATE 在 phase 2 与成功水位、`InitBuildReady` 一起登记；DROP MV / DATABASE、
+  CREATE rollback / cancel 原子清理记录。
+- 历史普通表 source 的 MV 在刷新维护锁及刷新主体之前 lazy 初始化；已有集合保持不变，
+  不推进成功水位。覆盖并发初始化、目标 OOP / DROP 冲突，避免退役目标记录复活。
+- 现有叶子 MV OOP 迁移目标自身记录的 `MVIEW_ID`，保留其输入 MLog ID 集合；
+  refresh-info 迁移也走 SQL。cutover 错误或取消回滚整笔 step 事务，再用新事务保存 job 状态。
+- 保留已有自身 MLog 或 child 时拒绝 OOP 的 executor / worker guard。
+
+验收重点为建表与升级、phase 2 提交可见性、生命周期清理、lazy 初始化竞争，
+以及切回失败或取消时 schema、refresh-info 和 source-info 一起回滚。
+本 PR 不引入输出 MLog 替换，也不承担实际读取 TS 的身份校验。
+
+OOP PR-1 的代码已在 `mv-oop-pr1-source-info` 分支完成并推送到 `xufei`，提交为
+[`3f4039a055`](https://github.com/windtalker/tidb/commit/3f4039a055bf6e101390772ef795aa898c18ee02)。
+这是独立开发分支的实现记录，尚未合入 `nested_mv` 或目标 feature 分支。
+
+#### OOP PR-2：实际读取快照的身份校验与 COMPLETE 基线恢复
+
+- 保存最终成功执行尝试的实际计算 TS 和计划使用的 source / MLog ID，
+  按 `schema@U` 校验完整 source 集合、日志绑定和 owner 反向关系。
+- FAST 同时核对已确认日志集合；保留现有 `for_update_ts`、purge 完整性和 bounded FAST 语义。
+- COMPLETE DELTA APPLY、允许的 IN PLACE 及 OOP build 按各自实际计算快照确认输入身份；
+  普通 COMPLETE 在数据事务中原子替换完整日志基线与水位。
+- OOP build 将已确认的输入身份和日志集合交给 cutover 校验；当前叶子 OOP 的记录迁移
+  升级为按实际 build 快照发布基线。
+- 身份校验不对上游 MLog info 行加锁；失败回滚目标数据及自身 MLog，重试只使用最终尝试。
+
+验收覆盖编译到 `U` 之间的物理对象切换、读取 TS 前后的切回、悲观语句重试、
+MIN/MAX、no-op、bounded FAST，以及 COMPLETE 原子恢复日志集合和成功水位。
+本 PR 继续保留 parent OOP guard。
+
+#### OOP PR-3：Purge 的日志身份与旧对象退役
+
+- 当前 MLog 的 consumer 集合从结构依赖枚举，按需保留 FAST 能力的 consumer 的统一水位保护日志；
+  日志基线失效、尚未 lazy 初始化或 initial build 未完成均不取消其必要保护。
+- purge run 绑定实际 MLog ID；旧任务不能按名称转向新日志，也不能重新创建退役日志的运行记录。
+- 定义旧日志运行记录清理、purge history 和 delete-range / GC 的交接，
+  保留 consumer 持有的旧日志基线键。
+- 保持现有按 TSO 删除日志、`LAST_PURGED_TSO` 及 hazardous purge history 的协议。
+
+验收重点为切回后新日志的保留边界、building / 失效 consumer 的保护、
+旧 purge 收尾与退役的竞争；可用受控身份替换夹具验证，暂不放开 parent OOP。
+
+#### OOP PR-4：新输出 MLog 与完整原子切回
+
+- 将旧新输出 MLog ID 和恢复所需期望值纳入持久化 job 参数，重试复用已分配身份。
+- 创建配套新 MLog、初始化 purge-info，在同一个 cutover 事务中完成第 8 节的全部迁移。
+- 覆盖上下游 TableInfo、schema diff、InfoSchema apply、实际 DDL 写集合及目标维护排他权的交接。
+- 将旧 MV / MLog 交给 delete-range / GC，覆盖 cutover 失败、取消及提交前后的恢复。
+- 在上述协议齐备后放开有自身 MLog 或 child 的 MV OOP；带自身 MLog 的 IN PLACE 限制保留。
+
+最终验收为 parent OOP 后 child FAST 明确要求 COMPLETE，child COMPLETE 后恢复 FAST，
+并覆盖多个 child 独立恢复、中间层 MV、连续 OOP、新旧日志 I/U/D、切回与下游刷新并发。
+多 source 的机制层验收按第 12.3 节执行，不扩展本期 SQL 支持范围。
 
 ## 13 后续扩展与实现约束
 
