@@ -1,0 +1,49 @@
+use test;
+set tidb_mview_enable = on;
+set time_zone = '+00:00';
+insert into mysql.tidb(variable_name, variable_value, comment)
+values ('tikv_gc_safe_point', '20060102-15:04:05 +0000', '')
+on duplicate key update variable_value = values(variable_value);
+create table t_compare (a int, b int not null);
+insert into t_compare values (null, 10), (1, 20), (1, 30);
+create materialized view log on t_compare (a, b);
+create materialized view mv_compare (_Differ_type_, s, cnt)
+as select a, sum(b), count(*) from t_compare group by a;
+compare materialized view mv_compare as of timestamp now(6);
+compare result
+There are no differences result in 0 rows compared to source base tables at timestamp '<timestamp>' (TSO: <tso>)
+compare materialized view mv_compare as of timestamp now(6) output into table mv_compare_output;
+select count(*) from mv_compare_output;
+count(*)
+0
+select column_name from information_schema.columns
+where table_schema = 'test' and table_name = 'mv_compare_output'
+order by ordinal_position;
+column_name
+_Differ_type_
+s
+cnt
+_Differ_type_1
+show index from mv_compare_output;
+Table	Non_unique	Key_name	Seq_in_index	Column_name	Collation	Cardinality	Sub_part	Packed	Null	Index_type	Comment	Index_comment	Visible	Expression	Clustered	Global
+insert into t_compare values (1, 40), (2, 50);
+compare materialized view mv_compare as of timestamp now(6);
+compare result
+There are no differences result in 0 rows compared to source base tables at timestamp '<timestamp>' (TSO: <tso>)
+refresh materialized view mv_compare fast;
+compare materialized view mv_compare as of timestamp now(6);
+compare result
+There are no differences result in 0 rows compared to source base tables at timestamp '<timestamp>' (TSO: <tso>)
+refresh materialized view mv_compare complete out of place;
+compare materialized view mv_compare as of timestamp now(6);
+compare result
+There are no differences result in 0 rows compared to source base tables at timestamp '<timestamp>' (TSO: <tso>)
+compare materialized view mv_compare as of timestamp now(6) output into table mv_compare_output;
+Error 1050 (42S01): Table 'test.mv_compare_output' already exists
+compare materialized view t_compare as of timestamp now(6);
+Error 1347 (HY000): 'test.t_compare' is not MATERIALIZED VIEW
+drop table mv_compare_output;
+drop materialized view mv_compare;
+drop materialized view log on t_compare;
+drop table t_compare;
+set tidb_mview_enable = off;
