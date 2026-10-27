@@ -2,7 +2,7 @@
 
 **状态：设计确定，分 PR 实现中**
 **日期：2026-10-13**
-**更新日期：2026-10-24**
+**更新日期：2026-10-25**
 **适用分支：`nested_mv`**
 
 本设计支持已有自身 MLog 或下游 MV 的物化视图执行 `COMPLETE OUT OF PLACE`。
@@ -791,22 +791,27 @@ bootstrap 完成只表示系统表 schema 就绪，不能证明所有执行节�
 
 ### 12.4 OOP 开发 PR 拆分
 
-本轮 OOP 扩展分为四个 PR，全部以 nested MV 基础功能的 `nested-mv-pr4` 为前置依赖。
+本轮 OOP 扩展分为三个 PR，全部以 nested MV 基础功能的 `nested-mv-pr4` 为前置依赖。
 实际起步分支为 `nested-mv-pr4-fast-refresh`，基线提交为 `1c3cb1ac87b5`。
-这四个 PR 与[原 nested MV 实施计划](mv_nested_implementation_plan_zh.md)中的
-PR-1 至 PR-4 分开编号，本文以下使用 OOP PR-1 至 OOP PR-4。
+这三个 PR 与[原 nested MV 实施计划](mv_nested_implementation_plan_zh.md)中的
+PR-1 至 PR-4 分开编号，本文以下使用 OOP PR-1 至 OOP PR-3。
 
 开发和合入顺序为：
 
 ```text
-nested-mv-pr4 -> OOP PR-1 -> OOP PR-2 -> OOP PR-3 -> OOP PR-4
+nested-mv-pr4 -> OOP PR-1 -> OOP PR-2 -> OOP PR-3
 ```
 
 首个 PR 从上述基线拉分支，后续 PR 以前一 PR 的最终代码为基础，
 按此顺序合入 `feature/release-8.5-materialized-view`。
 拆分按实现依赖和审阅边界组织，中间状态不单独发布。各 PR 保持可编译并有针对性测试；
-只有身份校验、日志保护和 cutover 迁移全部具备后，才放开带自身 MLog 或 child 的 MV OOP。
+复用现有日志保留机制，在身份校验和 cutover 生命周期协调齐备后，
+才放开带自身 MLog 或 child 的 MV OOP。
 运行记录和接口按完整日志集合设计，不把当前单 source SQL 限制固化为单条记录的协议。
+
+Purge 对普通表和 MV source 使用统一的直接 consumer 枚举、水位保护及运行记录锁协议，
+无需为 nested MV 单独新增正确性机制，也不再拆出独立的 purge PR。
+日志替换涉及的新旧 purge-info、在途任务和 GC 协调统一由 OOP PR-3 实现并验证。
 
 #### OOP PR-1：消费基线系统表与生命周期
 
@@ -842,28 +847,21 @@ OOP PR-1 的实现位于 `mv-oop-pr1-source-info` 独立开发分支，
 MIN/MAX、no-op、bounded FAST，以及 COMPLETE 原子恢复日志集合和成功水位。
 本 PR 继续保留 parent OOP guard。
 
-#### OOP PR-3：Purge 的日志身份与旧对象退役
-
-- 当前 MLog 的 consumer 集合从结构依赖枚举，按需保留 FAST 能力的 consumer 的统一水位保护日志；
-  日志基线失效、运行记录损坏或 initial build 未完成均不取消其必要保护。
-- purge run 绑定实际 MLog ID；旧任务不能按名称转向新日志，也不能重新创建退役日志的运行记录。
-- 定义旧日志运行记录清理、purge history 和 delete-range / GC 的交接，
-  保留 consumer 持有的旧日志基线键。
-- 保持现有按 TSO 删除日志、`LAST_PURGED_TSO` 及 hazardous purge history 的协议。
-
-验收重点为切回后新日志的保留边界、building / 失效 consumer 的保护、
-旧 purge 收尾与退役的竞争；可用受控身份替换夹具验证，暂不放开 parent OOP。
-
-#### OOP PR-4：新输出 MLog 与完整原子切回
+#### OOP PR-3：新输出 MLog 与完整原子切回
 
 - 将旧新输出 MLog ID 和恢复所需期望值纳入持久化 job 参数，重试复用已分配身份。
 - 创建配套新 MLog、初始化 purge-info，在同一个 cutover 事务中完成第 8 节的全部迁移。
 - 覆盖上下游 TableInfo、schema diff、InfoSchema apply、实际 DDL 写集合及目标维护排他权的交接。
-- 将旧 MV / MLog 交给 delete-range / GC，覆盖 cutover 失败、取消及提交前后的恢复。
+- 通过既有 purge-info 行锁及事务冲突机制协调切回与旧 purge，原子清理旧日志运行记录；
+  旧任务不能操作同名新日志或重新创建退役对象的运行记录。
+- 将旧 MV / MLog 交给 delete-range / GC，保留下游持有的旧日志基线，
+  覆盖 cutover 失败、取消及提交前后的恢复。
 - 在上述协议齐备后放开有自身 MLog 或 child 的 MV OOP；带自身 MLog 的 IN PLACE 限制保留。
 
 最终验收为 parent OOP 后 child FAST 明确要求 COMPLETE，child COMPLETE 后恢复 FAST，
 并覆盖多个 child 独立恢复、中间层 MV、连续 OOP、新旧日志 I/U/D、切回与下游刷新并发。
+日志生命周期验收覆盖旧 purge 与切回并发、旧任务收尾及 GC，并验证新日志仍受尚未
+COMPLETE 的 consumer 水位保护；复用现有按 TSO 删除及 hazardous purge history 检查协议。
 多 source 的机制层验收按第 12.3 节执行，不扩展本期 SQL 支持范围。
 
 ## 13 后续扩展与实现约束
