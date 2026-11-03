@@ -10,7 +10,7 @@
 
 ## Introduction
 
-允许包含物化视图（MV）和物化视图日志（MLog）的集群执行受限的 `FLASHBACK CLUSTER`。用户数据和三张 MV 维护表一起恢复到目标时间，恢复后的 MV 进入 `needs_rebuild`，禁止普通读取和 FAST。用户显式执行 COMPLETE 建立新基线后，MV 恢复为 `ready`，重新允许读取和 FAST。目标快照和开始恢复前均须处于 OUT OF PLACE（OOP）的稳定状态，允许恢复区间内存在已经完整结束的 OOP。
+允许包含物化视图（MV）和物化视图日志（MLog）的集群执行受限的 `FLASHBACK CLUSTER`。用户数据和三张 MV 维护表一起恢复到目标时间，恢复后的 MV 进入 `needs_rebuild`，允许普通读取，禁止 FAST。用户显式执行 COMPLETE 建立新基线后，MV 恢复为 `ready`，重新允许 FAST。目标快照和开始恢复前均须处于 OUT OF PLACE（OOP）的稳定状态，允许恢复区间内存在已经完整结束的 OOP。
 
 这一方案复用现有系统表恢复、build state 和 COMPLETE 主体，减少维护行重新构造和历史对象重新配对的工作。新增开发集中在恢复范围、OOP 准入、失效状态发布、后台任务隔离，以及 COMPLETE 成功后的状态发布。Purge 主逻辑原则上复用，验收其在恢复后的水位组合下能够安全推进。
 
@@ -106,23 +106,23 @@ Flashback 完成后可以显式执行新的 COMPLETE OUT OF PLACE 重建，按�
 
 对象已有 TiFlash 副本或 placement policy 本身不触发额外拒绝。OOP/TRUNCATE 继承配置并切换物理 ID 沿用上述资源保留机制；若区间内另有副本配置、后台副本状态更新或上表中的其他 DDL，仍按通用检查拒绝。因此，跨已完成 OOP 的允许范围不意味着放开这些 DDL。
 
-新增恢复协议要求所有参与的 TiDB 节点均支持该流程，混部期间不启用。恢复后的使用限制是普通当前读、手动/自动 FAST 均等待对应 MV 的显式 COMPLETE 成功及 ready 发布；原有 deferred/building、各 COMPLETE 模式适用条件和嵌套依赖规则保持有效。
+新增恢复协议要求所有参与的 TiDB 节点均支持该流程，混部期间不启用。Flashback 完成后，needs_rebuild 允许普通当前读；手动/自动 FAST 等待对应 MV 的显式 COMPLETE 成功及 ready 发布。原有 deferred/building、各 COMPLETE 模式适用条件和嵌套依赖规则保持有效。
 
-### 复用 build state 表示失效
+### 复用 build state 表示刷新基线失效
 
 复用 `MaterializedViewInfo.InitBuildState`，在 `pkg/meta/model/table.go` 的 `MViewInitBuildState` 枚举末尾追加 `needs_rebuild`。保持原有数值、`ready = 0` 和 `init_build_state` JSON 字段兼容性，补充 `String`、`AccessErrorMessage` 及字段注释。无需新增独立的 MV 失效标记表或系统变量。
 
-Flashback 将恢复出的已构建 MV 置为 `needs_rebuild`，已经处于该状态的对象保持失效；原有 deferred/building 对象保留原来的不可用语义，不因恢复而变成 ready。重建执行期间继续保持 `needs_rebuild`，并复用现有 refresh 锁防止重复重建。
+Flashback 将恢复出的已构建 MV 置为 `needs_rebuild`，已经处于该状态的对象继续保持该状态。needs_rebuild 表示刷新基线需要重建，普通查询可以读取 MV 中已经提交的物化结果；该结果可能与当前基表不一致，查询不会自动按定义重新计算。原有 deferred/building 对象保留原来的不可读语义，不因恢复而变成 ready。重建执行期间继续保持 `needs_rebuild`，并复用现有 refresh 锁防止重复重建；读取沿用各 COMPLETE 模式已有的事务、锁和切换语义。
 
 | 入口 | needs_rebuild 下的行为 |
 | --- | --- |
-| 普通 MV 当前读 | 拒绝，提示对该对象执行 COMPLETE。 |
+| 普通 MV 当前读 | 允许，返回已提交的物化结果，可能与当前基表不一致。 |
 | 手动 FAST 和 FAST AS OF TIMESTAMP | 拒绝，不能仅凭旧水位非 NULL 就继续刷新。 |
 | 自动 FAST | 不派发该 MV，不自动转成 COMPLETE。 |
 | 显式 COMPLETE | 放行，保持各刷新模式原有的适用条件和权限检查。 |
 | SHOW、查看对象定义、DROP | 保持可用。 |
 
-`pkg/planner/core/util.go` 的 `CheckMViewReadable` 已检查非 ready 状态，应复用该入口并覆盖普通计划、PointGet、prepared statement 和计划缓存。当前快照中的失效不能被缓存的旧 ready 元数据绕过。历史快照读继续遵守既有快照语义，不能用它绕过当前对象的 FAST 失效检查。
+`pkg/planner/core/util.go` 的 `CheckMViewReadable` 需要区分读取许可和刷新许可：普通读放行 ready 与 needs_rebuild，继续拒绝原有 deferred/building。覆盖普通计划、PointGet、prepared statement 和计划缓存，避免将普通查询的放行扩大为 FAST 的放行。FAST 在执行入口检查最新状态，不能被缓存的旧 ready 元数据绕过。历史快照读继续遵守既有快照语义，不能用它绕过当前对象的 FAST 失效检查。
 
 `pkg/executor/materialized_view.go` 的 `checkRefreshMaterializedViewReady` 当前会同时阻止 FAST 和 COMPLETE，需要改为根据状态及刷新模式判断。内部 maintenance bypass 允许重建操作所需的内部读写，但不能绕过 FAST 入口，也不能将失效上游 MV 作为下游重建的可信输入。
 
@@ -158,11 +158,11 @@ flowchart TD
 
 在任何阶段失败、节点宕机或 DDL owner 切换时，都由持久化 job 继续推进。实际恢复已经发生后，不能将部分失效失败简单当作普通取消，再解除保护。数据恢复前的准入拒绝仍沿用原有取消和全局设置恢复路径。
 
-Schema 发布必须使各节点实际加载恢复后带有 needs_rebuild 的 TableInfo，并使当前读和计划缓存观察到变化。对批量元数据变化，不能假定一个没有列出相关表的普通 diff 就会更新所有缓存；实现时需要明确全量 reload 或受影响对象列表的路径。
+Schema 发布必须使各节点实际加载恢复后带有 needs_rebuild 的 TableInfo，使普通查询使用正确的恢复对象、FAST 执行入口观察到最新限制。对批量元数据变化，不能假定一个没有列出相关表的普通 diff 就会更新所有缓存；实现时需要明确全量 reload 或受影响对象列表的路径。
 
 ### 隔离内部任务并重载调度
 
-Flashback 执行期间，所有节点上的 refresh、purge、MLog analyze 及会修改相关维护状态的后台任务都必须停止接收新工作，并完成运行中任务的取消和退出。手动维护入口也需要相同的准入保护；OOP 的 IMPORT 装载工作、cutover 及清理也必须纳入排空。暂停确认以实际执行工作已经退出为准，发送取消请求或外层超时返回均不足以确认。MV 普通读取的保护需要覆盖恢复完成到失效状态同步之间的窗口，不能仅用 `super_read_only` 代替禁读。
+Flashback 执行期间，所有节点上的 refresh、purge、MLog analyze 及会修改相关维护状态的后台任务都必须停止接收新工作，并完成运行中任务的取消和退出。手动维护入口也需要相同的准入保护；OOP 的 IMPORT 装载工作、cutover 及清理也必须纳入排空。暂停确认以实际执行工作已经退出为准，发送取消请求或外层超时返回均不足以确认。普通读取在 flashback 执行期间沿用现有访问隔离，操作完成后不因 needs_rebuild 额外禁读。
 
 持久化的 flashback DDL job 可作为正在恢复的判定依据。现有 DDL 提交流程已经通过 `pkg/ddl/systable/manager.go` 的 `HasFlashbackClusterJob` 检查活动 job；节点重启或新加入时，必须先建立该状态的判断，再启动 MVService 任务。具体的节点暂停确认应接入现有 domain/schema 同步路径，保证 owner 开始恢复前，参与节点已停止相关工作；仅发送一次异步通知不构成完成隔离。
 
@@ -174,17 +174,17 @@ Flashback 完成后，重新加载三张维护表及对象目录，丢弃恢复�
 
 ### COMPLETE 提交后再发布 ready
 
-COMPLETE 使用 flashback 完成后的新计算快照 `R`，满足 `R > F`。计算快照必须来自本次重建，不能复用恢复前保存在 session 或旧任务中的值。现有 refresh 权限、锁、调度表达式和各模式的适用条件保持有效。
+COMPLETE 使用 flashback 完成后的新计算快照 `R`，满足 `R > F`。计算快照必须来自本次重建，不能复用恢复前保存在 session 或旧任务中的值。Ready 发布恢复 FAST 能力，普通读取不等待 ready。现有 refresh 权限、锁、调度表达式和各模式的适用条件保持有效。
 
 物化视图分支的非 OOP COMPLETE 已在同一事务中更新 MV 数据、refresh 成功水位及输入 source-info 登记，复用这段主体。成功提交之后，再通过 DDL 持久化状态修改和 schema 同步将目标发布为 ready。新的发布路径应校验 MV ID、revision、当前失效状态与本次已提交的计算基线，防止旧任务对变化后的对象发布 ready。
 
-如果重建事务失败，保留 needs_rebuild。若事务已经提交、ready 发布之前失败，同样保持不可用，允许重新执行 COMPLETE 或恢复已持久化的状态发布 job。状态不可用但数据已重建是安全的中间状态；数据和基线尚未提交时提前可用则不安全。
+如果重建事务失败，保留 needs_rebuild，普通读取沿用已有提交结果，FAST 继续拒绝。若事务已经提交、ready 发布之前失败，普通查询可以读取已经提交的重建结果，FAST 仍保持禁止；允许重新执行 COMPLETE 或恢复已持久化的状态发布 job。数据已重建但 FAST 尚未启用是安全的中间状态，数据和基线尚未提交时提前发布 ready 则不安全。
 
 恢复日志的 commit TSO 不大于 `F`：未重写行保留更早的时间戳，需要重写的行使用本次 `F`。新 FAST 从 `R > F` 开始，因此不会再次应用这些历史日志。重建快照之后的基表写入则仍需由后续 FAST 消费，不能通过直接清空整个 MLog 来清理旧日志。
 
 OUT OF PLACE 继续复用 shadow 装载、refresh/source-info 迁移和 cutover 事务。`onRefreshMaterializedViewCompleteOutOfPlaceCutover` 当前克隆旧 `MaterializedViewInfo`，需将成功重建的新 MV 显式置为 ready，避免继承旧 needs_rebuild。新对象的状态与基线在 cutover 中一起发布。
 
-嵌套 MV 按上游到下游的顺序重建。上游仍失效时，拒绝下游 COMPLETE，并提示先恢复上游；不能因为内部 maintenance bypass 允许读取就将下游发布为 ready。上游使用 OOP 重建后，下游必须使用切换后的依赖及 source-info。已有的 IN PLACE 对自身带 MLog 的 MV 的限制继续生效。
+嵌套 MV 按上游到下游的顺序重建。上游仍失效时，拒绝下游 COMPLETE，并提示先恢复上游；普通查询允许读取 needs_rebuild 的 MV，不代表下游重建可以把它当作可信输入，内部 maintenance bypass 也不能解除这个限制。上游使用 OOP 重建后，下游必须使用切换后的依赖及 source-info。已有的 IN PLACE 对自身带 MLog 的 MV 的限制继续生效。
 
 ### Purge 复用的水位推导
 
@@ -208,7 +208,7 @@ Purge 还会读取未恢复的 `tidb_mlog_purge_hist`：`readLatestMLogPurgeCuto
 | --- | --- | --- |
 | 三表恢复白名单 | `pkg/ddl/cluster.go` | 三张维护表的数据和索引随用户数据一起恢复。 |
 | OOP 准入 | `pkg/ddl/cluster.go`、snapshot 元数据检查 | 检查目标快照及排空后的当前状态，拒绝未收尾 OOP/shadow；通用限制允许时跨越已完成的 OOP。 |
-| 状态与入口 | `pkg/meta/model/table.go`、`pkg/planner/core/util.go`、`pkg/executor/materialized_view.go` | 扩展 build state，拒绝读/FAST，允许恢复用 COMPLETE。 |
+| 状态与入口 | `pkg/meta/model/table.go`、`pkg/planner/core/util.go`、`pkg/executor/materialized_view.go` | 扩展 build state，needs_rebuild 允许普通读、拒绝 FAST，允许恢复用 COMPLETE；保留 deferred/building 的读取限制。 |
 | 持久化失效阶段 | `pkg/ddl/cluster.go`、`pkg/meta/model/job_args.go`、schema 同步路径 | 明确恢复 RPC 与失效发布的持久化边界，支持批次、重启及 owner 切换。 |
 | Ready 发布 | `pkg/executor/materialized_view.go`、DDL job/worker、`pkg/ddl/table.go` | 非 OOP 在成功事务之后发布 ready；OOP 在 cutover 中发布，保持对象及基线校验。 |
 | 调度协调 | `pkg/mvservice/service.go`、`pkg/mvservice/service_helper.go`、domain 通知路径 | 隔离和排空旧任务、重载恢复后的任务，跳过失效 MV 的自动 FAST。 |
@@ -221,10 +221,10 @@ Purge 还会读取未恢复的 `tidb_mlog_purge_hist`：`readLatestMLogPurgeCuto
 
 | PR | 建议标题 | 开发范围与验收条件 | 依赖 | 相对工作量 |
 | --- | --- | --- | --- | --- |
-| PR1 | `meta, planner, executor: add needs-rebuild state for materialized views` | 追加 build state，保持 ready 零值和旧元数据兼容；补齐普通读、PointGet、prepared statement、计划缓存及 FAST/有界 FAST 的拒绝行为。原有 deferred/building 语义保持有效；恢复用 COMPLETE 的放行和 ready 发布由 PR6/PR7 一起交付。 | 无 | 中 |
+| PR1 | `meta, planner, executor: add needs-rebuild state for materialized views` | 追加 build state，保持 ready 零值和旧元数据兼容；普通读、PointGet、prepared statement 和计划缓存放行 needs_rebuild，FAST/有界 FAST 继续拒绝。原有 deferred/building 的读取限制保持有效；恢复用 COMPLETE 的放行和 ready 发布由 PR6/PR7 一起交付。 | 无 | 中 |
 | PR2 | `ddl: check out-of-place refresh stability before flashback` | 检查目标快照和当前目录的 OOP 中间状态及残留 shadow，覆盖装载期间没有活动 DDL job 的窗口。允许区间内已完整结束或已完成失败清理的 OOP，保留通用 TiFlash/placement DDL 限制；最终检查与任务隔离的先后顺序由 PR4 接入。 | 无 | 中 |
 | PR3 | `mvservice: support pausing and draining maintenance tasks` | 实现本节点的任务暂停、排空和恢复能力：停止新任务入队、清理待执行任务、取消或等待在途 refresh/purge/analyze 及相关维护写入；任务真实退出后才确认排空。恢复时先清理旧队列；恢复后的元数据加载策略由 PR8 接入。 | 无 | 大 |
-| PR4 | `ddl, domain, executor: coordinate materialized view tasks during flashback` | 将 PR3 接入 flashback 的全节点协调；持久化 job 判定、节点暂停确认、重启/新加入节点准入、手动维护入口及当前 MV 读取保护均覆盖。在途 OOP 的装载、IMPORT、cutover 和清理退出后，才做两端稳定性检查及 TiKV 恢复；解除保护接入 PR5 的失效发布边界。包含协议支持检查，混部时拒绝进入新流程。 | PR2、PR3 | 大 |
+| PR4 | `ddl, domain, executor: coordinate materialized view tasks during flashback` | 将 PR3 接入 flashback 的全节点协调；覆盖持久化 job 判定、节点暂停确认、重启/新加入节点准入及手动维护入口，普通读取在操作期间沿用 flashback 访问隔离。在途 OOP 的装载、IMPORT、cutover 和清理退出后，才做两端稳定性检查及 TiKV 恢复；解除保护接入 PR5 的失效发布边界，完成后 needs_rebuild 允许普通读。包含协议支持检查，混部时拒绝进入新流程。 | PR2、PR3 | 大 |
 | PR5 | `ddl: persist materialized view invalidation during flashback` | 扩展 job 参数及 V1/V2 编码，持久化“数据已恢复—失效标记—schema 发布”阶段和批次游标；标记与游标在同一 DDL 事务提交，全部节点加载失效元数据后才允许完成 job。覆盖 RPC 重试、批次中断、owner 切换及 schema 同步失败，保证失效写入后不重放恢复 RPC。 | PR1、PR4 | 大 |
 | PR6 | `executor, ddl: rebuild invalidated materialized views with complete refresh` | 放行 needs_rebuild 下适用的非 OOP COMPLETE，复用数据、水位和 source-info 的原子提交，再通过持久化元数据路径发布 ready；校验对象身份及本次已提交基线，拒绝依赖失效上游的重建。覆盖新快照 R > F、失败保留失效、提交后发布前故障、重复重建及旧任务不能解除新一轮失效；OOP 的恢复入口留到 PR7 放行。 | PR1、PR4 | 大 |
 | PR7 | `executor, ddl: support out-of-place rebuilds after flashback` | 接通 COMPLETE OUT OF PLACE 的恢复入口，在 cutover 中对新对象显式发布 ready，保持 refresh/source-info 和依赖迁移一致；复用 PR6 的上游状态检查，补齐嵌套 MV 在上游 OOP 后的新对象和日志绑定。保持各 COMPLETE 模式原有条件，验证按依赖顺序重建。 | PR6 | 中 |
@@ -263,18 +263,19 @@ Purge 主逻辑不单独安排开发 PR。PR8 保证失效 MV 仍参与依赖和
 
 ```sql
 FLASHBACK CLUSTER TO TIMESTAMP '<target_timestamp>';
+SELECT * FROM app.mv; -- 允许读取已提交的物化结果，可能与当前基表不一致
 REFRESH MATERIALIZED VIEW app.mv COMPLETE DELTA APPLY;
 SELECT * FROM app.mv;
 REFRESH MATERIALIZED VIEW app.mv FAST;
 ```
 
-Flashback 返回成功后，基表业务可以恢复。尚未重建的 MV 查询和 FAST 返回明确错误；每个 MV 的 COMPLETE 成功并完成 ready 发布后恢复可读，后续 FAST 从新水位继续。嵌套 MV 先处理上游。用户也可以 DROP 不再需要的 MV，解除其对日志保留水位的约束。
+Flashback 返回成功后，基表业务和 needs_rebuild 下的普通 MV 读取可以恢复，查询返回 MV 中已提交的物化结果，可能与当前基表不一致。尚未重建的 MV 的 FAST 返回明确错误；每个 MV 的 COMPLETE 成功并完成 ready 发布后，后续 FAST 从新水位继续。嵌套 MV 先处理上游。用户也可以 DROP 不再需要的 MV，解除其对日志保留水位的约束。
 
 ## Test Design
 
 ### Functional Tests
 
-为三张表的恢复例外、OOP 两端稳定性和通用准入增加针对性用例。覆盖两端 shadow 拒绝、装载期间没有活动 DDL job、区间内已完成 OOP 不额外拒绝，以及 TiFlash 配置/自动状态更新和 placement DDL 继续触发原有拒绝。扩展现有 build state 与读/refresh 入口测试，覆盖 ready、needs_rebuild 和原有 deferred/building，特别是 COMPLETE 不再被统一的 ready 检查拒绝。
+为三张表的恢复例外、OOP 两端稳定性和通用准入增加针对性用例。覆盖两端 shadow 拒绝、装载期间没有活动 DDL job、区间内已完成 OOP 不额外拒绝，以及 TiFlash 配置/自动状态更新和 placement DDL 继续触发原有拒绝。扩展现有 build state 与读/refresh 入口测试，覆盖 ready、needs_rebuild 和原有 deferred/building：needs_rebuild 普通读允许、FAST 拒绝，deferred/building 的读取继续拒绝，恢复用 COMPLETE 不再被统一的 ready 检查拒绝。
 
 验证三种 COMPLETE 模式的状态迁移，保持原有适用条件。检查 ready 枚举仍为 0、新状态序列化往返正确、旧元数据缺省字段仍表示 ready。非 OOP 的 ready 发布必须晚于数据/水位/source-info 事务提交；OOP 的新 MV 不能继承旧 needs_rebuild。
 
@@ -282,6 +283,7 @@ Flashback 返回成功后，基表业务可以恢复。尚未重建的 MV 查询
 
 | 场景 | 预期 |
 | --- | --- |
+| Flashback 完成，MV 处于 needs_rebuild | 普通查询、PointGet、prepared statement 和缓存计划允许读取已提交的物化结果；FAST 拒绝，自动 FAST 跳过。 |
 | 已消费日志在目标之后被 purge，再实际 flashback | 重建前 FAST 被拒绝；COMPLETE 后 FAST 不重复应用旧日志，MV 与定义查询一致。 |
 | 区间内 CREATE/DROP MV/MLog | 对象、三张表的维护行及 source-info 索引一致回退。 |
 | 区间内一次、多次完整结束或已经完成失败清理的 OOP | 两端稳定且满足通用限制时允许恢复；MV/MLog ID、依赖及三表回退一致，COMPLETE 后可以接续 FAST。 |
@@ -291,7 +293,7 @@ Flashback 返回成功后，基表业务可以恢复。尚未重建的 MV 查询
 | 恢复 RPC 完成但阶段尚未提交时宕机 | 安全重试恢复；尚未开始失效写入。 |
 | 部分 MV 已失效、owner 切换 | 从持久化阶段和游标继续，不重放恢复覆盖失效状态，不提前开放访问。 |
 | COMPLETE 提交前失败或取消 | 保持 needs_rebuild，无部分成功可见。 |
-| COMPLETE 已提交、ready 尚未发布时失败 | 保持不可用，重试后正确发布；旧任务无法解除新一轮失效。 |
+| COMPLETE 已提交、ready 尚未发布时失败 | 普通读可见已提交的重建结果，FAST 仍被禁止，重试后正确发布；旧任务无法解除新一轮失效。 |
 | 重建时基表继续写入 | 新基线后的增量保留，接续 FAST 后结果正确。 |
 | 多 MV 共享 MLog，仅部分完成重建 | 保守保留日志；全部重建或删除相关依赖后继续 purge。 |
 | 嵌套 MV，上游未重建或使用 OOP 重建 | 拒绝过早的下游重建；按依赖顺序恢复后结果与 source-info 正确。 |
@@ -302,7 +304,7 @@ Flashback 返回成功后，基表业务可以恢复。尚未重建的 MV 查询
 
 ### Compatibility Tests
 
-覆盖普通查询、PointGet、prepared statement、计划缓存和内部 SQL，确保状态同步后不能使用旧 ready 元数据。保持权限检查、各 COMPLETE 模式既有条件，以及 TiFlash/placement、GC 和升级检查原有的行为，不因 MV 维护表白名单而放宽它们。
+覆盖普通查询、PointGet、prepared statement、计划缓存和内部 SQL，确保 needs_rebuild 的普通读取放行，FAST 不能通过旧 ready 元数据绕过限制，deferred/building 继续不可读。保持权限检查、各 COMPLETE 模式既有条件，以及 TiFlash/placement、GC 和升级检查原有的行为，不因 MV 维护表白名单而放宽它们。
 
 新增 flashback 子阶段涉及 job 参数编码和恢复，测试 V1/V2 参数的兼容解码与默认值。新增流程仅在所有参与节点支持该协议时运行；滚动升级混部期间不启用。存在活动恢复 job 或尚未处理的 needs_rebuild 时，不能将降级当作解除状态保护的办法。
 
@@ -314,7 +316,7 @@ Flashback 返回成功后，基表业务可以恢复。尚未重建的 MV 查询
 
 ### Impacts
 
-用户可以先恢复基表业务，再安排 MV 的 COMPLETE。未重建 MV 明确不可读、不可 FAST；这比继续提供历史 MV 数据更严格，但避免把不可继续维护的结果误当作已恢复。系统表恢复沿用现有机制，无需修改表 schema 或增加一套维护行重建框架。
+用户可以先恢复基表业务并读取恢复出的 MV 物化结果，再安排 MV 的 COMPLETE。needs_rebuild 允许普通读，结果可能与当前基表不一致；该状态继续禁止 FAST，直到 COMPLETE 建立新基线并发布 ready。系统表恢复沿用现有机制，无需修改表 schema 或增加一套维护行重建框架。
 
 恢复业务前增加 MV 失效标记和 schema 同步阶段。未重建依赖会延长 MLog 保留时间；用户通过 COMPLETE 或 DROP 解除。COMPLETE 仍可能消耗较多资源，因此仅由用户显式发起。
 
@@ -322,17 +324,17 @@ Flashback 返回成功后，基表业务可以恢复。尚未重建的 MV 查询
 
 主要正确性风险是失效发布过晚、重试恢复覆盖新状态、旧维护任务跨越 flashback、COMPLETE 未提交就发布 ready，以及下游读取未恢复上游。持久化阶段、任务隔离、对象/基线校验和依赖顺序分别约束这些路径，必须通过故障注入和真实 TiKV 场景验证。
 
-保留的 purge history 与恢复后的 info 来自不同时间，安全性依赖前述水位关系；若存在违反推导前提的路径，应修复该路径，而不是直接清空整个 MLog。大规模目录标记和全量 schema reload 可能延长恢复窗口，批处理也不能放松全部失效后才开放访问的约束。
+保留的 purge history 与恢复后的 info 来自不同时间，安全性依赖前述水位关系；若存在违反推导前提的路径，应修复该路径，而不是直接清空整个 MLog。大规模目录标记和全量 schema reload 可能延长恢复窗口，批处理也不能放松全部 FAST 保护状态同步后才解除恢复期隔离的约束。允许普通读不代表 MV 已与当前基表同步，也不能据此跳过下游重建的上游状态检查。
 
 旧版本 DDL owner 不理解新增 job 阶段，混部执行可能跳过失效发布。因此协议支持检查和滚动升级边界属于交付条件；保持 ready 的零值兼容不能替代该检查。
 
 ## Investigation & Alternatives
 
-有 MV/MLog 就前置拒绝的方案实现最小，但会限制整个集群的闪回能力，无法满足先恢复基表、之后重建 MV 的需求。只将 refresh 水位置 NULL 可以阻止 FAST，但不禁止普通读，也没有恢复缺失的维护行及输入日志登记。
+有 MV/MLog 就前置拒绝的方案实现最小，但会限制整个集群的闪回能力，无法满足先恢复基表、之后重建 MV 的需求。只将 refresh 水位置 NULL 可以阻止 FAST，仍需处理缺失的维护行及输入日志登记。方案 3 通过三表恢复对齐历史对象，并以 needs_rebuild 显式记录刷新基线需要重建；普通读取保持可用。
 
 仅恢复三张维护表可以解决目录与维护行错位，却不能消除物理 commit TSO 变化造成的重复消费。本方案在此基础上增加 needs_rebuild 和 COMPLETE；两端稳定时，已完成 OOP 的 ID 切换由相同目标快照恢复，TiFlash/placement 资源沿用延迟 GC。第一版聚焦失效和重建，不接管目标快照中的未完成 OOP，也不恢复旧任务或增加旧日志的增量身份去重机制。
 
-`mysql.stats_*` 和 `mysql.gc_delete_range` 说明系统表数据参与 flashback 已有实现先例。Oracle 的物理 Flashback Database 与这里的 MVCC 恢复机制不同；本方案的禁读与重建语义由 TiDB 自身的正确性要求定义，不从其他系统的状态名称直接推导。
+`mysql.stats_*` 和 `mysql.gc_delete_range` 说明系统表数据参与 flashback 已有实现先例。Oracle 的物理 Flashback Database 与这里的 MVCC 恢复机制不同；本方案的读取许可、FAST 限制和重建语义由 TiDB 自身的恢复方案定义，不从其他系统的状态名称直接推导。
 
 ## Unresolved Questions
 
