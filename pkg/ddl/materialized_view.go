@@ -59,6 +59,11 @@ const (
 	alterMaterializedScheduleInfoUpdateLockWaitTimeoutSec = int64(10)
 )
 
+// InferMaterializedViewSchema derives SELECT output types against a private
+// candidate base-table definition. The session layer wires the planner implementation
+// without a dependency from DDL to planner/core. The caller applies the MV's definition settings.
+var InferMaterializedViewSchema func(context.Context, sessionctx.Context, infoschema.InfoSchema, *ast.SelectStmt, *model.TableInfo) ([]*types.FieldType, error)
+
 // FieldTypeForMaterializedViewLogColumn returns the field type used to copy a
 // base table column into a materialized view log table.
 func FieldTypeForMaterializedViewLogColumn(baseCol *model.ColumnInfo) types.FieldType {

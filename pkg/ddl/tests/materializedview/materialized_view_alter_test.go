@@ -30,6 +30,8 @@ import (
 	"github.com/pingcap/tidb/pkg/meta/model"
 	"github.com/pingcap/tidb/pkg/parser/ast"
 	"github.com/pingcap/tidb/pkg/parser/auth"
+	"github.com/pingcap/tidb/pkg/parser/mysql"
+	"github.com/pingcap/tidb/pkg/sessiontxn"
 	"github.com/pingcap/tidb/pkg/testkit"
 	"github.com/pingcap/tidb/pkg/testkit/testfailpoint"
 	"github.com/stretchr/testify/require"
@@ -352,10 +354,173 @@ func TestAlterTableWithMaterializedViewDependencies(t *testing.T) {
 	showCreate = tk.MustQuery("show create table mv").Rows()[0][1].(string)
 	require.Contains(t, showCreate, "`a` bigint")
 
-	err := tk.ExecToErr("alter table t modify column b bigint not null")
-	require.ErrorContains(t, err, "does not support modifying columns used in WHERE clause")
-	err = tk.ExecToErr("alter table t change column a a2 bigint")
+	tk.MustExec("alter table t modify column b bigint not null")
+	err := tk.ExecToErr("alter table t change column a a2 bigint")
 	require.ErrorContains(t, err, "does not support renaming")
 	err = tk.ExecToErr("alter table t modify column b smallint")
 	require.ErrorContains(t, err, "only supports no-reorg compatible type changes")
+}
+
+func TestMaterializedViewBaseCompatibleTypeChange(t *testing.T) {
+	store := testkit.CreateMockStore(t)
+	tk := newMViewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("create table t_schema (id int primary key, k int not null, v int not null, f int not null, index idx_k(k))")
+	tk.MustExec("create materialized view log on t_schema (k, v, f)")
+	tk.MustExec("insert into t_schema values (1, 1, 10, 1), (2, 1, 20, 0), (3, 2, 30, 1)")
+	tk.MustExec("create materialized view mv_schema_count (k, cnt_v, cnt) as select k, count(v), count(1) from t_schema where f > 0 group by k")
+	tk.MustExec("create materialized view mv_schema_minmax (k, min_v, max_v, cnt) as select k, min(v), max(v), count(1) from t_schema group by k")
+
+	tk.MustExec("set sql_mode = 'STRICT_ALL_TABLES,NO_UNSIGNED_SUBTRACTION'")
+	tk.MustExec("set time_zone = '+08:00'")
+	tk.MustExec("set div_precision_increment = 9")
+	vars := tk.Session().GetSessionVars()
+	oldSQLMode, oldTimeZone := vars.SQLMode, vars.TimeZone
+	tk.MustExec("alter table t_schema modify column v bigint not null, modify column f bigint not null")
+	require.Equal(t, oldSQLMode, vars.SQLMode)
+	require.Equal(t, oldTimeZone, vars.TimeZone)
+	require.Equal(t, 9, vars.DivPrecisionIncrement)
+	showCreate := tk.MustQuery("show create table `$mlog$t_schema`").Rows()[0][1].(string)
+	require.Contains(t, showCreate, "`v` bigint")
+	require.Contains(t, showCreate, "`f` bigint")
+	showCreate = tk.MustQuery("show create table mv_schema_minmax").Rows()[0][1].(string)
+	require.Contains(t, showCreate, "`min_v` bigint")
+	require.Contains(t, showCreate, "`max_v` bigint")
+	tk.MustQuery("select * from mv_schema_count order by k").Check(testkit.Rows("1 1 1", "2 1 1"))
+	tk.MustQuery("select * from mv_schema_minmax order by k").Check(testkit.Rows("1 10 20 2", "2 30 30 1"))
+
+	tk.MustExec("update t_schema set v = 2147483648 where id = 1")
+	tk.MustExec("update t_schema set f = 2147483648 where id = 2")
+	tk.MustExec("delete from t_schema where id = 3")
+	tk.MustExec("insert into t_schema values (4, 1, 40, 1)")
+	for _, mode := range []string{"fast", "complete in place"} {
+		tk.MustExec("refresh materialized view mv_schema_count " + mode)
+		tk.MustExec("refresh materialized view mv_schema_minmax " + mode)
+		tk.MustQuery("select * from mv_schema_count").Check(testkit.Rows("1 3 3"))
+		tk.MustQuery("select * from mv_schema_minmax").Check(testkit.Rows("1 20 2147483648 3"))
+	}
+
+	tk.MustExec("create materialized view mv_schema_sum (k, s, cnt_v, cnt) as select k, sum(v), count(v), count(1) from t_schema group by k")
+	tk.MustExec("alter table t_schema modify column v bigint")
+	tk.MustExec("insert into t_schema values (5, 2, null, 1)")
+	tk.MustExec("refresh materialized view mv_schema_count fast")
+	tk.MustExec("refresh materialized view mv_schema_minmax fast")
+	tk.MustExec("refresh materialized view mv_schema_sum fast")
+	tk.MustQuery("select * from mv_schema_count order by k").Check(testkit.Rows("1 3 3", "2 0 1"))
+	tk.MustQuery("select * from mv_schema_minmax order by k").Check(testkit.Rows("1 20 2147483648 3", "2 <nil> <nil> 1"))
+	tk.MustQuery("select * from mv_schema_sum order by k").Check(testkit.Rows("1 2147483708 3 3", "2 <nil> 0 1"))
+
+	tk.MustExec("create table t_schema_text (k int not null, v varchar(10) not null, index idx_k(k))")
+	tk.MustExec("create materialized view log on t_schema_text (k, v)")
+	tk.MustExec("insert into t_schema_text values (1, 'a'), (1, 'b')")
+	tk.MustExec("create materialized view mv_schema_text (k, min_v, cnt) as select k, min(v), count(1) from t_schema_text where v > 'a' group by k")
+	tk.MustExec("alter table t_schema_text modify column v varchar(40) not null")
+	tk.MustQuery("select * from mv_schema_text").Check(testkit.Rows("1 b 1"))
+	tk.MustExec("insert into t_schema_text values (1, 'bbbbbbbbbbbbbbbbbbbb')")
+	tk.MustExec("delete from t_schema_text where v = 'b'")
+	tk.MustExec("refresh materialized view mv_schema_text fast")
+	tk.MustQuery("select * from mv_schema_text").Check(testkit.Rows("1 bbbbbbbbbbbbbbbbbbbb 1"))
+}
+
+func TestMaterializedViewSchemaInferenceIsolation(t *testing.T) {
+	store, dom := testkit.CreateMockStoreAndDomain(t)
+	tk := newMViewTestKit(t, store)
+	other := newMViewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("create table t_schema_private (k int not null, v int not null, index idx_k(k))")
+	tk.MustExec("insert into t_schema_private values (1, 10)")
+	tk.MustExec("begin pessimistic")
+	defer tk.MustExec("rollback")
+	tk.MustQuery("select * from t_schema_private").Check(testkit.Rows("1 10"))
+	ctx := context.Background()
+	is := sessiontxn.GetTxnManager(tk.Session()).GetTxnInfoSchema()
+	base, err := is.TableByName(ctx, ast.NewCIStr("test"), ast.NewCIStr("t_schema_private"))
+	require.NoError(t, err)
+	candidate := base.Meta().Clone()
+	candidate.Columns[1].FieldType.SetType(mysql.TypeLonglong)
+	candidate.Columns[1].FieldType.SetFlen(20)
+
+	stmt, err := tk.Session().GetRestrictedSQLExecutor().ParseWithParams(ctx,
+		"select k, min(v), count(v), count(1) from test.t_schema_private group by k")
+	require.NoError(t, err)
+	fieldTypes, err := ddl.InferMaterializedViewSchema(ctx, tk.Session(), is, stmt.(*ast.SelectStmt), candidate)
+	require.NoError(t, err)
+	require.Len(t, fieldTypes, 4)
+	require.Equal(t, mysql.TypeLong, fieldTypes[0].GetType())
+	for _, ft := range fieldTypes[1:] {
+		require.Equal(t, mysql.TypeLonglong, ft.GetType())
+	}
+	// Inference must not change even the caller's transaction overlay, nor
+	// publish candidate metadata to the domain or another session.
+	require.Equal(t, mysql.TypeLong, base.Meta().Columns[1].GetType())
+	current, err := is.TableByName(ctx, ast.NewCIStr("test"), ast.NewCIStr("t_schema_private"))
+	require.NoError(t, err)
+	require.Equal(t, mysql.TypeLong, current.Meta().Columns[1].GetType())
+	current, err = dom.InfoSchema().TableByName(ctx, ast.NewCIStr("test"), ast.NewCIStr("t_schema_private"))
+	require.NoError(t, err)
+	require.Equal(t, mysql.TypeLong, current.Meta().Columns[1].GetType())
+	other.MustQuery("select data_type from information_schema.columns where table_schema = 'test' and table_name = 't_schema_private' and column_name = 'v'").Check(testkit.Rows("int"))
+	other.MustQuery("select * from test.t_schema_private").Check(testkit.Rows("1 10"))
+}
+
+func TestMaterializedViewBaseTypeChangeRejected(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		column     string
+		columns    string
+		selectSQL  string
+		alter      string
+		extraIndex bool
+		wantErr    string
+	}{
+		{
+			name: "sum_precision", column: "int not null", columns: "k, s, cnt",
+			selectSQL: "select k, sum(v), count(1) from t_reject group by k",
+			alter:     "v bigint not null", wantErr: "materialized view result columns",
+		},
+		{
+			name: "nullable_sum", column: "int not null", columns: "k, s, cnt",
+			selectSQL: "select k, sum(v), count(1) from t_reject group by k",
+			alter:     "v int", wantErr: "requires matching COUNT(v)",
+		},
+		{
+			name: "predicate_collation", column: "varchar(10) character set utf8mb4 collate utf8mb4_general_ci", columns: "k, cnt",
+			selectSQL: "select k, count(1) from t_reject where v = 'a' group by k",
+			alter:     "v varchar(10) character set utf8mb4 collate utf8mb4_bin", wantErr: "charset/collation of referenced columns",
+		},
+		{
+			name: "mv_index_length", column: "varchar(100) character set utf8mb4 collate utf8mb4_bin", columns: "k, min_v, cnt",
+			selectSQL: "select k, min(v), count(1) from t_reject group by k",
+			alter:     "v varchar(1000) character set utf8mb4 collate utf8mb4_bin", extraIndex: true, wantErr: "Specified key was too long",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := testkit.CreateMockStore(t)
+			tk := newMViewTestKit(t, store)
+			tk.MustExec("use test")
+			tk.MustExec("create table t_reject (k int not null, v " + tc.column + ", index idx_k(k))")
+			tk.MustExec("create materialized view log on t_reject (k, v)")
+			tk.MustExec("create materialized view mv_reject (" + tc.columns + ") as " + tc.selectSQL)
+			if tc.extraIndex {
+				tk.MustExec("create index idx_min on mv_reject(min_v)")
+			}
+			before := make(map[string]string)
+			for _, table := range []string{"t_reject", "`$mlog$t_reject`", "mv_reject"} {
+				before[table] = tk.MustQuery("show create table " + table).Rows()[0][1].(string)
+			}
+			tk.MustExec("set sql_mode = 'STRICT_ALL_TABLES,NO_UNSIGNED_SUBTRACTION'")
+			tk.MustExec("set time_zone = '+08:00'")
+			tk.MustExec("set div_precision_increment = 9")
+			vars := tk.Session().GetSessionVars()
+			oldSQLMode, oldTimeZone := vars.SQLMode, vars.TimeZone
+			err := tk.ExecToErr("alter table t_reject modify column " + tc.alter)
+			require.ErrorContains(t, err, tc.wantErr)
+			require.Equal(t, oldSQLMode, vars.SQLMode)
+			require.Equal(t, oldTimeZone, vars.TimeZone)
+			require.Equal(t, 9, vars.DivPrecisionIncrement)
+			for table, ddlSQL := range before {
+				require.Equal(t, ddlSQL, tk.MustQuery("show create table " + table).Rows()[0][1].(string))
+			}
+		})
+	}
 }

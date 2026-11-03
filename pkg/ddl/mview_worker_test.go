@@ -55,7 +55,7 @@ func TestInitCreateMaterializedViewBuildSessionAppliesDefinitionDivPrecisionIncr
 }
 
 func TestAnalyzeMVColumnUsageGroupByAlias(t *testing.T) {
-	sel, err := parseSelectFromSQL("select a as k, count(1) from t group by k")
+	sel, err := parseSelectFromSQL("select a as k, count(1) from t group by k", 0)
 	require.NoError(t, err)
 
 	usage, err := analyzeMVColumnUsage(sel, "a")
@@ -66,7 +66,7 @@ func TestAnalyzeMVColumnUsageGroupByAlias(t *testing.T) {
 }
 
 func TestAnalyzeMVColumnUsageWhereReferenceUnsupported(t *testing.T) {
-	sel, err := parseSelectFromSQL("select a, count(1) from t where b > 0 group by a")
+	sel, err := parseSelectFromSQL("select a, count(1) from t where b > 0 group by a", 0)
 	require.NoError(t, err)
 
 	usage, err := analyzeMVColumnUsage(sel, "b")
@@ -97,7 +97,7 @@ func TestFieldTypeForMVRelatedColumnClearsBaseOnlyFlags(t *testing.T) {
 }
 
 func TestAnalyzeMVColumnUsageGroupByOrdinal(t *testing.T) {
-	sel, err := parseSelectFromSQL("select a, count(1) from t group by 1")
+	sel, err := parseSelectFromSQL("select a, count(1) from t group by 1", 0)
 	require.NoError(t, err)
 
 	usage, err := analyzeMVColumnUsage(sel, "a")

@@ -31,6 +31,7 @@ go_library(
         "memtable_predicate_extractor.go",
         "mview_refresh_builder.go",
         "mview_refresh_lookup.go",
+        "mview_schema.go",
         "optimizer.go",
         "pb_to_plan.go",
         "plan.go",

@@ -158,6 +158,7 @@ import (
 )
 
 func init() {
+	ddl.InferMaterializedViewSchema = plannercore.InferMaterializedViewSchema
 	executor.CreateSession = func(ctx sessionctx.Context) (sessionctx.Context, error) {
 		return CreateSession(ctx.GetStore())
 	}
