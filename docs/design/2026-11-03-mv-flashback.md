@@ -10,7 +10,7 @@
 
 ## Introduction
 
-允许包含物化视图（MV）和物化视图日志（MLog）的集群执行受限的 `FLASHBACK CLUSTER`。用户数据和三张 MV 维护表一起恢复到目标时间，恢复后的 MV 进入 `needs_rebuild`，禁止普通读取和 FAST。用户显式执行 COMPLETE 建立新基线后，MV 恢复为 `ready`，重新允许读取和 FAST。第一版不允许跨越 OUT OF PLACE（OOP）刷新过程进行闪回。
+允许包含物化视图（MV）和物化视图日志（MLog）的集群执行受限的 `FLASHBACK CLUSTER`。用户数据和三张 MV 维护表一起恢复到目标时间，恢复后的 MV 进入 `needs_rebuild`，禁止普通读取和 FAST。用户显式执行 COMPLETE 建立新基线后，MV 恢复为 `ready`，重新允许读取和 FAST。目标快照和开始恢复前均须处于 OUT OF PLACE（OOP）的稳定状态，允许恢复区间内存在已经完整结束的 OOP。
 
 这一方案复用现有系统表恢复、build state 和 COMPLETE 主体，减少维护行重新构造和历史对象重新配对的工作。新增开发集中在恢复范围、OOP 准入、失效状态发布、后台任务隔离，以及 COMPLETE 成功后的状态发布。Purge 主逻辑原则上复用，验收其在恢复后的水位组合下能够安全推进。
 
@@ -34,15 +34,16 @@ Flashback 不会回退 PD 分配的时间戳。TiKV 将需要恢复的历史值�
 
 ### 目标与边界
 
-以物化视图分支的实现为基础，支持基表、MV、MLog 及三张维护表在同一目标时间恢复。恢复后，基表业务可以先继续运行，MV 逐个通过人工 COMPLETE 恢复。允许在满足现有 flashback 限制时回退区间内非 OOP 的 MV/MLog CREATE/DROP，不额外要求两端均无 MV/MLog。
+以物化视图分支的实现为基础，支持基表、MV、MLog 及三张维护表在同一目标时间恢复。恢复后，基表业务可以先继续运行，MV 逐个通过人工 COMPLETE 恢复。满足现有 flashback 限制及 OOP 两端稳定条件时，允许回退区间内的 MV/MLog CREATE/DROP 和已经完整结束的 OOP，不额外要求两端均无 MV/MLog。
 
-第一版禁止跨 OOP 闪回，保留现有 GC 安全点、目标时点 DDL、升级、TiFlash、placement 等限制。第一版不增加自动 COMPLETE，不自动将失败的 FAST 转成 COMPLETE，不重新设计 purge，也不恢复整个 `mysql` schema 的定义。
+第一版拒绝目标快照或开始恢复前存在未收尾的 OOP/shadow，保留现有 GC 安全点、目标时点 DDL、升级、TiFlash、placement 等限制。OOP 的 TiFlash/placement 资源保留复用 TRUNCATE 使用的延迟 GC 机制。第一版不增加自动 COMPLETE，不自动将失败的 FAST 转成 COMPLETE，不重新设计 purge，也不恢复整个 `mysql` schema 的定义。
 
 术语和时间戳约定如下。
 
 | 符号 | 含义 |
 | --- | --- |
 | `T` | 用户指定的 flashback 目标 TSO。 |
+| `C` | 已禁止新维护任务并排空在途任务后、开始恢复前的有效检查时刻；检查通过后持续保持隔离。 |
 | `F` | 本次 TiKV flashback 恢复写入使用的 commit TSO，即 `FlashbackClusterArgs.CommitTS`。 |
 | `W_i` | 第 i 个 MV 恢复出的 `LAST_SUCCESS_READ_TSO`。 |
 | `R_i` | 第 i 个 MV 在 flashback 后成功 COMPLETE 的计算快照 TSO。 |
@@ -64,21 +65,48 @@ Flashback 不会回退 PD 分配的时间戳。TiKV 将需要恢复的历史值�
 
 Refresh/purge history 和 alert 表不加入本次恢复范围。它们保留操作历史；参与任务控制和安全边界判断的字段需要满足后文的验收要求。不能因为名称包含 history 就将其全部视为展示数据。
 
-### OOP 准入检查
+### OOP 两端稳定性检查
 
-在实际恢复之前，扩展 `isFlashbackSupportedDDLAction`，拒绝在目标时间至有效检查时刻之间出现以下动作的 flashback。
+目标时刻 `T` 和开始恢复前的有效检查时刻 `C` 均须处于 OOP 稳定状态。稳定表示相关创建、装载、cutover 和失败清理已经结束，目录中没有进行中或遗留的 `MaterializedViewShadow`。不能仅以客户端 SQL 已经返回、当前没有 RUNNING 记录或没有 cutover job 作为判断依据。
 
-| DDL 类型 | 操作 |
+| 检查位置 | 条件与处理 |
 | --- | --- |
-| `ActionCreateMaterializedViewShadow` | 创建 shadow。 |
-| `ActionMViewRefreshOutOfPlaceCutover` | 切换 MV/MLog、维护行及依赖关系。 |
-| `ActionDropMaterializedViewShadow` | 删除 shadow，包括失败后的清理。 |
+| 目标快照 `T` | 检查历史完整对象目录，存在 OOP shadow 等中间对象则拒绝；继续沿用目标时刻没有未完成 DDL 的通用检查。 |
+| 开始恢复前 `C` | 先阻止所有节点上的新维护任务并排空在途操作，再检查当前目录；OOP 装载、IMPORT 工作、cutover 和清理均须退出，存在残留 shadow 则拒绝。 |
+| 恢复区间 | 在通用限制允许时，可以跨越一次或多次已经完整结束的 OOP，也可以跨越已经完成清理的失败 OOP。 |
+| 检查后的保护窗口 | 保持 DDL 互斥和维护任务隔离，直到数据恢复、needs_rebuild 持久化及 schema 同步完成。 |
 
-同时检查目标快照和当前对象目录，任一端存在进行中或残留 shadow 都拒绝。OOP 的创建、装载和 cutover 不是一个连续存在的 DDL job；装载阶段可能没有当前 DDL job，因此不能只检查 job 队列或 cutover 历史。
+OOP 的创建、装载和 cutover 不是一个连续存在的 DDL job；装载阶段可能没有活动 DDL job，因此两端检查需要覆盖 shadow 元数据和实际任务生命周期。发现不满足准入条件时，在 TiKV 恢复写入之前拒绝，并说明命中的快照、对象或未退出任务。
 
-检查必须在后台任务隔离及 DDL 互斥生效后执行，保证检查通过后没有新的 OOP 跨越 flashback。错误应说明命中的 OOP 动作或 shadow，拒绝发生在 TiKV 恢复写入之前。
+区间内出现 `ActionCreateMaterializedViewShadow`、`ActionMViewRefreshOutOfPlaceCutover` 或 `ActionDropMaterializedViewShadow` 本身不触发额外拒绝，`isFlashbackSupportedDDLAction` 无需为这三个动作增加黑名单。恢复到 cutover 前或后时，用户元数据、数据和三张维护表共同决定对应的 MV/MLog ID、依赖关系及维护行；恢复后的 MV 统一受失效保护。
 
-这项限制针对恢复区间中的历史 OOP，不禁止 flashback 完成后发起新的 COMPLETE OUT OF PLACE 重建。新的 OOP 重建按后文的 ready 发布规则执行；它会使后续跨越该操作的 flashback 被拒绝。
+Flashback 完成后可以显式执行新的 COMPLETE OUT OF PLACE 重建，按后文的规则在 cutover 中发布 ready。未来的 flashback 继续按两端状态和通用限制判断。
+
+### 复用 TiFlash 和 placement 的资源保留机制
+
+当前 OOP 已接入 TRUNCATE 使用的延迟 GC 流程。[OOP delete-range 登记](../../pkg/ddl/delete_range.go)将成功 cutover 后的旧 MV、旧 MLog ID 加入 `mysql.gc_delete_range`；[GC placement 清理](../../pkg/store/gcworker/gc_worker.go)已显式处理 `ActionMViewRefreshOutOfPlaceCutover`，统一回收退役 ID 的 TiFlash 和 placement 规则。cutover 后的即时清理只删除 TiFlash 进度缓存，旧规则的删除留到 GC。
+
+新 shadow 和新 MLog 使用新物理 ID 创建各自的规则，原 ID 的规则保留到 GC。目标仍在合法 GC 范围内时，恢复到 cutover 前所需的旧对象及规则受现有保留机制保护。Flashback 本来就会恢复 `mysql.gc_delete_range`：目标之后产生的旧对象清理任务被回退，目标之前已经存在的清理任务则保持对应的历史状态。
+
+[现有 OOP 规则回收测试](../../pkg/store/gcworker/gc_worker_test.go)覆盖无输出日志、有输出日志和取消时新旧 ID 规则的保留与删除。本方案沿用这些机制，将真实 TiFlash/placement flashback 接续纳入验收，不单列 OOP 专属的 PD 状态恢复开发。
+
+### 沿用的通用 flashback 限制
+
+新增 MV 恢复能力继续遵守下列已有条件：目标在 GC 有效范围内，满足当前 TSO 和集群 resolved-ts 校验；目标时刻没有未完成 DDL；当前没有其他 DDL 任务；恢复区间没有版本升级或不支持的系统表 DDL。
+
+`isFlashbackSupportedDDLAction` 继续检查整个集群在目标时间至有效检查时刻之间的 schema diff，拒绝下列变化。
+
+| 类别 | 被拒绝的 DDL 类型 |
+| --- | --- |
+| TiFlash 副本配置 | `ActionSetTiFlashReplica`：设置、删除或修改副本配置。 |
+| TiFlash 副本状态 | `ActionUpdateTiFlashReplicaStatus`：副本可用状态变化，包括后台自动更新。 |
+| Placement policy | `ActionCreatePlacementPolicy`、`ActionAlterPlacementPolicy`、`ActionDropPlacementPolicy`。 |
+| Placement 绑定 | `ActionModifySchemaDefaultPlacement`、`ActionAlterTablePlacement`、`ActionAlterTablePartitionPlacement`。 |
+| Attributes | `ActionAlterTableAttributes`、`ActionAlterTablePartitionAttributes`。 |
+
+对象已有 TiFlash 副本或 placement policy 本身不触发额外拒绝。OOP/TRUNCATE 继承配置并切换物理 ID 沿用上述资源保留机制；若区间内另有副本配置、后台副本状态更新或上表中的其他 DDL，仍按通用检查拒绝。因此，跨已完成 OOP 的允许范围不意味着放开这些 DDL。
+
+新增恢复协议要求所有参与的 TiDB 节点均支持该流程，混部期间不启用。恢复后的使用限制是普通当前读、手动/自动 FAST 均等待对应 MV 的显式 COMPLETE 成功及 ready 发布；原有 deferred/building、各 COMPLETE 模式适用条件和嵌套依赖规则保持有效。
 
 ### 复用 build state 表示失效
 
@@ -104,7 +132,7 @@ Flashback 将恢复出的已构建 MV 置为 `needs_rebuild`，已经处于该�
 
 ```mermaid
 flowchart TD
-    A[隔离内部维护任务] --> B[检查历史 OOP 和两端 shadow]
+    A[禁止新维护任务并排空在途操作] --> B[检查 OOP 两端稳定及通用限制]
     B --> C[恢复用户数据和三张维护表]
     C --> D[持久化数据恢复已完成]
     D --> E[设置 needs_rebuild 并记录进度]
@@ -134,7 +162,7 @@ Schema 发布必须使各节点实际加载恢复后带有 needs_rebuild 的 Tab
 
 ### 隔离内部任务并重载调度
 
-Flashback 执行期间，所有节点上的 refresh、purge、MLog analyze 及会修改相关维护状态的后台任务都必须停止接收新工作，并完成运行中任务的取消和退出。手动维护入口也需要相同的准入保护。MV 普通读取的保护需要覆盖恢复完成到失效状态同步之间的窗口，不能仅用 `super_read_only` 代替禁读。
+Flashback 执行期间，所有节点上的 refresh、purge、MLog analyze 及会修改相关维护状态的后台任务都必须停止接收新工作，并完成运行中任务的取消和退出。手动维护入口也需要相同的准入保护；OOP 的 IMPORT 装载工作、cutover 及清理也必须纳入排空。暂停确认以实际执行工作已经退出为准，发送取消请求或外层超时返回均不足以确认。MV 普通读取的保护需要覆盖恢复完成到失效状态同步之间的窗口，不能仅用 `super_read_only` 代替禁读。
 
 持久化的 flashback DDL job 可作为正在恢复的判定依据。现有 DDL 提交流程已经通过 `pkg/ddl/systable/manager.go` 的 `HasFlashbackClusterJob` 检查活动 job；节点重启或新加入时，必须先建立该状态的判断，再启动 MVService 任务。具体的节点暂停确认应接入现有 domain/schema 同步路径，保证 owner 开始恢复前，参与节点已停止相关工作；仅发送一次异步通知不构成完成隔离。
 
@@ -179,16 +207,59 @@ Purge 还会读取未恢复的 `tidb_mlog_purge_hist`：`readLatestMLogPurgeCuto
 | 改动 | 代码落点 | 交付行为 |
 | --- | --- | --- |
 | 三表恢复白名单 | `pkg/ddl/cluster.go` | 三张维护表的数据和索引随用户数据一起恢复。 |
-| OOP 准入 | `pkg/ddl/cluster.go`、snapshot 元数据检查 | 拒绝区间内三个 OOP 动作及两端 shadow，隔离后再完成有效检查。 |
+| OOP 准入 | `pkg/ddl/cluster.go`、snapshot 元数据检查 | 检查目标快照及排空后的当前状态，拒绝未收尾 OOP/shadow；通用限制允许时跨越已完成的 OOP。 |
 | 状态与入口 | `pkg/meta/model/table.go`、`pkg/planner/core/util.go`、`pkg/executor/materialized_view.go` | 扩展 build state，拒绝读/FAST，允许恢复用 COMPLETE。 |
 | 持久化失效阶段 | `pkg/ddl/cluster.go`、`pkg/meta/model/job_args.go`、schema 同步路径 | 明确恢复 RPC 与失效发布的持久化边界，支持批次、重启及 owner 切换。 |
 | Ready 发布 | `pkg/executor/materialized_view.go`、DDL job/worker、`pkg/ddl/table.go` | 非 OOP 在成功事务之后发布 ready；OOP 在 cutover 中发布，保持对象及基线校验。 |
 | 调度协调 | `pkg/mvservice/service.go`、`pkg/mvservice/service_helper.go`、domain 通知路径 | 隔离和排空旧任务、重载恢复后的任务，跳过失效 MV 的自动 FAST。 |
+| TiFlash/placement 复用 | 现有 OOP delete-range、GC 和 flashback 通用准入路径 | 沿用延迟 GC 和原有 DDL 限制，验收旧对象恢复后的规则及副本行为，不单列 OOP 专属恢复模块。 |
 | 验收与说明 | 现有 DDL、refresh、MVService 和 RealTiKV flashback 用例 | 验证恢复、失败重试、依赖顺序与 FAST/purge 接续，说明用户恢复流程。 |
+
+### PR 拆分与交付顺序
+
+实现拆为 9 个 PR，设计文档单独提交。每个实现 PR 包含对应的针对性测试，最后一个 PR 负责接通生产入口并完成跨模块验收。工作量按相对复杂度评估；跨节点隔离、持久化失效和 COMPLETE 的状态发布需要优先确定接口。
+
+| PR | 建议标题 | 开发范围与验收条件 | 依赖 | 相对工作量 |
+| --- | --- | --- | --- | --- |
+| PR1 | `meta, planner, executor: add needs-rebuild state for materialized views` | 追加 build state，保持 ready 零值和旧元数据兼容；补齐普通读、PointGet、prepared statement、计划缓存及 FAST/有界 FAST 的拒绝行为。原有 deferred/building 语义保持有效；恢复用 COMPLETE 的放行和 ready 发布由 PR6/PR7 一起交付。 | 无 | 中 |
+| PR2 | `ddl: check out-of-place refresh stability before flashback` | 检查目标快照和当前目录的 OOP 中间状态及残留 shadow，覆盖装载期间没有活动 DDL job 的窗口。允许区间内已完整结束或已完成失败清理的 OOP，保留通用 TiFlash/placement DDL 限制；最终检查与任务隔离的先后顺序由 PR4 接入。 | 无 | 中 |
+| PR3 | `mvservice: support pausing and draining maintenance tasks` | 实现本节点的任务暂停、排空和恢复能力：停止新任务入队、清理待执行任务、取消或等待在途 refresh/purge/analyze 及相关维护写入；任务真实退出后才确认排空。恢复时先清理旧队列；恢复后的元数据加载策略由 PR8 接入。 | 无 | 大 |
+| PR4 | `ddl, domain, executor: coordinate materialized view tasks during flashback` | 将 PR3 接入 flashback 的全节点协调；持久化 job 判定、节点暂停确认、重启/新加入节点准入、手动维护入口及当前 MV 读取保护均覆盖。在途 OOP 的装载、IMPORT、cutover 和清理退出后，才做两端稳定性检查及 TiKV 恢复；解除保护接入 PR5 的失效发布边界。包含协议支持检查，混部时拒绝进入新流程。 | PR2、PR3 | 大 |
+| PR5 | `ddl: persist materialized view invalidation during flashback` | 扩展 job 参数及 V1/V2 编码，持久化“数据已恢复—失效标记—schema 发布”阶段和批次游标；标记与游标在同一 DDL 事务提交，全部节点加载失效元数据后才允许完成 job。覆盖 RPC 重试、批次中断、owner 切换及 schema 同步失败，保证失效写入后不重放恢复 RPC。 | PR1、PR4 | 大 |
+| PR6 | `executor, ddl: rebuild invalidated materialized views with complete refresh` | 放行 needs_rebuild 下适用的非 OOP COMPLETE，复用数据、水位和 source-info 的原子提交，再通过持久化元数据路径发布 ready；校验对象身份及本次已提交基线，拒绝依赖失效上游的重建。覆盖新快照 R > F、失败保留失效、提交后发布前故障、重复重建及旧任务不能解除新一轮失效；OOP 的恢复入口留到 PR7 放行。 | PR1、PR4 | 大 |
+| PR7 | `executor, ddl: support out-of-place rebuilds after flashback` | 接通 COMPLETE OUT OF PLACE 的恢复入口，在 cutover 中对新对象显式发布 ready，保持 refresh/source-info 和依赖迁移一致；复用 PR6 的上游状态检查，补齐嵌套 MV 在上游 OOP 后的新对象和日志绑定。保持各 COMPLETE 模式原有条件，验证按依赖顺序重建。 | PR6 | 中 |
+| PR8 | `mvservice: reload maintenance schedules after flashback` | 将暂停恢复接到最新目录和维护表的重新加载，丢弃旧任务；加载与执行入口都跳过 needs_rebuild 的自动 FAST，COMPLETE 发布 ready 后重新调度。Flashback 完成后允许 purge/analyze 恢复，保留用户调度定义，沿用旧 history 的回收及 alert 的重载、清理。 | PR3、PR6 | 中 |
+| PR9 | `ddl: enable flashback recovery for materialized views` | 将三张维护表的数据和索引加入恢复范围，接通完整流程，确认协议支持及解除保护的顺序；完成真实 TiKV、多节点及节点重启、owner 切换的验收，补齐用户说明。覆盖三表与对象的 CREATE/DROP 对齐、跨已完成 OOP、重复消费反例、所有 COMPLETE 模式及 FAST/purge 接续；验证 TiFlash/placement 规则和 gc_delete_range 回退沿用现有机制，通用拒绝规则保持有效。 | PR5、PR7、PR8 | 大 |
+
+依赖关系如下；箭头表示合入前需要具备的代码能力。
+
+```mermaid
+flowchart LR
+    P1[PR1 状态和入口] --> P5[PR5 持久化失效]
+    P1 --> P6[PR6 非 OOP 重建]
+    P2[PR2 OOP 两端稳定] --> P4[PR4 全节点协调]
+    P3[PR3 本地暂停排空] --> P4
+    P4 --> P5
+    P4 --> P6
+    P6 --> P7[PR7 OOP 和嵌套重建]
+    P3 --> P8[PR8 恢复调度]
+    P6 --> P8
+    P5 --> P9[PR9 接通与验收]
+    P7 --> P9
+    P8 --> P9
+```
+
+PR1、PR2、PR3 可以并行开发。PR4 完成隔离协议后，PR5 和 PR6 可以在对象身份、失效轮次校验及 schema 发布约定明确后并行推进；PR7 和 PR8 在 PR6 之后可以并行。PR4/PR5 会修改同一 flashback worker，PR5/PR6/PR7 共享部分 DDL 元数据和参数代码，PR3/PR8 共享 MVService 文件，合入时需要按依赖顺序 rebase。
+
+PR3 的暂停确认必须包含执行器中真正仍在运行的任务，不能在发送取消请求或外层超时返回时就报告完成。PR4 负责全节点确认及手动入口，PR5 负责恢复后持续保护到失效状态同步；这三个 PR 共同构成 flashback 的保护窗口。对恢复前即可安全取消的拒绝和恢复已经发生后的继续推进，需分别验证解除保护的时机。
+
+三表恢复白名单在 PR9 与完整新流程一起接入生产入口，之前通过针对性测试调用已实现的模块。PR1 至 PR8 分别合入不代表已经交付 MV flashback 支持；接通时必须同时具备任务隔离、OOP 准入、持久化失效、可用的 COMPLETE 恢复、调度重载和协议检查，避免三表先恢复、旧 FAST 已经继续运行的中间状态。
+
+Purge 主逻辑不单独安排开发 PR。PR8 保证失效 MV 仍参与依赖和保守水位判断，PR9 用真实恢复链路验收重建前保留日志、相关 MV 全部重建后继续清理。若用例暴露现有逻辑不满足这些约束，再针对实际问题补充修复。
 
 ### 用户恢复流程
 
-在可闪回的 GC 时间范围内选择目标，确认区间未跨 OOP，并沿用已有 flashback 操作流程。以下 SQL 中的时间是用户实际选定的合法目标；MV 名称也替换为实际对象。
+在可闪回的 GC 时间范围内选择目标，确认目标快照不存在未收尾 OOP/shadow，并沿用已有 flashback 操作流程。系统在禁止新维护任务、排空在途操作后检查当前端；满足通用限制时，区间内已经完整结束的 OOP 不额外阻止恢复。以下 SQL 中的时间是用户实际选定的合法目标；MV 名称也替换为实际对象。
 
 ```sql
 FLASHBACK CLUSTER TO TIMESTAMP '<target_timestamp>';
@@ -203,7 +274,7 @@ Flashback 返回成功后，基表业务可以恢复。尚未重建的 MV 查询
 
 ### Functional Tests
 
-为三张表的恢复例外、OOP 动作拒绝和两端 shadow 检查增加针对性用例。扩展现有 build state 与读/refresh 入口测试，覆盖 ready、needs_rebuild 和原有 deferred/building，特别是 COMPLETE 不再被统一的 ready 检查拒绝。
+为三张表的恢复例外、OOP 两端稳定性和通用准入增加针对性用例。覆盖两端 shadow 拒绝、装载期间没有活动 DDL job、区间内已完成 OOP 不额外拒绝，以及 TiFlash 配置/自动状态更新和 placement DDL 继续触发原有拒绝。扩展现有 build state 与读/refresh 入口测试，覆盖 ready、needs_rebuild 和原有 deferred/building，特别是 COMPLETE 不再被统一的 ready 检查拒绝。
 
 验证三种 COMPLETE 模式的状态迁移，保持原有适用条件。检查 ready 枚举仍为 0、新状态序列化往返正确、旧元数据缺省字段仍表示 ready。非 OOP 的 ready 发布必须晚于数据/水位/source-info 事务提交；OOP 的新 MV 不能继承旧 needs_rebuild。
 
@@ -212,8 +283,11 @@ Flashback 返回成功后，基表业务可以恢复。尚未重建的 MV 查询
 | 场景 | 预期 |
 | --- | --- |
 | 已消费日志在目标之后被 purge，再实际 flashback | 重建前 FAST 被拒绝；COMPLETE 后 FAST 不重复应用旧日志，MV 与定义查询一致。 |
-| 区间内非 OOP CREATE/DROP MV/MLog | 对象、三张表的维护行及 source-info 索引一致回退。 |
-| OOP 创建、装载、切换、清理或两端残留 shadow | 实际恢复前拒绝，不遗漏装载期间没有 DDL job 的窗口。 |
+| 区间内 CREATE/DROP MV/MLog | 对象、三张表的维护行及 source-info 索引一致回退。 |
+| 区间内一次、多次完整结束或已经完成失败清理的 OOP | 两端稳定且满足通用限制时允许恢复；MV/MLog ID、依赖及三表回退一致，COMPLETE 后可以接续 FAST。 |
+| 目标快照存在 shadow，或当前 OOP 创建、装载、切换、清理未退出及残留 shadow | 排空和检查后仍不稳定则在实际恢复前拒绝，不遗漏没有活动 DDL job 的装载窗口，也不让 IMPORT 工作越过恢复边界。 |
+| OOP 继承 TiFlash/placement 配置后恢复到 cutover 前或后 | 旧/新对象规则符合对应快照，恢复的 gc_delete_range 不误删重新可用的旧对象；副本读与 TiKV 结果一致。 |
+| 区间内 TiFlash 副本配置/自动状态更新或 placement/attributes DDL | 继续按原有通用检查拒绝，不因允许跨已完成 OOP 而放宽。 |
 | 恢复 RPC 完成但阶段尚未提交时宕机 | 安全重试恢复；尚未开始失效写入。 |
 | 部分 MV 已失效、owner 切换 | 从持久化阶段和游标继续，不重放恢复覆盖失效状态，不提前开放访问。 |
 | COMPLETE 提交前失败或取消 | 保持 needs_rebuild，无部分成功可见。 |
@@ -224,7 +298,7 @@ Flashback 返回成功后，基表业务可以恢复。尚未重建的 MV 查询
 | 保留旧 purge history | 旧 fence 只会保守跳过；新基线建立后 FAST 与 purge 均可继续。 |
 | 多节点旧队列、运行中维护、节点重启 | 隔离覆盖所有任务，恢复后重载元数据，不执行旧基线工作。 |
 
-真实恢复链路放在 `tests/realtikvtest/flashbacktest`，不能仅通过 SQL 手工模拟恢复行和水位代替。至少覆盖重复消费反例、CREATE/DROP 三表一致性、持久化阶段恢复和重建后 FAST/purge 接续。实现阶段按仓库 testing flow 启动并清理 playground，启用和恢复 failpoint，再运行针对性用例。
+真实恢复链路放在 `tests/realtikvtest/flashbacktest`，不能仅通过 SQL 手工模拟恢复行和水位代替。至少覆盖重复消费反例、CREATE/DROP 三表一致性、跨已完成 OOP、持久化阶段恢复和重建后 FAST/purge 接续；TiFlash/placement 场景需要相应真实组件参与。实现阶段按仓库 testing flow 启动并清理 playground，启用和恢复 failpoint，再运行针对性用例。
 
 ### Compatibility Tests
 
@@ -256,7 +330,7 @@ Flashback 返回成功后，基表业务可以恢复。尚未重建的 MV 查询
 
 有 MV/MLog 就前置拒绝的方案实现最小，但会限制整个集群的闪回能力，无法满足先恢复基表、之后重建 MV 的需求。只将 refresh 水位置 NULL 可以阻止 FAST，但不禁止普通读，也没有恢复缺失的维护行及输入日志登记。
 
-仅恢复三张维护表可以解决目录与维护行错位，却不能消除物理 commit TSO 变化造成的重复消费。本方案在此基础上增加 needs_rebuild 和 COMPLETE，避免第一版同时承担旧增量身份恢复、去重及跨 OOP 恢复协议。
+仅恢复三张维护表可以解决目录与维护行错位，却不能消除物理 commit TSO 变化造成的重复消费。本方案在此基础上增加 needs_rebuild 和 COMPLETE；两端稳定时，已完成 OOP 的 ID 切换由相同目标快照恢复，TiFlash/placement 资源沿用延迟 GC。第一版聚焦失效和重建，不接管目标快照中的未完成 OOP，也不恢复旧任务或增加旧日志的增量身份去重机制。
 
 `mysql.stats_*` 和 `mysql.gc_delete_range` 说明系统表数据参与 flashback 已有实现先例。Oracle 的物理 Flashback Database 与这里的 MVCC 恢复机制不同；本方案的禁读与重建语义由 TiDB 自身的正确性要求定义，不从其他系统的状态名称直接推导。
 
@@ -274,6 +348,7 @@ Flashback 返回成功后，基表业务可以恢复。尚未重建的 MV 查询
 - [Refresh 事务、purge 水位和历史 fence](../../pkg/executor/materialized_view.go)。
 - [输入日志登记与替换](../../pkg/util/mviewutil/refresh_source.go)、[计算快照校验](../../pkg/executor/mview_refresh_source.go)。
 - [OOP cutover 和状态克隆](../../pkg/ddl/table.go)。
+- [OOP 旧对象 delete-range 登记](../../pkg/ddl/delete_range.go)、[TiFlash/placement 延迟 GC](../../pkg/store/gcworker/gc_worker.go)及[现有规则回收测试](../../pkg/store/gcworker/gc_worker_test.go)。
 - [MVService 调度与任务加载](../../pkg/mvservice/service.go)、[维护入口](../../pkg/mvservice/service_helper.go)。
 - [RealTiKV flashback 用例](../../tests/realtikvtest/flashbacktest/flashback_test.go)。
 - [TiKV 8.5.4 flashback 恢复写入](https://github.com/tikv/tikv/blob/v8.5.4/src/storage/txn/actions/flashback_to_version.rs#L30-L138)。
