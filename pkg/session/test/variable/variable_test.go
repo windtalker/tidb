@@ -57,6 +57,51 @@ func TestForbidSettingBothTSVariable(t *testing.T) {
 	tk.MustExec("set @@tidb_snapshot = '2007-01-01 15:04:05.999999'")
 }
 
+func TestMVMaintainMemQuota(t *testing.T) {
+	store := testkit.CreateMockStore(t)
+	tk := testkit.NewTestKit(t, store)
+
+	// Default is 2GiB.
+	tk.MustQuery("select @@tidb_mv_maintain_mem_quota").Check(testkit.Rows("2147483648"))
+
+	// Session scope should work independently.
+	tk.MustExec("set @@session.tidb_mv_maintain_mem_quota = 536870912")
+	tk.MustQuery("select @@tidb_mv_maintain_mem_quota").Check(testkit.Rows("536870912"))
+	tk.MustQuery("select @@tidb_mem_quota_query").Check(testkit.Rows("1073741824"))
+
+	// Global scope should be visible to a new session.
+	tk.MustExec("set @@global.tidb_mv_maintain_mem_quota = 3221225472")
+	tk2 := testkit.NewTestKit(t, store)
+	tk2.MustQuery("select @@tidb_mv_maintain_mem_quota").Check(testkit.Rows("3221225472"))
+}
+
+func TestMVMaintainIsolationReadEngines(t *testing.T) {
+	store := testkit.CreateMockStore(t)
+	tk := testkit.NewTestKit(t, store)
+
+	tk.MustQuery("select @@tidb_mv_maintain_isolation_read_engines").Check(testkit.Rows(variable.GetSysVar(variable.TiDBMVMaintainIsolationReadEngines).Value))
+
+	tk.MustExec("set @@session.tidb_mv_maintain_isolation_read_engines = 'tikv'")
+	tk.MustQuery("select @@tidb_mv_maintain_isolation_read_engines").Check(testkit.Rows("tikv"))
+	tk.MustQuery("select @@tidb_isolation_read_engines").Check(testkit.Rows(variable.GetSysVar(variable.TiDBIsolationReadEngines).Value))
+
+	tk.MustExec("set @@global.tidb_mv_maintain_isolation_read_engines = 'tidb'")
+	tk2 := testkit.NewTestKit(t, store)
+	tk2.MustQuery("select @@tidb_mv_maintain_isolation_read_engines").Check(testkit.Rows("tidb"))
+}
+
+func TestMViewMaintainImportDiskQuota(t *testing.T) {
+	store := testkit.CreateMockStore(t)
+	tk := testkit.NewTestKit(t, store)
+
+	tk.MustQuery("select @@tidb_mview_maintain_import_disk_quota").Check(testkit.Rows(""))
+
+	tk.MustExec("set @@session.tidb_mview_maintain_import_disk_quota = '100gib'")
+	tk.MustQuery("select @@tidb_mview_maintain_import_disk_quota").Check(testkit.Rows("100gib"))
+
+	tk.MustGetErrMsg("set @@session.tidb_mview_maintain_import_disk_quota = 'bad'", "[variable:1231]Variable 'tidb_mview_maintain_import_disk_quota' can't be set to the value of 'bad'")
+}
+
 func TestCoprocessorOOMAction(t *testing.T) {
 	// Assert Coprocessor OOMAction
 	store := testkit.CreateMockStore(t)

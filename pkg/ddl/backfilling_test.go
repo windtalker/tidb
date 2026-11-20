@@ -275,6 +275,35 @@ func TestReorgExprContext(t *testing.T) {
 	}
 }
 
+func TestCreateMaterializedViewBuildSessionMVMaintenance(t *testing.T) {
+	store := &mockStorage{client: &mock.Client{}}
+	sctx := newMockReorgSessCtx(store)
+	originalInMaterializedViewMaintenance := sctx.GetSessionVars().InMaterializedViewMaintenance
+	originalDivPrecisionIncrement := sctx.GetSessionVars().DivPrecisionIncrement
+	sctx.GetSessionVars().DivPrecisionIncrement = 2
+
+	reorgMeta := &model.DDLReorgMeta{
+		Location:          &model.TimeZoneLocation{Name: "UTC"},
+		ResourceGroupName: "default",
+	}
+	job := &model.Job{
+		ReorgMeta:   reorgMeta,
+		SessionVars: make(map[string]string),
+	}
+	mviewTableInfo := &model.TableInfo{
+		MaterializedView: &model.MaterializedViewInfo{DefinitionDivPrecisionIncrement: 9},
+	}
+	restore, err := initCreateMaterializedViewBuildSession(sctx, job, mviewTableInfo, sctx.GetSessionVars().CurrentDB)
+	require.NoError(t, err)
+	require.True(t, sctx.GetSessionVars().InMaterializedViewMaintenance)
+	require.Equal(t, 9, sctx.GetSessionVars().DivPrecisionIncrement)
+
+	restore()
+	require.Equal(t, originalInMaterializedViewMaintenance, sctx.GetSessionVars().InMaterializedViewMaintenance)
+	require.Equal(t, 2, sctx.GetSessionVars().DivPrecisionIncrement)
+	sctx.GetSessionVars().DivPrecisionIncrement = originalDivPrecisionIncrement
+}
+
 func TestReorgTableMutateContext(t *testing.T) {
 	originalRowFmt := variable.GetDDLReorgRowFormat()
 	defer variable.SetDDLReorgRowFormat(originalRowFmt)

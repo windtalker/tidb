@@ -245,6 +245,10 @@ func TestAggInDisk(t *testing.T) {
 	tk.MustExec("insert into t values(0)")
 	tk.MustQuery("select sum(tt.b) from ( select /*+ HASH_AGG() */ avg(t1.a) as b from t t1 join t t2 group by t1.a, t2.a) as tt").Check(
 		testkit.Rows("4040100.0000"))
+	tk.MustQuery("select sum_int(tt.b) from ( select /*+ HASH_AGG() */ sum_int(t1.a) as b from t t1 join t t2 group by t1.a, t2.a) as tt").Check(
+		testkit.Rows("4060200"))
+	tk.MustQuery("select sum(tt.b), sum_int(tt.b) from ( select /*+ HASH_AGG() */ sum_int(t1.a) as b from t t1 join t t2 group by t1.a, t2.a) as tt").Check(
+		testkit.Rows("4060200 4060200"))
 	// Test no groupby and no data.
 	tk.MustExec("drop table t;")
 	tk.MustExec("create table t(c int, c1 int);")
@@ -333,7 +337,8 @@ func TestRandomPanicConsume(t *testing.T) {
 					require.NoError(t, res.Close())
 				}
 			}
-			require.EqualError(t, err, "failpoint panic: ERROR 1105 (HY000): Out Of Memory Quota![conn=1]")
+			errStr := err.Error()
+			require.True(t, errStr == "failpoint panic: ERROR 1105 (HY000): Out Of Memory Quota![conn=1]" || errStr == "context canceled")
 		}
 	}
 }

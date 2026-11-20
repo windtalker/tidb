@@ -20,12 +20,14 @@ import (
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/tidb/pkg/ddl/label"
+	"github.com/pingcap/tidb/pkg/ddl/logutil"
 	"github.com/pingcap/tidb/pkg/ddl/notifier"
 	"github.com/pingcap/tidb/pkg/domain/infosync"
 	"github.com/pingcap/tidb/pkg/infoschema"
 	"github.com/pingcap/tidb/pkg/kv"
 	"github.com/pingcap/tidb/pkg/meta"
 	"github.com/pingcap/tidb/pkg/meta/model"
+	"go.uber.org/zap"
 )
 
 func onCreateSchema(jobCtx *jobContext, job *model.Job) (ver int64, _ error) {
@@ -207,6 +209,29 @@ func (w *worker) onDropSchema(jobCtx *jobContext, job *model.Job) (ver int64, _ 
 		var tables []*model.TableInfo
 		tables, err = metaMut.ListTables(jobCtx.stepCtx, job.SchemaID)
 		if err != nil {
+			return ver, errors.Trace(err)
+		}
+		mviewIDs := make([]int64, 0)
+		mlogIDs := make([]int64, 0)
+		for _, tblInfo := range tables {
+			if tblInfo.MaterializedView != nil {
+				mviewIDs = append(mviewIDs, tblInfo.ID)
+			}
+			if tblInfo.MaterializedViewLog != nil {
+				mlogIDs = append(mlogIDs, tblInfo.ID)
+			}
+		}
+		if err = w.deleteCreateMaterializedViewRefreshInfos(jobCtx, mviewIDs); err != nil {
+			return ver, errors.Trace(err)
+		}
+		if err = w.deleteCreateMaterializedViewRefreshAlerts(jobCtx, mviewIDs); err != nil {
+			logutil.DDLLogger().Warn(
+				"drop schema: failed to delete materialized view refresh alerts",
+				zap.String("schemaName", job.SchemaName),
+				zap.Error(err),
+			)
+		}
+		if err = w.deleteMaterializedViewLogPurgeInfos(jobCtx, mlogIDs); err != nil {
 			return ver, errors.Trace(err)
 		}
 

@@ -27,6 +27,7 @@ import (
 	"github.com/pingcap/tidb/pkg/domain"
 	"github.com/pingcap/tidb/pkg/expression"
 	"github.com/pingcap/tidb/pkg/infoschema"
+	"github.com/pingcap/tidb/pkg/meta/autoid"
 	"github.com/pingcap/tidb/pkg/meta/model"
 	"github.com/pingcap/tidb/pkg/parser"
 	"github.com/pingcap/tidb/pkg/parser/ast"
@@ -42,6 +43,7 @@ import (
 	"github.com/pingcap/tidb/pkg/planner/util"
 	"github.com/pingcap/tidb/pkg/sessionctx"
 	"github.com/pingcap/tidb/pkg/sessionctx/variable"
+	"github.com/pingcap/tidb/pkg/table"
 	"github.com/pingcap/tidb/pkg/testkit/testdata"
 	"github.com/pingcap/tidb/pkg/util/dbterror/plannererrors"
 	"github.com/pingcap/tidb/pkg/util/hint"
@@ -76,6 +78,16 @@ func CreatePlannerSuite(sctx sessionctx.Context, is infoschema.InfoSchema) (s *p
 	s.sctx = sctx
 	s.ctx = sctx.GetPlanCtx()
 	return s
+}
+
+func TestGetHashOrKeyPartitionColumnNameUsesProvidedTable(t *testing.T) {
+	tblInfo := MockHashPartitionTable()
+	snapshotTbl, err := table.TableFromMeta(autoid.NewAllocators(false), tblInfo)
+	require.NoError(t, err)
+
+	hashPartColName := getHashOrKeyPartitionColumnName(snapshotTbl)
+	require.NotNil(t, hashPartColName)
+	require.Equal(t, "ptn", hashPartColName.L)
 }
 
 func createPlannerSuite() (s *plannerSuite) {
@@ -1271,6 +1283,7 @@ func TestVisitInfo(t *testing.T) {
 				{mysql.IndexPriv, "test", "", "", nil, false, nil, false},
 				{mysql.CreateViewPriv, "test", "", "", nil, false, nil, false},
 				{mysql.ShowViewPriv, "test", "", "", nil, false, nil, false},
+				{mysql.OperateViewPriv, "test", "", "", nil, false, nil, false},
 				{mysql.TriggerPriv, "test", "", "", nil, false, nil, false},
 			},
 		},
@@ -1295,6 +1308,7 @@ func TestVisitInfo(t *testing.T) {
 				{mysql.TriggerPriv, "", "", "", nil, false, nil, false},
 				{mysql.CreateViewPriv, "", "", "", nil, false, nil, false},
 				{mysql.ShowViewPriv, "", "", "", nil, false, nil, false},
+				{mysql.OperateViewPriv, "", "", "", nil, false, nil, false},
 				{mysql.CreateRolePriv, "", "", "", nil, false, nil, false},
 				{mysql.DropRolePriv, "", "", "", nil, false, nil, false},
 				{mysql.CreateTMPTablePriv, "", "", "", nil, false, nil, false},
@@ -1346,6 +1360,7 @@ func TestVisitInfo(t *testing.T) {
 				{mysql.IndexPriv, "test", "", "", nil, false, nil, false},
 				{mysql.CreateViewPriv, "test", "", "", nil, false, nil, false},
 				{mysql.ShowViewPriv, "test", "", "", nil, false, nil, false},
+				{mysql.OperateViewPriv, "test", "", "", nil, false, nil, false},
 				{mysql.TriggerPriv, "test", "", "", nil, false, nil, false},
 			},
 		},
@@ -1384,6 +1399,7 @@ func TestVisitInfo(t *testing.T) {
 				{mysql.TriggerPriv, "", "", "", nil, false, nil, false},
 				{mysql.CreateViewPriv, "", "", "", nil, false, nil, false},
 				{mysql.ShowViewPriv, "", "", "", nil, false, nil, false},
+				{mysql.OperateViewPriv, "", "", "", nil, false, nil, false},
 				{mysql.CreateRolePriv, "", "", "", nil, false, nil, false},
 				{mysql.DropRolePriv, "", "", "", nil, false, nil, false},
 				{mysql.CreateTMPTablePriv, "", "", "", nil, false, nil, false},
@@ -2153,7 +2169,7 @@ func TestUpdateEQCond(t *testing.T) {
 	}{
 		{
 			sql:  "select t1.a from t t1, t t2 where t1.a = t2.a+1",
-			best: "Join{DataScan(t1)->DataScan(t2)->Projection}(test.t.a,Column#25)->Projection->Projection",
+			best: "Join{DataScan(t1)->DataScan(t2)->Projection}(test.t.a,Column#27)->Projection->Projection",
 		},
 	}
 	s := createPlannerSuite()
@@ -2249,11 +2265,11 @@ func TestResolvingCorrelatedAggregate(t *testing.T) {
 		},
 		{
 			sql:  "select (select sum(count(a))) from t",
-			best: "Apply{DataScan(t)->Aggr(count(test.t.a))->Dual->Aggr(sum(Column#13))->MaxOneRow}->Projection",
+			best: "Apply{DataScan(t)->Aggr(count(test.t.a))->Dual->Aggr(sum(Column#14))->MaxOneRow}->Projection",
 		},
 		{
 			sql:  "select (select sum(count(n.a)) from t) from t n",
-			best: "Apply{DataScan(n)->Aggr(count(test.t.a))->DataScan(t)->Aggr(sum(Column#25))->MaxOneRow}->Projection",
+			best: "Apply{DataScan(n)->Aggr(count(test.t.a))->DataScan(t)->Aggr(sum(Column#27))->MaxOneRow}->Projection",
 		},
 		{
 			sql:  "select (select cnt from (select count(a) as cnt) n) from t",
@@ -2448,13 +2464,13 @@ func TestRollupExpand(t *testing.T) {
 	require.Equal(t, len(builder.currentBlockExpand.LevelExprs), 3)
 	// for grouping set {}: gid = '00' = 0
 	require.Equal(t, expression.ExplainExpressionList(s.ctx.GetExprCtx().GetEvalCtx(), expand.LevelExprs[0], expand.Schema(), errors.RedactLogDisable),
-		"test.t.a, <nil>->Column#13, <nil>->Column#14, 0->gid")
+		"test.t.a, <nil>->Column#14, <nil>->Column#15, 0->gid")
 	// for grouping set {a}: gid = '01' = 1
 	require.Equal(t, expression.ExplainExpressionList(s.ctx.GetExprCtx().GetEvalCtx(), expand.LevelExprs[1], expand.Schema(), errors.RedactLogDisable),
-		"test.t.a, Column#13, <nil>->Column#14, 1->gid")
+		"test.t.a, Column#14, <nil>->Column#15, 1->gid")
 	// for grouping set {a,b}: gid = '11' = 3
 	require.Equal(t, expression.ExplainExpressionList(s.ctx.GetExprCtx().GetEvalCtx(), expand.LevelExprs[2], expand.Schema(), errors.RedactLogDisable),
-		"test.t.a, Column#13, Column#14, 3->gid")
+		"test.t.a, Column#14, Column#15, 3->gid")
 
 	require.Equal(t, expand.Schema().Len(), 4)
 	// source column a should be kept as real.

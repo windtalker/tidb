@@ -17,6 +17,7 @@ package core
 import (
 	"fmt"
 	"math"
+	"slices"
 
 	"github.com/pingcap/tidb/pkg/expression"
 	"github.com/pingcap/tidb/pkg/expression/aggregation"
@@ -25,6 +26,7 @@ import (
 	"github.com/pingcap/tidb/pkg/parser/mysql"
 	"github.com/pingcap/tidb/pkg/planner/cardinality"
 	"github.com/pingcap/tidb/pkg/planner/core/base"
+	"github.com/pingcap/tidb/pkg/planner/core/operator/logicalop"
 	"github.com/pingcap/tidb/pkg/planner/property"
 	"github.com/pingcap/tidb/pkg/planner/util"
 	"github.com/pingcap/tidb/pkg/planner/util/costusage"
@@ -149,6 +151,14 @@ func (p *PhysicalTableScan) GetPlanCostVer2(taskType property.TaskType, option *
 		columns = p.tblCols
 	} else { // TiFlash
 		columns = p.schema.Columns
+	}
+	// _tidb_commit_ts is not a real extra column stored in the disk, and it should not bring extra cost, so we exclude
+	// it from the cost here.
+	for i, col := range columns {
+		if col.ID == model.ExtraCommitTSID {
+			columns = slices.Delete(slices.Clone(columns), i, i+1)
+			break
+		}
 	}
 	rows := getCardinality(p, option.CostFlag)
 	rowSize := getAvgRowSize(p.StatsInfo(), columns)
@@ -600,7 +610,7 @@ func (p *PhysicalMergeJoin) GetPlanCostVer2(taskType property.TaskType, option *
 // GetPlanCostVer2 returns the plan-cost of this sub-plan, which is:
 // plan-cost = build-child-cost + probe-child-cost +
 // build-hash-cost + build-filter-cost +
-// (probe-filter-cost + probe-hash-cost) / concurrency
+// (probe-filter-cost + probe-hash-cost + scan-build-unmatched-cost) / concurrency
 func (p *PhysicalHashJoin) GetPlanCostVer2(taskType property.TaskType, option *optimizetrace.PlanCostOption) (costusage.CostVer2, error) {
 	if p.PlanCostInit && !hasCostFlag(option.CostFlag, costusage.CostFlagRecalculate) {
 		return p.PlanCostVer2, nil
@@ -626,6 +636,13 @@ func (p *PhysicalHashJoin) GetPlanCostVer2(taskType property.TaskType, option *o
 
 	probeFilterCost := filterCostVer2(option, probeRows, probeFilters, cpuFactor)
 	probeHashCost := hashProbeCostVer2(option, probeRows, float64(len(probeKeys)), cpuFactor)
+	scanBuildSideCost := costusage.NewZeroCostVer2(costusage.TraceCost(option))
+	if p.JoinType == logicalop.FullOuterJoin {
+		// Probe tail still needs to scan build-side rows to emit unmatched rows.
+		scanBuildSideCost = costusage.NewCostVer2(option, cpuFactor,
+			buildRows*cpuFactor.Value,
+			func() string { return fmt.Sprintf("scanBuildUnmatched(%v*%v)", buildRows, cpuFactor) })
+	}
 
 	buildChildCost, err := build.GetPlanCostVer2(taskType, option)
 	if err != nil {
@@ -638,13 +655,13 @@ func (p *PhysicalHashJoin) GetPlanCostVer2(taskType property.TaskType, option *o
 
 	if taskType == property.MppTaskType { // BCast or Shuffle Join, use mppConcurrency
 		p.PlanCostVer2 = costusage.SumCostVer2(buildChildCost, probeChildCost,
-			costusage.DivCostVer2(costusage.SumCostVer2(buildHashCost, buildFilterCost, probeHashCost, probeFilterCost), mppConcurrency))
+			costusage.DivCostVer2(costusage.SumCostVer2(buildHashCost, buildFilterCost, probeHashCost, probeFilterCost, scanBuildSideCost), mppConcurrency))
 	} else { // TiDB HashJoin
 		startCost := costusage.NewCostVer2(option, cpuFactor,
 			10*3*cpuFactor.Value, // 10rows * 3func * cpuFactor
 			func() string { return fmt.Sprintf("cpu(10*3*%v)", cpuFactor) })
 		p.PlanCostVer2 = costusage.SumCostVer2(startCost, buildChildCost, probeChildCost, buildHashCost, buildFilterCost,
-			costusage.DivCostVer2(costusage.SumCostVer2(probeFilterCost, probeHashCost), tidbConcurrency))
+			costusage.DivCostVer2(costusage.SumCostVer2(probeFilterCost, probeHashCost, scanBuildSideCost), tidbConcurrency))
 	}
 	p.PlanCostInit = true
 	// Multiply by cost factor - defaults to 1, but can be increased/decreased to influence the cost model
